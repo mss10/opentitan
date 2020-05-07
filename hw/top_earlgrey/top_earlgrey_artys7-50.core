@@ -25,7 +25,8 @@ parameters:
   # XXX: The VMEM file should be added to the sources of the Vivado project to
   # make the Vivado dependency tracking work. However this requires changes to
   # fusesoc first.
-  SRAM_INIT_FILE:
+  #SRAM_INIT_FILE:
+  ROM_INIT_FILE:
     datatype: str
     description: SRAM initialization file in vmem hex format
     default: "../../../../../build-bin/sw/device/boot_rom/boot_rom_fpga_nexysvideo.32.vmem"
@@ -44,7 +45,7 @@ targets:
       - files_constraints
     toplevel: top_earlgrey_artys7
     parameters:
-      - SRAM_INIT_FILE
+      - ROM_INIT_FILE
       - PRIM_DEFAULT_IMPL=prim_pkg::ImplXilinx
     tools:
       vivado:

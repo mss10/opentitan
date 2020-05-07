@@ -54,8 +54,8 @@ module top_earlgrey_artys7 (
   inout               led1_b,
   inout               led1_g
 );
-  assign led0_b = IO_DPS6;
-  assign led0_g = IO_DPS7; // BOOTSTRAP = 1
+  //assign led0_b = IO_DPS6;
+  //assign led0_g = IO_DPS7; // BOOTSTRAP = 1
 
   logic clk_sys, clk_48mhz, rst_sys_n;
   logic [31:0] cio_gpio_p2d, cio_gpio_d2p, cio_gpio_en_d2p;
@@ -88,7 +88,7 @@ module top_earlgrey_artys7 (
   top_earlgrey top_earlgrey (
     .clk_i                      (clk_sys),
     .rst_ni                     (rst_sys_n),
-
+    .clk_fixed_i                (clk_sys),
     .clk_usb_48mhz_i            (clk_48mhz),
 
   /*  .jtag_tck_i                 (IO_JTCK),
