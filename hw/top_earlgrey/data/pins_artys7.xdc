@@ -44,15 +44,14 @@ set_property -dict { PACKAGE_PIN H13   IOSTANDARD LVCMOS33 } [get_ports { IO_GP3
 
 ## PMOD Header JA
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets IO_JTCK_IBUF]
-set_property -dict { PACKAGE_PIN M16   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS0 }]; #IO_L7P_T1_D09_14 Sch=ja_p[3]
-set_property -dict { PACKAGE_PIN M17   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS1 }]; #IO_L7N_T1_D10_14 Sch=ja_n[3]
-set_property -dict { PACKAGE_PIN M18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS4 }]; #IO_L8P_T1_D11_14 Sch=ja_p[4]
-set_property -dict { PACKAGE_PIN N18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS3 }]; #IO_L8N_T1_D12_14 Sch=ja_n[4]
-
-set_property -dict { PACKAGE_PIN L18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS7 }]; #IO_L4N_T0_D05_14 Sch=ja_n[1]
-set_property -dict { PACKAGE_PIN M14   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS5 }]; #IO_L5P_T0_D06_14 Sch=ja_p[2]
-set_property -dict { PACKAGE_PIN N14   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS6 }]; #IO_L5N_T0_D07_14 Sch=ja_n[2]
-set_property -dict { PACKAGE_PIN L17   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS2 }]; #IO_L4P_T0_D04_14 Sch=ja_p[1]
+set_property -dict { PACKAGE_PIN L17   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS0 }]; #IO_L4P_T0_D04_14 Sch=ja_p[1]
+set_property -dict { PACKAGE_PIN L18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS1 }]; #IO_L4N_T0_D05_14 Sch=ja_n[1]
+set_property -dict { PACKAGE_PIN M14   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS2 }]; #IO_L5P_T0_D06_14 Sch=ja_p[2]
+set_property -dict { PACKAGE_PIN N14   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS3 }]; #IO_L5N_T0_D07_14 Sch=ja_n[2]
+set_property -dict { PACKAGE_PIN M16   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS4 }]; #IO_L7P_T1_D09_14 Sch=ja_p[3]
+set_property -dict { PACKAGE_PIN M17   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS5 }]; #IO_L7N_T1_D10_14 Sch=ja_n[3]
+set_property -dict { PACKAGE_PIN M18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS6 }]; #IO_L8P_T1_D11_14 Sch=ja_p[4]
+set_property -dict { PACKAGE_PIN N18   IOSTANDARD LVCMOS33 } [get_ports { IO_DPS7 }]; #IO_L8N_T1_D12_14 Sch=ja_n[4]
 
 ## PMOD Header JB
 set_property -dict { PACKAGE_PIN P17   IOSTANDARD LVCMOS33 DRIVE 8 SLEW FAST } [get_ports { IO_USB_DP0 }]; #IO_L9P_T1_DQS_14 Sch=jb_p[1]
