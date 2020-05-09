@@ -69,12 +69,6 @@ parameters:
     paramtype: vlogdefine
     description: Primitives implementation to use, e.g. "prim_pkg::ImplGeneric".
     default: prim_pkg::ImplGeneric
-  # XXX: This allows us to set the define used for flash configuration
-  # Long term this replication should actually not be necessary:
-  # https://github.com/olofk/fusesoc/issues/401
-  FLASH_PAGES_PER_BANK:
-    datatype: int
-    paramtype: vlogdefine
 
 
 targets:
@@ -85,7 +79,6 @@ targets:
       - files_rtl_generic
     parameters:
       - PRIM_DEFAULT_IMPL=prim_pkg::ImplGeneric
-      - FLASH_PAGES_PER_BANK
     toplevel: top_earlgrey
 
   sim:
@@ -94,7 +87,6 @@ targets:
       - files_rtl_generic
     parameters:
       - PRIM_DEFAULT_IMPL=prim_pkg::ImplGeneric
-      - FLASH_PAGES_PER_BANK
     toplevel: top_earlgrey
 
   lint:
@@ -102,7 +94,6 @@ targets:
     default_tool: verilator
     parameters:
       - SYNTHESIS=true
-      - FLASH_PAGES_PER_BANK
     tools:
       verilator:
         mode: lint-only
@@ -117,7 +108,6 @@ targets:
     default_tool: icarus
     parameters:
       - SYNTHESIS=true
-      - FLASH_PAGES_PER_BANK
     toplevel: top_earlgrey
 
   formal:

@@ -77,22 +77,25 @@ module top_earlgrey_artys7 (
   logic cio_spi_device_sck_p2d, cio_spi_device_csb_p2d, cio_spi_device_mosi_p2d,
         cio_spi_device_miso_d2p, cio_spi_device_miso_en_d2p;
 
-  // JTAG logic
-  logic cio_jtag_tck_p2d, cio_jtag_tms_p2d, cio_jtag_tdi_p2d, cio_jtag_tdo_d2p;
-  logic cio_jtag_trst_n_p2d, cio_jtag_srst_n_p2d;
-
-  // SPI logic
-  logic cio_spi_device_sck_p2d, cio_spi_device_csb_p2d, cio_spi_device_mosi_p2d,
-        cio_spi_device_miso_d2p, cio_spi_device_miso_en_d2p;
+  // Unlike Nexys Video there is no separate JTAG controller, tie off for now
+  /*logic IO_JTCK = 0;
+  logic IO_JTMS = 0;
+  logic IO_JTDI = 0;
+  logic IO_JTRST_N = IO_RST_N;
+  logic IO_JTDO;*/
 
   // Top-level design
   top_earlgrey top_earlgrey (
     .clk_i                      (clk_sys),
-    .clk_fixed_i                (clk_sys),
     .rst_ni                     (rst_sys_n),
     .clk_fixed_i                (clk_sys),
     .clk_usb_48mhz_i            (clk_48mhz),
 
+  /*  .jtag_tck_i                 (IO_JTCK),
+    .jtag_tms_i                 (IO_JTMS),
+    .jtag_trst_ni               (IO_JTRST_N),
+    .jtag_td_i                  (IO_JTDI),
+    .jtag_td_o                  (IO_JTDO),*/
     .jtag_tck_i                 (cio_jtag_tck_p2d),
     .jtag_tms_i                 (cio_jtag_tms_p2d),
     .jtag_trst_ni               (cio_jtag_trst_n_p2d),
@@ -103,12 +106,6 @@ module top_earlgrey_artys7 (
     .dio_uart_tx_o              (cio_uart_tx_d2p),
     .dio_uart_tx_en_o           (cio_uart_tx_en_d2p),
     
-    .dio_spi_device_sck_i       (cio_spi_device_sck_p2d),
-    .dio_spi_device_csb_i       (cio_spi_device_csb_p2d),
-    .dio_spi_device_mosi_i      (cio_spi_device_mosi_p2d),
-    .dio_spi_device_miso_o      (cio_spi_device_miso_d2p),
-    .dio_spi_device_miso_en_o   (cio_spi_device_miso_en_d2p),
-
     .dio_spi_device_sck_i       (cio_spi_device_sck_p2d),
     .dio_spi_device_csb_i       (cio_spi_device_csb_p2d),
     .dio_spi_device_mosi_i      (cio_spi_device_mosi_p2d),
@@ -202,7 +199,7 @@ module top_earlgrey_artys7 (
     .IO_GP13,
     .IO_GP14,
     .IO_GP15,
-
+    
     .cio_spi_device_sck_p2d,
     .cio_spi_device_csb_p2d,
     .cio_spi_device_mosi_p2d,

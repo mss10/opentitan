@@ -14,7 +14,20 @@
 
 static dif_gpio_t gpio;
 
+void trigger_CW_high(dif_gpio_t* gpio_ref);
+void trigger_CW_low(dif_gpio_t* gpio_ref);
+
+char arr[64];
+
+volatile int i_c = 0;
+
 int main(int argc, char **argv) {
+  
+  for (i_c = 0; i_c < 64; i_c++)
+  {
+     arr[i_c] = 0;      
+  }
+  i_c=0;
   uart_init(kUartBaudrate);
   base_set_stdout(uart_stdout);
 
@@ -40,18 +53,67 @@ int main(int argc, char **argv) {
 
   // Now have UART <-> Buttons/LEDs demo
   // all LEDs off
-  dif_gpio_all_write(&gpio, 0x0000);
-  LOG_INFO("Try out the switches on the board");
+  dif_gpio_all_write(&gpio, 0xff00);
+  /*LOG_INFO("Try out the switches on the board");
   LOG_INFO("or type anything into the console window.");
   LOG_INFO("The LEDs show the ASCII code of the last character.");
-
+  usleep(10 * 1000);  // 10 ms*/
   spid_send("SPI!", 4);
 
-  uint32_t gpio_state = 0;
+  //uint32_t gpio_state = 0;
   while (true) {
-    usleep(10 * 1000);  // 10 ms
-    gpio_state = demo_gpio_to_log_echo(&gpio, gpio_state);
-    demo_spi_to_log_echo();
-    demo_uart_to_uart_and_gpio_echo(&gpio);
+    //dif_gpio_all_write(&gpio, 0xff00);
+    usleep(1000 * 1000);  // 1000 ms
+    dif_gpio_all_write(&gpio, 0x0000);
+    trigger_CW_high(&gpio);
+    //gpio_state = demo_gpio_to_log_echo(&gpio, gpio_state);
+    //demo_spi_to_log_echo();
+    //demo_uart_to_uart_and_gpio_echo(&gpio);
+    //usleep(1000 * 1000);  // 1000 ms
+    /*volatile int b = 0xAFFA;
+    for (volatile int i = 0; i < 1000; i++)
+      b *= 11;*/
+    //for(volatile int i = 0; i < 10; i++);
+     
+    usleep(50 * 1000);  // 50 ms
+    //uart_send_str("rCBBD4A2B34F2571758FF6A797E09859D");   
+    trigger_CW_low(&gpio);
+    usleep(200 * 1000);  // 200 ms
+
+    do{
+	 //for (i_c = 0; i_c < 64; i_c++)
+	 //{
+	    uart_rcv_char(&arr[i_c]);
+	    //uart_send_str(arr[i_c]);
+	 //}
+	if(arr[i_c] == 61){ // =
+    		dif_gpio_all_write(&gpio, 0xff00);
+		usleep(2000 * 1000);  // 1000 ms
+        }
+	if(arr[i_c] == 60){ // <
+	    	dif_gpio_all_write(&gpio, 0x4400);
+		usleep(2000 * 1000);  // 1000 ms
+	}
+	if(arr[i_c] == 63){ // ?
+	    	dif_gpio_all_write(&gpio, 0x3300);
+		usleep(2000 * 1000);  // 1000 ms
+	}
+	 i_c++;
+         if(i_c == 64){ i_c = 0;}
+    }while(arr[i_c] != 0x0A);
+    //LOG_INFO("Hello World!");
+    
+    for (i_c = 0; i_c < 64; i_c++)
+    {
+        arr[i_c] = 0;
+    }
+    i_c = 0;
   }
+}
+
+void trigger_CW_high(dif_gpio_t* gpio_ref){
+  dif_gpio_all_write(&gpio, 0x8000);
+}
+void trigger_CW_low(dif_gpio_t* gpio_ref){
+  dif_gpio_all_write(&gpio, 0x0000);
 }

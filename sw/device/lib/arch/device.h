@@ -37,12 +37,6 @@ typedef enum device_type {
    * blessed for OpenTitan development, containing a Xilinx FPGA.
    */
   kDeviceFpgaNexysVideo,
-  /**
-   * Represents the "Arty S7" device, i.e., the small entry-level FPGA board
-   * for OpenTitan development, containing a Xilinx FPGA. Limited support.
-   */
-  kDeviceFpgaArtyS7,
-
 } device_type_t;
 
 /**
@@ -62,10 +56,5 @@ extern const uint64_t kClockFreqHz;
  * The baudrate of the UART peripheral (if such a thing is present).
  */
 extern const uint64_t kUartBaudrate;
-
-/**
- * The number of pages of the embedded flash (per bank)
- */
-extern const uint16_t kFlashPagesPerBank;
 
 #endif  // OPENTITAN_SW_DEVICE_LIB_ARCH_DEVICE_H_
