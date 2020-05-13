@@ -45,14 +45,7 @@ module top_earlgrey_artys7 (
   inout               IO_GP12,
   inout               IO_GP13,
   inout               IO_GP14,
-  inout               IO_GP15,
-  
-  inout               led0_r,      
-  inout               led0_b,
-  inout               led0_g,
-  inout               led1_r,      
-  inout               led1_b,
-  inout               led1_g
+  inout               IO_GP15
 );
   //assign led0_b = IO_DPS6;
   //assign led0_g = IO_DPS7; // BOOTSTRAP = 1
