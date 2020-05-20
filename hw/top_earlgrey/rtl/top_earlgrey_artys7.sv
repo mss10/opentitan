@@ -45,17 +45,11 @@ module top_earlgrey_artys7 (
   inout               IO_GP12,
   inout               IO_GP13,
   inout               IO_GP14,
-  inout               IO_GP15,
-  
-  inout               led0_r,      
-  inout               led0_b,
-  inout               led0_g,
-  inout               led1_r,      
-  inout               led1_b,
-  inout               led1_g
+  inout               IO_GP15
 );
   //assign led0_b = IO_DPS6;
   //assign led0_g = IO_DPS7; // BOOTSTRAP = 1
+  //assign IO_GP14 = IO_RST_N;
 
   logic clk_sys, clk_48mhz, rst_sys_n;
   logic [31:0] cio_gpio_p2d, cio_gpio_d2p, cio_gpio_en_d2p;
@@ -141,7 +135,7 @@ module top_earlgrey_artys7 (
   // Clock and reset
   clkgen_xil7series clkgen (
     .IO_CLK(IO_CLK),
-    .IO_RST_N(IO_RST_N & cio_jtag_srst_n_p2d),
+    .IO_RST_N(IO_RST_N & cio_jtag_srst_n_p2d & IO_GP0),
     .clk_sys(clk_sys),
     .clk_48MHz(clk_48mhz),
     .rst_sys_n(rst_sys_n)
