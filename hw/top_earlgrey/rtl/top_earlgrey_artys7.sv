@@ -4,6 +4,8 @@
 
 module top_earlgrey_artys7 (
   // Clock and Reset
+  output              O_CLK, // 
+  output              O_CLK_div,
   input               IO_CLK,
   input               IO_RST_N,
   // JTAG interface -- not hooked up at the moment
@@ -50,7 +52,8 @@ module top_earlgrey_artys7 (
   //assign led0_b = IO_DPS6;
   //assign led0_g = IO_DPS7; // BOOTSTRAP = 1
   //assign IO_GP14 = IO_RST_N;
-
+  
+   
   logic clk_sys, clk_48mhz, rst_sys_n;
   logic [31:0] cio_gpio_p2d, cio_gpio_d2p, cio_gpio_en_d2p;
   logic cio_uart_rx_p2d, cio_uart_tx_d2p, cio_uart_tx_en_d2p;
@@ -77,6 +80,12 @@ module top_earlgrey_artys7 (
   logic IO_JTDI = 0;
   logic IO_JTRST_N = IO_RST_N;
   logic IO_JTDO;*/
+  
+  //assign clk_sys = IO_CLK_DIV;
+  //assign clk_48MHz = IO_CLK_DIV;
+
+  //assign rst_sys_n = (IO_RST_N & cio_jtag_srst_n_p2d & IO_GP0);
+  //assign O_CLK = clk_sys;
 
   // Top-level design
   top_earlgrey top_earlgrey (
@@ -138,7 +147,9 @@ module top_earlgrey_artys7 (
     .IO_RST_N(IO_RST_N & cio_jtag_srst_n_p2d & IO_GP0),
     .clk_sys(clk_sys),
     .clk_48MHz(clk_48mhz),
-    .rst_sys_n(rst_sys_n)
+    .rst_sys_n(rst_sys_n),
+    .O_CLK(O_CLK),
+    .O_CLK_div(O_CLK_div)
   );
 
   // pad control

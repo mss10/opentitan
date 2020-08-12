@@ -1,12 +1,21 @@
 ## Overview
-`Hello_world` is the demo program used to show case basic functionality of the system.
-The test itself does 2 main things:
-* Echo pin changes over UART.
-* Echo SPI input over UART.
+`Basic password check` is the demo program used to show case basic functionality of a simple power side-channel attack on the Arty S7 FPGA running OpenTitan design.
+The Chipwhisperer is triggered via GPIO of the FPGA and starts to capture power trace. Then the password check routine is executed that has a termination condition. 
+The routine stops when a wrong character is received. This condition leads to timing differences for different inputs.
+This timing differences and the knowledge about the length of the password is used to guess any password stored on the device.
 
-## GPIO Changes Over UART
-This function primarily exercises the GPIO and UART blocks.
-The test monitors changing values on the GPIO line and reports them over UART.
+The program does 4 main things:
+* Trigger the Chipwhisperer
+* Read a password via UART.
+* Reply via UART whether the received password was correct or not.
+* Show access via LEDs
 
-## SPI Echo Over UART
-All data input over SPI is echo'd on UART in a word aligned fashion.
+## Read a password via UART
+First some prints are made to indicate start.
+This function is able to receive a null-terminated ('\0') password via UART.
+
+## Reply via UART
+Give a response whether password was correct or not.
+
+## Show access via LEDs
+LEDs indicate whether password was correct or not.

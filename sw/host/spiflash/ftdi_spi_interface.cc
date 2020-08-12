@@ -30,7 +30,7 @@ namespace {
 constexpr int kHashReadDelayNs = 10000;
 
 // Time before giving up on looking for the correct hash.
-constexpr int kHashReadTimeoutNs = 1000000;
+constexpr int kHashReadTimeoutNs = 100000;
 
 // FTDI Configuration. This can be made configurable later on if needed.
 constexpr int kFrequency = 1000000;  // 1MHz
@@ -60,7 +60,7 @@ void ResetTarget(struct mpsse_context *ctx) {
 
   // Switch from JTAG to SPI mode. The delay is needed to make sure we don't
   // drop any frames.
-  usleep(100000);
+  usleep(200000);
   PinLow(ctx, kGpioJtagSpiN);
 }
 }  // namespace
@@ -89,6 +89,8 @@ FtdiSpiInterface::~FtdiSpiInterface() {
 
 bool FtdiSpiInterface::Init() {
   struct mpsse_context *ctx = MPSSE(SPI0, kFrequency, MSB);
+  std::cout << "GetDescription: " << GetDescription(ctx) << std::endl;
+  std::cout << "ReadPins: " << ReadPins(ctx) << std::endl;
   if (ctx == nullptr) {
     std::cerr << "Unable to open FTDI SPI interface." << std::endl;
     return false;
@@ -142,43 +144,46 @@ bool FtdiSpiInterface::CheckHash(const uint8_t *tx, size_t size) {
 
   auto begin = std::chrono::steady_clock::now();
   auto now = begin;
-  while (!hash_correct &&
-         std::chrono::duration_cast<std::chrono::microseconds>(now - begin)
-                 .count() < kHashReadTimeoutNs) {
-    usleep(kHashReadDelayNs);
-    rx = nullptr;
-    rx = ::Read(spi_->ctx, size);
-    if (!rx) {
-      std::cerr << "Read failed, did not allocate buffer." << std::endl;
-      break;
-    }
+  //for(int i=kHashReadDelayNs; i<40500; i+=1000)
+  //{
+	  while (!hash_correct &&
+		 std::chrono::duration_cast<std::chrono::microseconds>(now - begin)
+		         .count() < kHashReadTimeoutNs) {
+		usleep(kHashReadDelayNs);
+	    rx = nullptr;
+	    rx = ::Read(spi_->ctx, size);
+	    if (!rx) {
+	      std::cerr << "Read failed, did not allocate buffer." << std::endl;
+	      break;
+	    }
 
-    // It appears that the hash is always the first 32 bytes in practice, but in
-    // testing I've seen the hash appear at random locations in the message.
-    // Checking for the hash at any location or even split between messages may
-    // not be necessary, but it is probably safer.
-    for (int i = 0; !hash_correct && i < SHA256_DIGEST_LENGTH; ++i) {
-      if (rx[i] == hash[hash_index]) {
-        ++hash_index;
-        if (hash_index == SHA256_DIGEST_LENGTH) {
-          hash_correct = true;
-        }
-      } else {
-        hash_index = 0;
-      }
-    }
-    free(rx);
-    now = std::chrono::steady_clock::now();
-  }
+	    // It appears that the hash is always the first 32 bytes in practice, but in
+	    // testing I've seen the hash appear at random locations in the message.
+	    // Checking for the hash at any location or even split between messages may
+	    // not be necessary, but it is probably safer.
+	    for (int i = 0; !hash_correct && i < SHA256_DIGEST_LENGTH; ++i) {
+	      if (rx[i] == hash[hash_index]) {
+		++hash_index;
+		if (hash_index == SHA256_DIGEST_LENGTH) {
+		  hash_correct = true;
+		}
+	      } else {
+		hash_index = 0;
+	      }
+	    }
+	    free(rx);
+	    now = std::chrono::steady_clock::now();
+	  }
 
-  if (Stop(spi_->ctx)) {
-    std::cerr << "Unable to terminate spi transaction." << std::endl;
-    return false;
-  }
+	  if (Stop(spi_->ctx)) {
+	    std::cerr << "Unable to terminate spi transaction." << std::endl;
+	    return false;
+	  }
 
-  if (!hash_correct) {
-    std::cerr << "Didn't receive correct hash before timeout." << std::endl;
-  }
+	  if (!hash_correct) {
+	    std::cerr << "Didn't receive correct hash before timeout." << std::endl;
+	  }
+  //}
 
   return hash_correct;
 }

@@ -10,7 +10,7 @@
 
 const device_type_t kDeviceType = kDeviceFpgaArtyS7;
 
-const uint64_t kClockFreqHz = 50 * 1000 * 1000;  // 50MHz
+const uint64_t kClockFreqHz = 20 * 1000 * 1000;  // 50 MHz
 
 const uint64_t kUartBaudrate = 230400;
 

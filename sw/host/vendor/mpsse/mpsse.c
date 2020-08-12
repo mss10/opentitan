@@ -32,8 +32,8 @@
 
 /* List of known FT2232-based devices */
 struct vid_pid supported_devices[] = {
-    {0x0403, 0x6011, "FT4232 Future Technology Devices International, Ltd"},
     {0x0403, 0x6014, "FT232H Future Technology Devices International, Ltd"},
+    {0x0403, 0x6011, "FT4232 Future Technology Devices International, Ltd"},
     {0x0403, 0x6010, "FT2232 Future Technology Devices International, Ltd"},
 
     /* These devices are based on FT2232 chips, but have not been tested. */

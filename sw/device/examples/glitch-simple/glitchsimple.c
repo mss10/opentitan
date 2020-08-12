@@ -37,7 +37,18 @@
 #define BUFLEN      64
 
 
-#define START_CMD   0x07 // \a
+// Glitch function definition
+#define GLITCH1
+
+#define putch my_puts
+#define uart_puts my_puts
+//#define STR_IMPL_(x) #x      //argument to char
+//#define putch(x) my_puts(STR_IMPL_(x))
+#define getch uart_rcv_char
+
+
+
+//#define START_CMD   0x07 // \a
 #define END_CMD     0x0A // \n
 
 static dif_gpio_t gpio;
@@ -47,6 +58,12 @@ void trigger_low(dif_gpio_t*);
 void led_ok(dif_gpio_t*);
 void led_error(dif_gpio_t*);
 void all_off(dif_gpio_t*);
+void led_1(dif_gpio_t *);
+
+void glitch3(void);
+void glitch2(void);
+void glitch1(void);
+void glitch_infinite(void);
 
 void delay_2_ms(){
   usleep(2 * 1000);
@@ -56,7 +73,7 @@ void delay_200_ms(){
   usleep(200 * 1000);
 }
 
-char* itoa(int i, char b[]){
+/*char* itoa(int i, char b[]){
     char const digit[] = "0123456789";
     char* p = b;
     if(i<0){
@@ -74,12 +91,48 @@ char* itoa(int i, char b[]){
         i = i/10;
     }while(i);
     return b;
-}
+}*/
 
 
 volatile int i_c = 0;
 //static size_t usb_chars_recved_total;
 
+//////////////////////////////////////////////////
+char* itoa(int val, int base){
+	
+	static char buf[32] = {0};
+	
+	int i = 30;
+	
+	for(; val && i ; --i, val /= base)
+	
+		buf[i] = "0123456789abcdef"[val % base];
+	
+	return &buf[i+1];
+	
+}
+
+int strtoi(const char *s) {
+  int sum = 0;
+  char ch;
+  char sign = *s;
+  if (*s == '-' || *s == '+') s++;
+  while ((ch = *s++) >= '0' && ch <= '9') {
+    sum = sum * 10 - (ch - '0');
+  }
+  if (sign != '-') {
+    sum = -sum;
+  }
+  return sum;
+}
+//////////////////////////////////////////////////
+
+/*void putch(char c)
+{
+    int my_int = strtoi(&c);
+    char* d_str = itoa(my_int, 10);
+    uart_send_str(d_str);
+}*/
 
 void my_puts(char *c)
 {
@@ -160,95 +213,52 @@ int main(int argc, char **argv) {
   LOG_INFO("The LEDs show the ASCII code of the last character.");
   usleep(10 * 1000);  // 10 ms*/
   //spid_send("SPI!", 4);
-  usleep(500 * 1000);  // 100 ms*/  
+  usleep(50 * 1000);  // 50 ms*/  
+  //char passwd[32] = "";
+  //char correct_passwd[] = "h0px3";
 
-  char passwd[32] = "";
-  char correct_passwd[] = "h0px3";
-
-  clear_buf(passwd);
-
-  //uint32_t gpio_state = 0;*/
-    while(true){
-
-        my_puts("*****Safe-o-matic 3000 Booting...\n");
-        //Print some fancy-sounding stuff so that attackers
-        //will get scared and leave us alone
-        my_puts("Aligning bits........[DONE]\n");
-        delay_2_ms();
-        my_puts("Checking Cesium RNG..[DONE]\n");
-        delay_2_ms();
-        my_puts("Masquerading flash...[DONE]\n");
-        delay_2_ms();
-        my_puts("Decrypting database..[DONE]\n");
-        delay_2_ms();
-        my_puts("\n");
-
-        //Give them one last warning
-        my_puts("WARNING: UNAUTHORIZED ACCESS WILL BE PUNISHED\n");
-
-        trigger_low(&gpio);
-
-        //Get password
-        my_puts("Please enter password to continue: \n");
-        my_read(passwd, 32);
-
-        uint8_t passbad = 0;
-
-        trigger_high(&gpio);
-
-        for(uint8_t i = 0; i < sizeof(correct_passwd); i++){
-            if (correct_passwd[i] != passwd[i]){
-                passbad = 1;
-                break;
-            }
-        }
-
-        if (passbad) {
-            //Stop them fancy timing attacks
-            my_puts("PASSWORD FAIL\n");
-            led_error(&gpio);
-            delay_2_ms();
-            //delay_2_ms();
-        } else {
-            my_puts("Access granted, Welcome!\n");
-            led_ok(&gpio);
-            delay_2_ms();
-            //delay_2_ms();
-	      }
-        //my_puts(passwd);
-        
-        //delay_2_ms();
-        //delay_2_ms();
-        //my_puts("\r\n");
-        //my_puts(passwd);
+  //clear_buf(passwd);
 
         //All done;
         //while(true);
-        for(volatile int j=0; j < 100; j++)
+        /*for(volatile int j=0; j < 1000000; j++)
         {
-       		if(j==99){j=0;}
-        }
-
-        /*while(true){
-            for(volatile int i=0; i < 10; i++);
-            //delay_200_ms();
-            //delay_200_ms();
-            //delay_200_ms();
-            volatile int b = 0xAFFA;
-            for (volatile int i = 0; i < 5; i++){
-                b /= 11;
+          if(j == 999999)
+            {
+              j = 0;
+              all_off(&gpio); 
             }
         }*/
-    
-  }
+
+        
+      uart_puts("*****Safe-o-matic 3000 Booting...\n");
+      /* Uncomment this to get a HELLO message for debug */
+      /*putch("h");
+      putch("e");
+      putch("l");
+      putch("l");
+      putch("o");
+      putch("\n");*/
+
+      while(true){
+          #if defined(GLITCH1)
+              glitch1();
+          #elif defined(GLITCH2)
+              glitch2();
+          #elif defined(GLITCH3)
+              glitch3();
+          #elif defined(GLITCH_INF)
+              glitch_infinite();
+          #endif
+      }
 }
 
 void trigger_high(dif_gpio_t* gpio_ref){
-  uint32_t mask = 0xFFFF;
+  uint32_t mask = 0xFF00;
   dif_gpio_masked_write(gpio_ref, mask, 0x8000);
 }
 void trigger_low(dif_gpio_t* gpio_ref){
-  int32_t mask = 0xFFFF;
+    int32_t mask = 0xFF00;
   dif_gpio_masked_write(gpio_ref, mask, 0x1000);
 }
 
@@ -258,16 +268,156 @@ void led_1(dif_gpio_t* gpio_ref){
 }
 
 void led_ok(dif_gpio_t* gpio_ref){
-  uint32_t mask = 0xFF00;
-  dif_gpio_masked_write(gpio_ref,mask, 0x3300);
+  dif_gpio_all_write(gpio_ref, 0x3300);
 }
 
 void led_error(dif_gpio_t* gpio_ref){
   uint32_t mask = 0xFF00;
   dif_gpio_masked_write(gpio_ref, mask, 0x4300);
+  //dif_gpio_all_write(gpio_ref, 0xff00);
 }
 
 void all_off(dif_gpio_t* gpio_ref){
   dif_gpio_all_write(gpio_ref, 0x0000);
 }
 
+void glitch1(void)
+{
+    led_ok(&gpio);
+    led_error(&gpio);
+    //usleep(2000*1000);
+    led_1(&gpio);
+    //usleep(2000*1000);
+    //Some fake variable
+    volatile uint8_t a = 0;
+    uart_puts("A\n");
+    //uart_puts("1234");
+    //External trigger logic
+    trigger_high(&gpio);
+    usleep(20*1000);
+    trigger_low(&gpio);
+
+    //Should be an infinite loop
+    while(a != 2){
+      ;
+    }
+    //uart_puts("1234");
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+
+    uart_puts("1234");
+
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+    led_error(&gpio);
+
+    //Several loops in order to try and prevent restarting
+    while(1){
+    ;
+    }
+    while(1){
+    ;
+    }
+    while(1){
+    ;
+    }
+    while(1){
+    ;
+    }
+    while(1){
+    ;
+    }
+}
+
+
+void glitch2(void)
+{
+    char c;
+
+    putch("B");
+
+    // c = getch();
+    getch(&c);
+
+    trigger_high(&gpio);
+    trigger_low(&gpio);
+
+    if (c != 'q'){
+        putch("1");
+    } else {
+        putch("2");
+    }
+    putch("\n");
+    putch("\n");
+    putch("\n");
+    putch("\n");
+}
+
+
+void glitch3(void)
+{
+    char inp[16];
+    char c = 'A';
+    unsigned char cnt = 0;
+    uart_puts("Password:");
+
+    while((c != '\n') & (cnt < 16)){
+        //c = getch();
+        getch(&c);
+        inp[cnt] = c;
+        cnt++;
+    }
+
+    char passwd[] = "touch";
+    char passok = 1;
+
+    trigger_high(&gpio);
+    trigger_low(&gpio);
+
+    //Simple test - doesn't check for too-long password!
+    for(cnt = 0; cnt < 5; cnt++){
+        if (inp[cnt] != passwd[cnt]){
+            passok = 0;
+        }
+    }
+
+    if (!passok){
+        uart_puts("Denied\n");
+    } else {
+        uart_puts("Welcome\n");
+    }
+}
+
+void glitch_infinite(void)
+{
+    /*char str[64];
+    unsigned int k = 0;
+    //Declared volatile to avoid optimizing away loop.
+    //This also adds lots of SRAM access
+    volatile uint16_t i, j;
+    volatile uint32_t cnt;
+    while(1){
+        cnt = 0;
+        trigger_high(&gpio);
+        trigger_low(&gpio);
+        for(i=0; i<200; i++){
+            for(j=0; j<200; j++){
+                cnt++;
+            }
+        }
+        sprintf(str, "%lu %d %d %d\n", cnt, i, j, k++);
+        uart_puts(str);
+    }*/
+}

@@ -7,7 +7,9 @@ module clkgen_xil7series (
   input IO_RST_N,
   output clk_sys,
   output clk_48MHz,
-  output rst_sys_n
+  output rst_sys_n,
+  output O_CLK,
+  output O_CLK_div
 );
   logic locked_pll;
   logic io_clk_buf;
@@ -17,27 +19,27 @@ module clkgen_xil7series (
   logic clk_fb_unbuf;
   logic clk_48_buf;
   logic clk_48_unbuf;
-
+  
   // input buffer
   IBUF io_clk_ibuf (
     .I (IO_CLK),
     .O (io_clk_buf)
   );
-
-  PLLE2_ADV #(
+  
+  /*PLLE2_ADV #(
     .BANDWIDTH            ("OPTIMIZED"),
     .COMPENSATION         ("ZHOLD"),
     .STARTUP_WAIT         ("FALSE"),
     .DIVCLK_DIVIDE        (1),
-    .CLKFBOUT_MULT        (12),
+    .CLKFBOUT_MULT        (40),
     .CLKFBOUT_PHASE       (0.000),
-    .CLKOUT0_DIVIDE       (24),
+    .CLKOUT0_DIVIDE       (100),
     .CLKOUT0_PHASE        (0.000),
     .CLKOUT0_DUTY_CYCLE   (0.500),
-    .CLKOUT1_DIVIDE       (25),
+    .CLKOUT1_DIVIDE       (100),
     .CLKOUT1_PHASE        (0.000),
     .CLKOUT1_DUTY_CYCLE   (0.500),
-    .CLKIN1_PERIOD        (10.000)
+    .CLKIN1_PERIOD        (50.000)
   ) pll (
     .CLKFBOUT            (clk_fb_unbuf),
     .CLKOUT0             (clk_50_unbuf),
@@ -81,12 +83,71 @@ module clkgen_xil7series (
     .I (clk_48_unbuf),
     .O (clk_48_buf)
   );
+  
+  
 
   // outputs
   // clock
   assign clk_sys = clk_50_buf; // TODO: choose 50 MHz clock as sysclock for now
   assign clk_48MHz = clk_48_buf;
-
+  
+  // outputs
+  assign O_CLK = clk_sys;
   // reset
-  assign rst_sys_n = locked_pll & IO_RST_N;
+  assign rst_sys_n = locked_pll & IO_RST_N;*/
+  
+  //////////////////////////////////////////////////////////////////////////////////////////
+  //////////////////////////////////////////////////////////////////////////////////////////  
+  logic clk_enable;
+  logic clk_div_unbuf; // clock divider output
+  logic clk_div_buf;
+  logic clk_div2_unbuf;
+  logic clk_div2_buf;
+     
+  always_ff @(posedge io_clk_buf or negedge IO_RST_N) 
+  begin
+      if (!IO_RST_N) 
+          begin
+              clk_div2_unbuf <= 0;
+          end 
+      else 
+          begin
+              clk_div2_unbuf <=~ clk_div2_unbuf;
+          end 
+  end
+  
+ always_ff @(posedge clk_div2_unbuf or negedge IO_RST_N) 
+  begin
+      if (!IO_RST_N) 
+          begin
+              clk_div_unbuf <= 0;
+          end 
+      else 
+          begin
+              clk_div_unbuf <=~ clk_div_unbuf;
+          end
+  end
+  
+  BUFG clk_bufg (
+    .I (clk_div_unbuf),
+    .O (clk_div_buf)
+  );
+  
+  BUFG clk_2_bufg (
+    .I (clk_div2_unbuf),
+    .O (clk_div2_buf)
+  );
+ 
+  
+  assign clk_sys = clk_div2_buf;
+  assign clk_48MHz = clk_div2_buf;
+  
+  // outputs
+  assign O_CLK = clk_sys;
+  assign O_CLK_div = clk_div_buf;
+  // reset
+  assign rst_sys_n = IO_RST_N;
+  
+  
+  
 endmodule
