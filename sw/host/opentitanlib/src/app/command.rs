@@ -1,10 +1,9 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::app::TransportWrapper;
 use anyhow::Result;
-use erased_serde::Serialize;
 pub use opentitantool_derive::*;
 use std::any::Any;
 
@@ -21,5 +20,5 @@ pub trait CommandDispatch {
         &self,
         context: &dyn Any,
         transport: &TransportWrapper,
-    ) -> Result<Option<Box<dyn Serialize>>>;
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>>;
 }

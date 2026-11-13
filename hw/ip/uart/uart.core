@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:uart:0.1"
@@ -7,9 +7,10 @@ description: "uart"
 filesets:
   files_rtl:
     depend:
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
       - lowrisc:prim:all
       - lowrisc:ip:tlul
+      - lowrisc:virtual_constants:top_racl_pkg
     files:
       - rtl/uart_reg_pkg.sv
       - rtl/uart_reg_top.sv
@@ -43,6 +44,12 @@ filesets:
       - lowrisc:lint:common
       - lowrisc:lint:comportable
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
+
 parameters:
   SYNTHESIS:
     datatype: bool
@@ -55,6 +62,7 @@ targets:
       - tool_verilator   ? (files_verilator_waiver)
       - tool_ascentlint  ? (files_ascentlint_waiver)
       - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_slang       ? (files_slang_waiver)
       - files_rtl
     toplevel: uart
 
@@ -68,5 +76,3 @@ targets:
         mode: lint-only
         verilator_options:
           - "-Wall"
-
-

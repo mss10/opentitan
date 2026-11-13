@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -23,6 +23,10 @@ module prim_esc_rxtx_tb
   output logic esc_req_o
 );
 
+  // This gets passed to the prim_esc_receiver that we instantiate below. Doing so reduces the state
+  // space for the counter from 2**24 to 2**6, speeding up convergence.
+  localparam int TimeoutCntDw = 6;
+
   esc_rx_t esc_rx_in, esc_rx_out;
   esc_tx_t esc_tx_in, esc_tx_out;
 
@@ -31,7 +35,9 @@ module prim_esc_rxtx_tb
   assign esc_tx_in.esc_p  = esc_tx_out.esc_p  ^ esc_err_pi;
   assign esc_tx_in.esc_n  = esc_tx_out.esc_n  ^ esc_err_ni;
 
-  prim_esc_sender u_prim_esc_sender (
+  prim_esc_sender #(
+    .SkewCycles(1)
+  ) u_prim_esc_sender (
     .clk_i        ,
     .rst_ni       ,
     .ping_req_i   ,
@@ -43,9 +49,8 @@ module prim_esc_rxtx_tb
   );
 
   prim_esc_receiver #(
-    // This reduces the state space for this counter
-    // from 2**24 to 2**6 to speed up convergence.
-    .TimeoutCntDw(6)
+    .TimeoutCntDw(TimeoutCntDw),
+    .SkewCycles(1)
   ) u_prim_esc_receiver (
     .clk_i    ,
     .rst_ni   ,

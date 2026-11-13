@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -56,6 +56,7 @@
  * packed into each hardware configuration register (`pmpcfgN`).
  */
 #define EPMP_CFG_L (1 << 7)
+#define EPMP_CFG_A_MASK (3 << 3)
 #define EPMP_CFG_A_OFF (0 << 3)
 #define EPMP_CFG_A_TOR (1 << 3)
 #define EPMP_CFG_A_NA4 (2 << 3)
@@ -70,5 +71,6 @@
 #define EPMP_CFG_LR (EPMP_CFG_L | EPMP_CFG_R)
 #define EPMP_CFG_LRX (EPMP_CFG_L | EPMP_CFG_R | EPMP_CFG_X)
 #define EPMP_CFG_LRW (EPMP_CFG_L | EPMP_CFG_R | EPMP_CFG_W)
+#define EPMP_CFG_LRWX (EPMP_CFG_L | EPMP_CFG_R | EPMP_CFG_W | EPMP_CFG_X)
 
 #endif  // OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_EPMP_DEFS_H_

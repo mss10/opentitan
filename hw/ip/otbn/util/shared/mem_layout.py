@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -20,10 +20,16 @@ block).
 
 from typing import Dict, Optional, Tuple
 
-from .otbn_reggen import load_registers, RegBlock
+from reggen.reg_block import RegBlock
+
+from .otbn_reggen import load_registers
 
 # A window is represented as (offset, size)
 _Window = Tuple[int, int]
+
+# This needs to be kept in sync with the parameter of the same name in
+# otbn_pkg.sv
+_DmemScratchSizeBytes = 16384
 
 
 def extract_windows(reg_byte_width: int, regs: object) -> Dict[str, _Window]:
@@ -43,10 +49,28 @@ def extract_windows(reg_byte_width: int, regs: object) -> Dict[str, _Window]:
     return windows
 
 
-_LAYOUT = None  # type: Optional[Dict[str, Tuple[int, int]]]
+class OtbnMemoryLayout:
+    def __init__(self, windows: Dict[str, _Window]):
+        imem_window = windows.get('IMEM')
+        if imem_window is None:
+            raise RuntimeError('otbn.hjson has no IMEM window')
+
+        dmem_window = windows.get('DMEM')
+        if dmem_window is None:
+            raise RuntimeError('otbn.hjson has no DMEM window')
+
+        self.imem_address = imem_window[0]
+        self.imem_size_bytes = imem_window[1]
+
+        self.dmem_address = dmem_window[0]
+        self.dmem_bus_size_bytes = dmem_window[1]
+        self.dmem_size_bytes = dmem_window[1] + _DmemScratchSizeBytes
 
 
-def get_memory_layout() -> Dict[str, Tuple[int, int]]:
+_LAYOUT: Optional[OtbnMemoryLayout] = None
+
+
+def get_memory_layout() -> OtbnMemoryLayout:
     '''Read otbn.hjson to get IMEM / DMEM layout
 
     Returns a dictionary with two entries, keyed 'IMEM' and 'DMEM'. The value
@@ -60,19 +84,5 @@ def get_memory_layout() -> Dict[str, Tuple[int, int]]:
     reg_byte_width, registers = load_registers()
     windows = extract_windows(reg_byte_width, registers)
 
-    xmem_names = {'IMEM', 'DMEM'}
-    for name in xmem_names:
-        if name not in windows:
-            raise RuntimeError("otbn.hjson doesn't have a window called {}."
-                               .format(name))
-    if len(windows) != 2:
-        raise RuntimeError("Unexpected windows in otbn.hjson: {}"
-                           .format(list(set(windows.keys()) - xmem_names)))
-
-    _LAYOUT = windows
+    _LAYOUT = OtbnMemoryLayout(windows)
     return _LAYOUT
-
-
-if __name__ == '__main__':
-    for name, (off, width) in get_memory_layout().items():
-        print('{}: {} bytes; LMA {:#x}'.format(name, width, off))

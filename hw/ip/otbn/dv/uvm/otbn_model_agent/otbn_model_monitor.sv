@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -19,10 +19,9 @@ class otbn_model_monitor extends dv_base_monitor #(
 
   `uvm_component_new
 
-  protected task collect_trans(uvm_phase phase);
+  protected task collect_trans();
     fork
       collect_status();
-      // TODO: Only run when coverage is enabled.
       collect_insns();
     join
   endtask
@@ -31,22 +30,26 @@ class otbn_model_monitor extends dv_base_monitor #(
     otbn_model_item trans;
 
     forever begin
+      trans = otbn_model_item::type_id::create("trans");
+
       // Wait until vif signals a change in status (or we are in reset)
       cfg.vif.wait_status();
 
-      if (cfg.vif.rst_ni === 1'b1) begin
-        // We aren't in reset, so we've just seen the done signal go high.
-        trans = otbn_model_item::type_id::create("trans");
-        trans.item_type = OtbnModelStatus;
-        trans.status    = cfg.vif.status;
-        trans.err       = cfg.vif.err;
-        trans.mnemonic  = "";
-        analysis_port.write(trans);
-      end else begin
+      // Store value of reset before we wait for it to be released (if it is not already).
+      trans.rst_n = cfg.vif.rst_ni;
+
+      if (cfg.vif.rst_ni !== 1'b1) begin
         // We are in reset. Wait until we aren't (we need to do this because wait_status() returns
         // immediately in reset)
         wait(cfg.vif.rst_ni);
       end
+
+      trans.item_type = OtbnModelStatus;
+      trans.status    = cfg.vif.status;
+      trans.err       = cfg.vif.err;
+      trans.err_bits  = cfg.vif.err_bits;
+      trans.mnemonic  = "";
+      analysis_port.write(trans);
     end
   endtask
 

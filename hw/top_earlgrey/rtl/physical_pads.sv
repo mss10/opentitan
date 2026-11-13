@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -15,6 +15,6 @@ module physical_pads
   output pad_pok_t [NIoBanks-1:0] pad_pok_o
 );
 
-  assign pad_pok_o = '0;
+  assign pad_pok_o = '1;
 
 endmodule : physical_pads

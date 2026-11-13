@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -16,15 +16,12 @@ module sensor_ctrl_reg_top (
   input  sensor_ctrl_reg_pkg::sensor_ctrl_hw2reg_t hw2reg, // Read
 
   // Integrity check errors
-  output logic intg_err_o,
-
-  // Config
-  input devmode_i // If 1, explicit error return for unmapped register access
+  output logic intg_err_o
 );
 
   import sensor_ctrl_reg_pkg::* ;
 
-  localparam int AW = 5;
+  localparam int AW = 7;
   localparam int DW = 32;
   localparam int DBW = DW/8;                    // Byte Width
 
@@ -53,18 +50,31 @@ module sensor_ctrl_reg_top (
     .err_o(intg_err)
   );
 
-  logic intg_err_q;
+  // also check for spurious write enables
+  logic reg_we_err;
+  logic [28:0] reg_we_check;
+  prim_reg_we_check #(
+    .OneHotWidth(29)
+  ) u_prim_reg_we_check (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .oh_i  (reg_we_check),
+    .en_i  (reg_we && !addrmiss),
+    .err_o (reg_we_err)
+  );
+
+  logic err_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      intg_err_q <= '0;
-    end else if (intg_err) begin
-      intg_err_q <= 1'b1;
+      err_q <= '0;
+    end else if (intg_err || reg_we_err) begin
+      err_q <= 1'b1;
     end
   end
 
   // integrity error output is permanent and should be used for alert generation
   // register errors are transactional
-  assign intg_err_o = intg_err_q | intg_err;
+  assign intg_err_o = err_q | intg_err | reg_we_err;
 
   // outgoing integrity generation
   tlul_pkg::tl_d2h_t tl_o_pre;
@@ -90,6 +100,9 @@ module sensor_ctrl_reg_top (
     .tl_i (tl_reg_h2d),
     .tl_o (tl_reg_d2h),
 
+    .en_ifetch_i(prim_mubi_pkg::MuBi4False),
+    .intg_error_o(),
+
     .we_o    (reg_we),
     .re_o    (reg_re),
     .addr_o  (reg_addr),
@@ -103,14 +116,29 @@ module sensor_ctrl_reg_top (
   // cdc oversampling signals
 
   assign reg_rdata = reg_rdata_next ;
-  assign reg_error = (devmode_i & addrmiss) | wr_err | intg_err;
+  assign reg_error = addrmiss | wr_err | intg_err;
 
   // Define SW related signals
   // Format: <reg>_<field>_{wd|we|qs}
   //        or <reg>_{wd|we|qs} if field == 1 or 0
+  logic intr_state_we;
+  logic intr_state_io_status_change_qs;
+  logic intr_state_io_status_change_wd;
+  logic intr_state_init_status_change_qs;
+  logic intr_state_init_status_change_wd;
+  logic intr_enable_we;
+  logic intr_enable_io_status_change_qs;
+  logic intr_enable_io_status_change_wd;
+  logic intr_enable_init_status_change_qs;
+  logic intr_enable_init_status_change_wd;
+  logic intr_test_we;
+  logic intr_test_io_status_change_wd;
+  logic intr_test_init_status_change_wd;
   logic alert_test_we;
   logic alert_test_recov_alert_wd;
   logic alert_test_fatal_alert_wd;
+  logic alert_test_regwen_qs;
+  logic alert_test_regwen_wd;
   logic cfg_regwen_we;
   logic cfg_regwen_qs;
   logic cfg_regwen_wd;
@@ -137,10 +165,39 @@ module sensor_ctrl_reg_top (
   logic alert_trig_val_9_wd;
   logic alert_trig_val_10_qs;
   logic alert_trig_val_10_wd;
-  logic alert_trig_val_11_qs;
-  logic alert_trig_val_11_wd;
-  logic alert_trig_val_12_qs;
-  logic alert_trig_val_12_wd;
+  logic alert_en_0_we;
+  logic [3:0] alert_en_0_qs;
+  logic [3:0] alert_en_0_wd;
+  logic alert_en_1_we;
+  logic [3:0] alert_en_1_qs;
+  logic [3:0] alert_en_1_wd;
+  logic alert_en_2_we;
+  logic [3:0] alert_en_2_qs;
+  logic [3:0] alert_en_2_wd;
+  logic alert_en_3_we;
+  logic [3:0] alert_en_3_qs;
+  logic [3:0] alert_en_3_wd;
+  logic alert_en_4_we;
+  logic [3:0] alert_en_4_qs;
+  logic [3:0] alert_en_4_wd;
+  logic alert_en_5_we;
+  logic [3:0] alert_en_5_qs;
+  logic [3:0] alert_en_5_wd;
+  logic alert_en_6_we;
+  logic [3:0] alert_en_6_qs;
+  logic [3:0] alert_en_6_wd;
+  logic alert_en_7_we;
+  logic [3:0] alert_en_7_qs;
+  logic [3:0] alert_en_7_wd;
+  logic alert_en_8_we;
+  logic [3:0] alert_en_8_qs;
+  logic [3:0] alert_en_8_wd;
+  logic alert_en_9_we;
+  logic [3:0] alert_en_9_qs;
+  logic [3:0] alert_en_9_wd;
+  logic alert_en_10_we;
+  logic [3:0] alert_en_10_qs;
+  logic [3:0] alert_en_10_wd;
   logic fatal_alert_en_we;
   logic fatal_alert_en_val_0_qs;
   logic fatal_alert_en_val_0_wd;
@@ -164,10 +221,6 @@ module sensor_ctrl_reg_top (
   logic fatal_alert_en_val_9_wd;
   logic fatal_alert_en_val_10_qs;
   logic fatal_alert_en_val_10_wd;
-  logic fatal_alert_en_val_11_qs;
-  logic fatal_alert_en_val_11_wd;
-  logic fatal_alert_en_val_12_qs;
-  logic fatal_alert_en_val_12_wd;
   logic recov_alert_we;
   logic recov_alert_val_0_qs;
   logic recov_alert_val_0_wd;
@@ -191,10 +244,6 @@ module sensor_ctrl_reg_top (
   logic recov_alert_val_9_wd;
   logic recov_alert_val_10_qs;
   logic recov_alert_val_10_wd;
-  logic recov_alert_val_11_qs;
-  logic recov_alert_val_11_wd;
-  logic recov_alert_val_12_qs;
-  logic recov_alert_val_12_wd;
   logic fatal_alert_val_0_qs;
   logic fatal_alert_val_1_qs;
   logic fatal_alert_val_2_qs;
@@ -207,39 +256,272 @@ module sensor_ctrl_reg_top (
   logic fatal_alert_val_9_qs;
   logic fatal_alert_val_10_qs;
   logic fatal_alert_val_11_qs;
-  logic fatal_alert_val_12_qs;
-  logic fatal_alert_val_13_qs;
   logic status_ast_init_done_qs;
   logic [1:0] status_io_pok_qs;
+  logic manual_pad_attr_regwen_0_we;
+  logic manual_pad_attr_regwen_0_qs;
+  logic manual_pad_attr_regwen_0_wd;
+  logic manual_pad_attr_regwen_1_we;
+  logic manual_pad_attr_regwen_1_qs;
+  logic manual_pad_attr_regwen_1_wd;
+  logic manual_pad_attr_regwen_2_we;
+  logic manual_pad_attr_regwen_2_qs;
+  logic manual_pad_attr_regwen_2_wd;
+  logic manual_pad_attr_regwen_3_we;
+  logic manual_pad_attr_regwen_3_qs;
+  logic manual_pad_attr_regwen_3_wd;
+  logic manual_pad_attr_0_re;
+  logic manual_pad_attr_0_we;
+  logic manual_pad_attr_0_pull_en_0_qs;
+  logic manual_pad_attr_0_pull_en_0_wd;
+  logic manual_pad_attr_0_pull_select_0_qs;
+  logic manual_pad_attr_0_pull_select_0_wd;
+  logic manual_pad_attr_0_input_disable_0_qs;
+  logic manual_pad_attr_0_input_disable_0_wd;
+  logic manual_pad_attr_1_re;
+  logic manual_pad_attr_1_we;
+  logic manual_pad_attr_1_pull_en_1_qs;
+  logic manual_pad_attr_1_pull_en_1_wd;
+  logic manual_pad_attr_1_pull_select_1_qs;
+  logic manual_pad_attr_1_pull_select_1_wd;
+  logic manual_pad_attr_1_input_disable_1_qs;
+  logic manual_pad_attr_1_input_disable_1_wd;
+  logic manual_pad_attr_2_re;
+  logic manual_pad_attr_2_we;
+  logic manual_pad_attr_2_pull_en_2_qs;
+  logic manual_pad_attr_2_pull_en_2_wd;
+  logic manual_pad_attr_2_pull_select_2_qs;
+  logic manual_pad_attr_2_pull_select_2_wd;
+  logic manual_pad_attr_2_input_disable_2_qs;
+  logic manual_pad_attr_2_input_disable_2_wd;
+  logic manual_pad_attr_3_re;
+  logic manual_pad_attr_3_we;
+  logic manual_pad_attr_3_pull_en_3_qs;
+  logic manual_pad_attr_3_pull_en_3_wd;
+  logic manual_pad_attr_3_pull_select_3_qs;
+  logic manual_pad_attr_3_pull_select_3_wd;
+  logic manual_pad_attr_3_input_disable_3_qs;
+  logic manual_pad_attr_3_input_disable_3_wd;
 
   // Register instances
+  // R[intr_state]: V(False)
+  //   F[io_status_change]: 0:0
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW1C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_intr_state_io_status_change (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (intr_state_we),
+    .wd     (intr_state_io_status_change_wd),
+
+    // from internal hardware
+    .de     (hw2reg.intr_state.io_status_change.de),
+    .d      (hw2reg.intr_state.io_status_change.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.intr_state.io_status_change.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (intr_state_io_status_change_qs)
+  );
+
+  //   F[init_status_change]: 1:1
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW1C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_intr_state_init_status_change (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (intr_state_we),
+    .wd     (intr_state_init_status_change_wd),
+
+    // from internal hardware
+    .de     (hw2reg.intr_state.init_status_change.de),
+    .d      (hw2reg.intr_state.init_status_change.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.intr_state.init_status_change.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (intr_state_init_status_change_qs)
+  );
+
+
+  // R[intr_enable]: V(False)
+  //   F[io_status_change]: 0:0
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_intr_enable_io_status_change (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (intr_enable_we),
+    .wd     (intr_enable_io_status_change_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.intr_enable.io_status_change.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (intr_enable_io_status_change_qs)
+  );
+
+  //   F[init_status_change]: 1:1
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_intr_enable_init_status_change (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (intr_enable_we),
+    .wd     (intr_enable_init_status_change_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.intr_enable.init_status_change.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (intr_enable_init_status_change_qs)
+  );
+
+
+  // R[intr_test]: V(True)
+  logic intr_test_qe;
+  logic [1:0] intr_test_flds_we;
+  assign intr_test_qe = &intr_test_flds_we;
+  //   F[io_status_change]: 0:0
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_intr_test_io_status_change (
+    .re     (1'b0),
+    .we     (intr_test_we),
+    .wd     (intr_test_io_status_change_wd),
+    .d      ('0),
+    .qre    (),
+    .qe     (intr_test_flds_we[0]),
+    .q      (reg2hw.intr_test.io_status_change.q),
+    .ds     (),
+    .qs     ()
+  );
+  assign reg2hw.intr_test.io_status_change.qe = intr_test_qe;
+
+  //   F[init_status_change]: 1:1
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_intr_test_init_status_change (
+    .re     (1'b0),
+    .we     (intr_test_we),
+    .wd     (intr_test_init_status_change_wd),
+    .d      ('0),
+    .qre    (),
+    .qe     (intr_test_flds_we[1]),
+    .q      (reg2hw.intr_test.init_status_change.q),
+    .ds     (),
+    .qs     ()
+  );
+  assign reg2hw.intr_test.init_status_change.qe = intr_test_qe;
+
+
   // R[alert_test]: V(True)
+  logic alert_test_qe;
+  logic [2:0] alert_test_flds_we;
+  assign alert_test_qe = &alert_test_flds_we;
+  // Create REGWEN-gated WE signal
+  logic alert_test_gated_we;
+  assign alert_test_gated_we = alert_test_we && alert_test_regwen_qs;
   //   F[recov_alert]: 0:0
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_recov_alert (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_recov_alert_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.recov_alert.qe),
+    .qe     (alert_test_flds_we[0]),
     .q      (reg2hw.alert_test.recov_alert.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.alert_test.recov_alert.qe = alert_test_qe;
 
   //   F[fatal_alert]: 1:1
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_fatal_alert (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_fatal_alert_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.fatal_alert.qe),
+    .qe     (alert_test_flds_we[1]),
     .q      (reg2hw.alert_test.fatal_alert.q),
+    .ds     (),
     .qs     ()
+  );
+  assign reg2hw.alert_test.fatal_alert.qe = alert_test_qe;
+
+  //   F[regwen]: 31:31
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_alert_test_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_test_we),
+    .wd     (alert_test_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (alert_test_flds_we[2]),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_test_regwen_qs)
   );
 
 
@@ -247,10 +529,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (1'h1)
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
   ) u_cfg_regwen (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (cfg_regwen_we),
@@ -263,6 +547,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (cfg_regwen_qs)
@@ -275,10 +560,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -291,6 +578,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_0_qs)
@@ -300,10 +588,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -316,6 +606,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_1_qs)
@@ -325,10 +616,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -341,6 +634,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_2_qs)
@@ -350,10 +644,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -366,6 +662,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_3_qs)
@@ -375,10 +672,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -391,6 +690,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_4_qs)
@@ -400,10 +700,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -416,6 +718,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_5_qs)
@@ -425,10 +728,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -441,6 +746,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_6_qs)
@@ -450,10 +756,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -466,6 +774,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_7_qs)
@@ -475,10 +784,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_8 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -491,6 +802,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[8].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_8_qs)
@@ -500,10 +812,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_9 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -516,6 +830,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[9].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_9_qs)
@@ -525,10 +840,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_alert_trig_val_10 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (alert_trig_we),
@@ -541,23 +858,31 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.alert_trig[10].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (alert_trig_val_10_qs)
   );
 
-  //   F[val_11]: 11:11
+
+  // Subregister 0 of Multireg alert_en
+  // R[alert_en_0]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_0_gated_we;
+  assign alert_en_0_gated_we = alert_en_0_we & cfg_regwen_qs;
   prim_subreg #(
-    .DW      (1),
+    .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
-  ) u_alert_trig_val_11 (
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (alert_trig_we),
-    .wd     (alert_trig_val_11_wd),
+    .we     (alert_en_0_gated_we),
+    .wd     (alert_en_0_wd),
 
     // from internal hardware
     .de     (1'b0),
@@ -565,24 +890,32 @@ module sensor_ctrl_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (reg2hw.alert_trig[11].q),
+    .q      (reg2hw.alert_en[0].q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     (alert_trig_val_11_qs)
+    .qs     (alert_en_0_qs)
   );
 
-  //   F[val_12]: 12:12
+
+  // Subregister 1 of Multireg alert_en
+  // R[alert_en_1]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_1_gated_we;
+  assign alert_en_1_gated_we = alert_en_1_we & cfg_regwen_qs;
   prim_subreg #(
-    .DW      (1),
+    .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
-  ) u_alert_trig_val_12 (
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (alert_trig_we),
-    .wd     (alert_trig_val_12_wd),
+    .we     (alert_en_1_gated_we),
+    .wd     (alert_en_1_wd),
 
     // from internal hardware
     .de     (1'b0),
@@ -590,26 +923,329 @@ module sensor_ctrl_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (reg2hw.alert_trig[12].q),
+    .q      (reg2hw.alert_en[1].q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     (alert_trig_val_12_qs)
+    .qs     (alert_en_1_qs)
+  );
+
+
+  // Subregister 2 of Multireg alert_en
+  // R[alert_en_2]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_2_gated_we;
+  assign alert_en_2_gated_we = alert_en_2_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_2 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_2_gated_we),
+    .wd     (alert_en_2_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[2].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_2_qs)
+  );
+
+
+  // Subregister 3 of Multireg alert_en
+  // R[alert_en_3]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_3_gated_we;
+  assign alert_en_3_gated_we = alert_en_3_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_3 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_3_gated_we),
+    .wd     (alert_en_3_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[3].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_3_qs)
+  );
+
+
+  // Subregister 4 of Multireg alert_en
+  // R[alert_en_4]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_4_gated_we;
+  assign alert_en_4_gated_we = alert_en_4_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_4 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_4_gated_we),
+    .wd     (alert_en_4_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[4].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_4_qs)
+  );
+
+
+  // Subregister 5 of Multireg alert_en
+  // R[alert_en_5]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_5_gated_we;
+  assign alert_en_5_gated_we = alert_en_5_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_5 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_5_gated_we),
+    .wd     (alert_en_5_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[5].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_5_qs)
+  );
+
+
+  // Subregister 6 of Multireg alert_en
+  // R[alert_en_6]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_6_gated_we;
+  assign alert_en_6_gated_we = alert_en_6_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_6 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_6_gated_we),
+    .wd     (alert_en_6_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[6].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_6_qs)
+  );
+
+
+  // Subregister 7 of Multireg alert_en
+  // R[alert_en_7]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_7_gated_we;
+  assign alert_en_7_gated_we = alert_en_7_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_7 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_7_gated_we),
+    .wd     (alert_en_7_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[7].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_7_qs)
+  );
+
+
+  // Subregister 8 of Multireg alert_en
+  // R[alert_en_8]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_8_gated_we;
+  assign alert_en_8_gated_we = alert_en_8_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_8 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_8_gated_we),
+    .wd     (alert_en_8_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[8].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_8_qs)
+  );
+
+
+  // Subregister 9 of Multireg alert_en
+  // R[alert_en_9]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_9_gated_we;
+  assign alert_en_9_gated_we = alert_en_9_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_9 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_9_gated_we),
+    .wd     (alert_en_9_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[9].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_9_qs)
+  );
+
+
+  // Subregister 10 of Multireg alert_en
+  // R[alert_en_10]: V(False)
+  // Create REGWEN-gated WE signal
+  logic alert_en_10_gated_we;
+  assign alert_en_10_gated_we = alert_en_10_we & cfg_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h6),
+    .Mubi    (1'b1)
+  ) u_alert_en_10 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_en_10_gated_we),
+    .wd     (alert_en_10_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.alert_en[10].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_en_10_qs)
   );
 
 
   // Subregister 0 of Multireg fatal_alert_en
   // R[fatal_alert_en]: V(False)
+  // Create REGWEN-gated WE signal
+  logic fatal_alert_en_gated_we;
+  assign fatal_alert_en_gated_we = fatal_alert_en_we & cfg_regwen_qs;
   //   F[val_0]: 0:0
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_0_wd),
 
     // from internal hardware
@@ -619,6 +1255,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_0_qs)
@@ -628,13 +1265,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_1_wd),
 
     // from internal hardware
@@ -644,6 +1283,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_1_qs)
@@ -653,13 +1293,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_2_wd),
 
     // from internal hardware
@@ -669,6 +1311,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_2_qs)
@@ -678,13 +1321,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_3_wd),
 
     // from internal hardware
@@ -694,6 +1339,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_3_qs)
@@ -703,13 +1349,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_4_wd),
 
     // from internal hardware
@@ -719,6 +1367,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_4_qs)
@@ -728,13 +1377,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_5_wd),
 
     // from internal hardware
@@ -744,6 +1395,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_5_qs)
@@ -753,13 +1405,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_6_wd),
 
     // from internal hardware
@@ -769,6 +1423,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_6_qs)
@@ -778,13 +1433,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_7_wd),
 
     // from internal hardware
@@ -794,6 +1451,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_7_qs)
@@ -803,13 +1461,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_8 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_8_wd),
 
     // from internal hardware
@@ -819,6 +1479,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[8].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_8_qs)
@@ -828,13 +1489,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_9 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_9_wd),
 
     // from internal hardware
@@ -844,6 +1507,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[9].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_9_qs)
@@ -853,13 +1517,15 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_en_val_10 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
+    .we     (fatal_alert_en_gated_we),
     .wd     (fatal_alert_en_val_10_wd),
 
     // from internal hardware
@@ -869,59 +1535,10 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert_en[10].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_en_val_10_qs)
-  );
-
-  //   F[val_11]: 11:11
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
-  ) u_fatal_alert_en_val_11 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
-    .wd     (fatal_alert_en_val_11_wd),
-
-    // from internal hardware
-    .de     (1'b0),
-    .d      ('0),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.fatal_alert_en[11].q),
-
-    // to register interface (read)
-    .qs     (fatal_alert_en_val_11_qs)
-  );
-
-  //   F[val_12]: 12:12
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
-  ) u_fatal_alert_en_val_12 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (fatal_alert_en_we & cfg_regwen_qs),
-    .wd     (fatal_alert_en_val_12_wd),
-
-    // from internal hardware
-    .de     (1'b0),
-    .d      ('0),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.fatal_alert_en[12].q),
-
-    // to register interface (read)
-    .qs     (fatal_alert_en_val_12_qs)
   );
 
 
@@ -931,10 +1548,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -947,6 +1566,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_0_qs)
@@ -956,10 +1576,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -972,6 +1594,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_1_qs)
@@ -981,10 +1604,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -997,6 +1622,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_2_qs)
@@ -1006,10 +1632,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1022,6 +1650,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_3_qs)
@@ -1031,10 +1660,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1047,6 +1678,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_4_qs)
@@ -1056,10 +1688,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1072,6 +1706,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_5_qs)
@@ -1081,10 +1716,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1097,6 +1734,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_6_qs)
@@ -1106,10 +1744,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1122,6 +1762,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_7_qs)
@@ -1131,10 +1772,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_8 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1147,6 +1790,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[8].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_8_qs)
@@ -1156,10 +1800,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_9 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1172,6 +1818,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[9].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_9_qs)
@@ -1181,10 +1828,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_val_10 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_we),
@@ -1197,59 +1846,10 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.recov_alert[10].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_val_10_qs)
-  );
-
-  //   F[val_11]: 11:11
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
-  ) u_recov_alert_val_11 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (recov_alert_we),
-    .wd     (recov_alert_val_11_wd),
-
-    // from internal hardware
-    .de     (hw2reg.recov_alert[11].de),
-    .d      (hw2reg.recov_alert[11].d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.recov_alert[11].q),
-
-    // to register interface (read)
-    .qs     (recov_alert_val_11_qs)
-  );
-
-  //   F[val_12]: 12:12
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
-  ) u_recov_alert_val_12 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (recov_alert_we),
-    .wd     (recov_alert_val_12_wd),
-
-    // from internal hardware
-    .de     (hw2reg.recov_alert[12].de),
-    .d      (hw2reg.recov_alert[12].d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.recov_alert[12].q),
-
-    // to register interface (read)
-    .qs     (recov_alert_val_12_qs)
   );
 
 
@@ -1259,10 +1859,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1275,6 +1877,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_0_qs)
@@ -1284,10 +1887,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1300,6 +1905,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_1_qs)
@@ -1309,10 +1915,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1325,6 +1933,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_2_qs)
@@ -1334,10 +1943,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1350,6 +1961,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_3_qs)
@@ -1359,10 +1971,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1375,6 +1989,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_4_qs)
@@ -1384,10 +1999,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1400,6 +2017,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_5_qs)
@@ -1409,10 +2027,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1425,6 +2045,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_6_qs)
@@ -1434,10 +2055,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1450,6 +2073,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_7_qs)
@@ -1459,10 +2083,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_8 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1475,6 +2101,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[8].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_8_qs)
@@ -1484,10 +2111,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_9 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1500,6 +2129,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[9].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_9_qs)
@@ -1509,10 +2139,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_10 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1525,6 +2157,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[10].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_10_qs)
@@ -1534,10 +2167,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_val_11 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1550,59 +2185,10 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.fatal_alert[11].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_val_11_qs)
-  );
-
-  //   F[val_12]: 12:12
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_fatal_alert_val_12 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.fatal_alert[12].de),
-    .d      (hw2reg.fatal_alert[12].d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.fatal_alert[12].q),
-
-    // to register interface (read)
-    .qs     (fatal_alert_val_12_qs)
-  );
-
-  //   F[val_13]: 13:13
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_fatal_alert_val_13 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.fatal_alert[13].de),
-    .d      (hw2reg.fatal_alert[13].d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (reg2hw.fatal_alert[13].q),
-
-    // to register interface (read)
-    .qs     (fatal_alert_val_13_qs)
   );
 
 
@@ -1611,10 +2197,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_ast_init_done (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1627,6 +2215,7 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_ast_init_done_qs)
@@ -1636,10 +2225,12 @@ module sensor_ctrl_reg_top (
   prim_subreg #(
     .DW      (2),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (2'h3)
+    .RESVAL  (2'h0),
+    .Mubi    (1'b0)
   ) u_status_io_pok (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1652,23 +2243,393 @@ module sensor_ctrl_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_io_pok_qs)
   );
 
 
+  // Subregister 0 of Multireg manual_pad_attr_regwen
+  // R[manual_pad_attr_regwen_0]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_manual_pad_attr_regwen_0 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
-  logic [6:0] addr_hit;
+    // from register interface
+    .we     (manual_pad_attr_regwen_0_we),
+    .wd     (manual_pad_attr_regwen_0_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (manual_pad_attr_regwen_0_qs)
+  );
+
+
+  // Subregister 1 of Multireg manual_pad_attr_regwen
+  // R[manual_pad_attr_regwen_1]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_manual_pad_attr_regwen_1 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (manual_pad_attr_regwen_1_we),
+    .wd     (manual_pad_attr_regwen_1_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (manual_pad_attr_regwen_1_qs)
+  );
+
+
+  // Subregister 2 of Multireg manual_pad_attr_regwen
+  // R[manual_pad_attr_regwen_2]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_manual_pad_attr_regwen_2 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (manual_pad_attr_regwen_2_we),
+    .wd     (manual_pad_attr_regwen_2_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (manual_pad_attr_regwen_2_qs)
+  );
+
+
+  // Subregister 3 of Multireg manual_pad_attr_regwen
+  // R[manual_pad_attr_regwen_3]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_manual_pad_attr_regwen_3 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (manual_pad_attr_regwen_3_we),
+    .wd     (manual_pad_attr_regwen_3_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (manual_pad_attr_regwen_3_qs)
+  );
+
+
+  // Subregister 0 of Multireg manual_pad_attr
+  // R[manual_pad_attr_0]: V(True)
+  logic manual_pad_attr_0_qe;
+  logic [2:0] manual_pad_attr_0_flds_we;
+  assign manual_pad_attr_0_qe = &manual_pad_attr_0_flds_we;
+  // Create REGWEN-gated WE signal
+  logic manual_pad_attr_0_gated_we;
+  assign manual_pad_attr_0_gated_we = manual_pad_attr_0_we & manual_pad_attr_regwen_0_qs;
+  //   F[pull_en_0]: 2:2
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_0_pull_en_0 (
+    .re     (manual_pad_attr_0_re),
+    .we     (manual_pad_attr_0_gated_we),
+    .wd     (manual_pad_attr_0_pull_en_0_wd),
+    .d      (hw2reg.manual_pad_attr[0].pull_en.d),
+    .qre    (),
+    .qe     (manual_pad_attr_0_flds_we[0]),
+    .q      (reg2hw.manual_pad_attr[0].pull_en.q),
+    .ds     (),
+    .qs     (manual_pad_attr_0_pull_en_0_qs)
+  );
+  assign reg2hw.manual_pad_attr[0].pull_en.qe = manual_pad_attr_0_qe;
+
+  //   F[pull_select_0]: 3:3
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_0_pull_select_0 (
+    .re     (manual_pad_attr_0_re),
+    .we     (manual_pad_attr_0_gated_we),
+    .wd     (manual_pad_attr_0_pull_select_0_wd),
+    .d      (hw2reg.manual_pad_attr[0].pull_select.d),
+    .qre    (),
+    .qe     (manual_pad_attr_0_flds_we[1]),
+    .q      (reg2hw.manual_pad_attr[0].pull_select.q),
+    .ds     (),
+    .qs     (manual_pad_attr_0_pull_select_0_qs)
+  );
+  assign reg2hw.manual_pad_attr[0].pull_select.qe = manual_pad_attr_0_qe;
+
+  //   F[input_disable_0]: 7:7
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_0_input_disable_0 (
+    .re     (manual_pad_attr_0_re),
+    .we     (manual_pad_attr_0_gated_we),
+    .wd     (manual_pad_attr_0_input_disable_0_wd),
+    .d      (hw2reg.manual_pad_attr[0].input_disable.d),
+    .qre    (),
+    .qe     (manual_pad_attr_0_flds_we[2]),
+    .q      (reg2hw.manual_pad_attr[0].input_disable.q),
+    .ds     (),
+    .qs     (manual_pad_attr_0_input_disable_0_qs)
+  );
+  assign reg2hw.manual_pad_attr[0].input_disable.qe = manual_pad_attr_0_qe;
+
+
+  // Subregister 1 of Multireg manual_pad_attr
+  // R[manual_pad_attr_1]: V(True)
+  logic manual_pad_attr_1_qe;
+  logic [2:0] manual_pad_attr_1_flds_we;
+  assign manual_pad_attr_1_qe = &manual_pad_attr_1_flds_we;
+  // Create REGWEN-gated WE signal
+  logic manual_pad_attr_1_gated_we;
+  assign manual_pad_attr_1_gated_we = manual_pad_attr_1_we & manual_pad_attr_regwen_1_qs;
+  //   F[pull_en_1]: 2:2
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_1_pull_en_1 (
+    .re     (manual_pad_attr_1_re),
+    .we     (manual_pad_attr_1_gated_we),
+    .wd     (manual_pad_attr_1_pull_en_1_wd),
+    .d      (hw2reg.manual_pad_attr[1].pull_en.d),
+    .qre    (),
+    .qe     (manual_pad_attr_1_flds_we[0]),
+    .q      (reg2hw.manual_pad_attr[1].pull_en.q),
+    .ds     (),
+    .qs     (manual_pad_attr_1_pull_en_1_qs)
+  );
+  assign reg2hw.manual_pad_attr[1].pull_en.qe = manual_pad_attr_1_qe;
+
+  //   F[pull_select_1]: 3:3
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_1_pull_select_1 (
+    .re     (manual_pad_attr_1_re),
+    .we     (manual_pad_attr_1_gated_we),
+    .wd     (manual_pad_attr_1_pull_select_1_wd),
+    .d      (hw2reg.manual_pad_attr[1].pull_select.d),
+    .qre    (),
+    .qe     (manual_pad_attr_1_flds_we[1]),
+    .q      (reg2hw.manual_pad_attr[1].pull_select.q),
+    .ds     (),
+    .qs     (manual_pad_attr_1_pull_select_1_qs)
+  );
+  assign reg2hw.manual_pad_attr[1].pull_select.qe = manual_pad_attr_1_qe;
+
+  //   F[input_disable_1]: 7:7
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_1_input_disable_1 (
+    .re     (manual_pad_attr_1_re),
+    .we     (manual_pad_attr_1_gated_we),
+    .wd     (manual_pad_attr_1_input_disable_1_wd),
+    .d      (hw2reg.manual_pad_attr[1].input_disable.d),
+    .qre    (),
+    .qe     (manual_pad_attr_1_flds_we[2]),
+    .q      (reg2hw.manual_pad_attr[1].input_disable.q),
+    .ds     (),
+    .qs     (manual_pad_attr_1_input_disable_1_qs)
+  );
+  assign reg2hw.manual_pad_attr[1].input_disable.qe = manual_pad_attr_1_qe;
+
+
+  // Subregister 2 of Multireg manual_pad_attr
+  // R[manual_pad_attr_2]: V(True)
+  logic manual_pad_attr_2_qe;
+  logic [2:0] manual_pad_attr_2_flds_we;
+  assign manual_pad_attr_2_qe = &manual_pad_attr_2_flds_we;
+  // Create REGWEN-gated WE signal
+  logic manual_pad_attr_2_gated_we;
+  assign manual_pad_attr_2_gated_we = manual_pad_attr_2_we & manual_pad_attr_regwen_2_qs;
+  //   F[pull_en_2]: 2:2
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_2_pull_en_2 (
+    .re     (manual_pad_attr_2_re),
+    .we     (manual_pad_attr_2_gated_we),
+    .wd     (manual_pad_attr_2_pull_en_2_wd),
+    .d      (hw2reg.manual_pad_attr[2].pull_en.d),
+    .qre    (),
+    .qe     (manual_pad_attr_2_flds_we[0]),
+    .q      (reg2hw.manual_pad_attr[2].pull_en.q),
+    .ds     (),
+    .qs     (manual_pad_attr_2_pull_en_2_qs)
+  );
+  assign reg2hw.manual_pad_attr[2].pull_en.qe = manual_pad_attr_2_qe;
+
+  //   F[pull_select_2]: 3:3
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_2_pull_select_2 (
+    .re     (manual_pad_attr_2_re),
+    .we     (manual_pad_attr_2_gated_we),
+    .wd     (manual_pad_attr_2_pull_select_2_wd),
+    .d      (hw2reg.manual_pad_attr[2].pull_select.d),
+    .qre    (),
+    .qe     (manual_pad_attr_2_flds_we[1]),
+    .q      (reg2hw.manual_pad_attr[2].pull_select.q),
+    .ds     (),
+    .qs     (manual_pad_attr_2_pull_select_2_qs)
+  );
+  assign reg2hw.manual_pad_attr[2].pull_select.qe = manual_pad_attr_2_qe;
+
+  //   F[input_disable_2]: 7:7
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_2_input_disable_2 (
+    .re     (manual_pad_attr_2_re),
+    .we     (manual_pad_attr_2_gated_we),
+    .wd     (manual_pad_attr_2_input_disable_2_wd),
+    .d      (hw2reg.manual_pad_attr[2].input_disable.d),
+    .qre    (),
+    .qe     (manual_pad_attr_2_flds_we[2]),
+    .q      (reg2hw.manual_pad_attr[2].input_disable.q),
+    .ds     (),
+    .qs     (manual_pad_attr_2_input_disable_2_qs)
+  );
+  assign reg2hw.manual_pad_attr[2].input_disable.qe = manual_pad_attr_2_qe;
+
+
+  // Subregister 3 of Multireg manual_pad_attr
+  // R[manual_pad_attr_3]: V(True)
+  logic manual_pad_attr_3_qe;
+  logic [2:0] manual_pad_attr_3_flds_we;
+  assign manual_pad_attr_3_qe = &manual_pad_attr_3_flds_we;
+  // Create REGWEN-gated WE signal
+  logic manual_pad_attr_3_gated_we;
+  assign manual_pad_attr_3_gated_we = manual_pad_attr_3_we & manual_pad_attr_regwen_3_qs;
+  //   F[pull_en_3]: 2:2
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_3_pull_en_3 (
+    .re     (manual_pad_attr_3_re),
+    .we     (manual_pad_attr_3_gated_we),
+    .wd     (manual_pad_attr_3_pull_en_3_wd),
+    .d      (hw2reg.manual_pad_attr[3].pull_en.d),
+    .qre    (),
+    .qe     (manual_pad_attr_3_flds_we[0]),
+    .q      (reg2hw.manual_pad_attr[3].pull_en.q),
+    .ds     (),
+    .qs     (manual_pad_attr_3_pull_en_3_qs)
+  );
+  assign reg2hw.manual_pad_attr[3].pull_en.qe = manual_pad_attr_3_qe;
+
+  //   F[pull_select_3]: 3:3
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_3_pull_select_3 (
+    .re     (manual_pad_attr_3_re),
+    .we     (manual_pad_attr_3_gated_we),
+    .wd     (manual_pad_attr_3_pull_select_3_wd),
+    .d      (hw2reg.manual_pad_attr[3].pull_select.d),
+    .qre    (),
+    .qe     (manual_pad_attr_3_flds_we[1]),
+    .q      (reg2hw.manual_pad_attr[3].pull_select.q),
+    .ds     (),
+    .qs     (manual_pad_attr_3_pull_select_3_qs)
+  );
+  assign reg2hw.manual_pad_attr[3].pull_select.qe = manual_pad_attr_3_qe;
+
+  //   F[input_disable_3]: 7:7
+  prim_subreg_ext #(
+    .DW    (1)
+  ) u_manual_pad_attr_3_input_disable_3 (
+    .re     (manual_pad_attr_3_re),
+    .we     (manual_pad_attr_3_gated_we),
+    .wd     (manual_pad_attr_3_input_disable_3_wd),
+    .d      (hw2reg.manual_pad_attr[3].input_disable.d),
+    .qre    (),
+    .qe     (manual_pad_attr_3_flds_we[2]),
+    .q      (reg2hw.manual_pad_attr[3].input_disable.q),
+    .ds     (),
+    .qs     (manual_pad_attr_3_input_disable_3_qs)
+  );
+  assign reg2hw.manual_pad_attr[3].input_disable.qe = manual_pad_attr_3_qe;
+
+
+
+  logic [28:0] addr_hit;
   always_comb begin
-    addr_hit = '0;
-    addr_hit[0] = (reg_addr == SENSOR_CTRL_ALERT_TEST_OFFSET);
-    addr_hit[1] = (reg_addr == SENSOR_CTRL_CFG_REGWEN_OFFSET);
-    addr_hit[2] = (reg_addr == SENSOR_CTRL_ALERT_TRIG_OFFSET);
-    addr_hit[3] = (reg_addr == SENSOR_CTRL_FATAL_ALERT_EN_OFFSET);
-    addr_hit[4] = (reg_addr == SENSOR_CTRL_RECOV_ALERT_OFFSET);
-    addr_hit[5] = (reg_addr == SENSOR_CTRL_FATAL_ALERT_OFFSET);
-    addr_hit[6] = (reg_addr == SENSOR_CTRL_STATUS_OFFSET);
+    addr_hit[ 0] = (reg_addr == SENSOR_CTRL_INTR_STATE_OFFSET);
+    addr_hit[ 1] = (reg_addr == SENSOR_CTRL_INTR_ENABLE_OFFSET);
+    addr_hit[ 2] = (reg_addr == SENSOR_CTRL_INTR_TEST_OFFSET);
+    addr_hit[ 3] = (reg_addr == SENSOR_CTRL_ALERT_TEST_OFFSET);
+    addr_hit[ 4] = (reg_addr == SENSOR_CTRL_CFG_REGWEN_OFFSET);
+    addr_hit[ 5] = (reg_addr == SENSOR_CTRL_ALERT_TRIG_OFFSET);
+    addr_hit[ 6] = (reg_addr == SENSOR_CTRL_ALERT_EN_0_OFFSET);
+    addr_hit[ 7] = (reg_addr == SENSOR_CTRL_ALERT_EN_1_OFFSET);
+    addr_hit[ 8] = (reg_addr == SENSOR_CTRL_ALERT_EN_2_OFFSET);
+    addr_hit[ 9] = (reg_addr == SENSOR_CTRL_ALERT_EN_3_OFFSET);
+    addr_hit[10] = (reg_addr == SENSOR_CTRL_ALERT_EN_4_OFFSET);
+    addr_hit[11] = (reg_addr == SENSOR_CTRL_ALERT_EN_5_OFFSET);
+    addr_hit[12] = (reg_addr == SENSOR_CTRL_ALERT_EN_6_OFFSET);
+    addr_hit[13] = (reg_addr == SENSOR_CTRL_ALERT_EN_7_OFFSET);
+    addr_hit[14] = (reg_addr == SENSOR_CTRL_ALERT_EN_8_OFFSET);
+    addr_hit[15] = (reg_addr == SENSOR_CTRL_ALERT_EN_9_OFFSET);
+    addr_hit[16] = (reg_addr == SENSOR_CTRL_ALERT_EN_10_OFFSET);
+    addr_hit[17] = (reg_addr == SENSOR_CTRL_FATAL_ALERT_EN_OFFSET);
+    addr_hit[18] = (reg_addr == SENSOR_CTRL_RECOV_ALERT_OFFSET);
+    addr_hit[19] = (reg_addr == SENSOR_CTRL_FATAL_ALERT_OFFSET);
+    addr_hit[20] = (reg_addr == SENSOR_CTRL_STATUS_OFFSET);
+    addr_hit[21] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_REGWEN_0_OFFSET);
+    addr_hit[22] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_REGWEN_1_OFFSET);
+    addr_hit[23] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_REGWEN_2_OFFSET);
+    addr_hit[24] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_REGWEN_3_OFFSET);
+    addr_hit[25] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_0_OFFSET);
+    addr_hit[26] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_1_OFFSET);
+    addr_hit[27] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_2_OFFSET);
+    addr_hit[28] = (reg_addr == SENSOR_CTRL_MANUAL_PAD_ATTR_3_OFFSET);
   end
 
   assign addrmiss = (reg_re || reg_we) ? ~|addr_hit : 1'b0 ;
@@ -1676,23 +2637,64 @@ module sensor_ctrl_reg_top (
   // Check sub-word write is permitted
   always_comb begin
     wr_err = (reg_we &
-              ((addr_hit[0] & (|(SENSOR_CTRL_PERMIT[0] & ~reg_be))) |
-               (addr_hit[1] & (|(SENSOR_CTRL_PERMIT[1] & ~reg_be))) |
-               (addr_hit[2] & (|(SENSOR_CTRL_PERMIT[2] & ~reg_be))) |
-               (addr_hit[3] & (|(SENSOR_CTRL_PERMIT[3] & ~reg_be))) |
-               (addr_hit[4] & (|(SENSOR_CTRL_PERMIT[4] & ~reg_be))) |
-               (addr_hit[5] & (|(SENSOR_CTRL_PERMIT[5] & ~reg_be))) |
-               (addr_hit[6] & (|(SENSOR_CTRL_PERMIT[6] & ~reg_be)))));
+              ((addr_hit[ 0] & (|(SENSOR_CTRL_PERMIT[ 0] & ~reg_be))) |
+               (addr_hit[ 1] & (|(SENSOR_CTRL_PERMIT[ 1] & ~reg_be))) |
+               (addr_hit[ 2] & (|(SENSOR_CTRL_PERMIT[ 2] & ~reg_be))) |
+               (addr_hit[ 3] & (|(SENSOR_CTRL_PERMIT[ 3] & ~reg_be))) |
+               (addr_hit[ 4] & (|(SENSOR_CTRL_PERMIT[ 4] & ~reg_be))) |
+               (addr_hit[ 5] & (|(SENSOR_CTRL_PERMIT[ 5] & ~reg_be))) |
+               (addr_hit[ 6] & (|(SENSOR_CTRL_PERMIT[ 6] & ~reg_be))) |
+               (addr_hit[ 7] & (|(SENSOR_CTRL_PERMIT[ 7] & ~reg_be))) |
+               (addr_hit[ 8] & (|(SENSOR_CTRL_PERMIT[ 8] & ~reg_be))) |
+               (addr_hit[ 9] & (|(SENSOR_CTRL_PERMIT[ 9] & ~reg_be))) |
+               (addr_hit[10] & (|(SENSOR_CTRL_PERMIT[10] & ~reg_be))) |
+               (addr_hit[11] & (|(SENSOR_CTRL_PERMIT[11] & ~reg_be))) |
+               (addr_hit[12] & (|(SENSOR_CTRL_PERMIT[12] & ~reg_be))) |
+               (addr_hit[13] & (|(SENSOR_CTRL_PERMIT[13] & ~reg_be))) |
+               (addr_hit[14] & (|(SENSOR_CTRL_PERMIT[14] & ~reg_be))) |
+               (addr_hit[15] & (|(SENSOR_CTRL_PERMIT[15] & ~reg_be))) |
+               (addr_hit[16] & (|(SENSOR_CTRL_PERMIT[16] & ~reg_be))) |
+               (addr_hit[17] & (|(SENSOR_CTRL_PERMIT[17] & ~reg_be))) |
+               (addr_hit[18] & (|(SENSOR_CTRL_PERMIT[18] & ~reg_be))) |
+               (addr_hit[19] & (|(SENSOR_CTRL_PERMIT[19] & ~reg_be))) |
+               (addr_hit[20] & (|(SENSOR_CTRL_PERMIT[20] & ~reg_be))) |
+               (addr_hit[21] & (|(SENSOR_CTRL_PERMIT[21] & ~reg_be))) |
+               (addr_hit[22] & (|(SENSOR_CTRL_PERMIT[22] & ~reg_be))) |
+               (addr_hit[23] & (|(SENSOR_CTRL_PERMIT[23] & ~reg_be))) |
+               (addr_hit[24] & (|(SENSOR_CTRL_PERMIT[24] & ~reg_be))) |
+               (addr_hit[25] & (|(SENSOR_CTRL_PERMIT[25] & ~reg_be))) |
+               (addr_hit[26] & (|(SENSOR_CTRL_PERMIT[26] & ~reg_be))) |
+               (addr_hit[27] & (|(SENSOR_CTRL_PERMIT[27] & ~reg_be))) |
+               (addr_hit[28] & (|(SENSOR_CTRL_PERMIT[28] & ~reg_be)))));
   end
-  assign alert_test_we = addr_hit[0] & reg_we & !reg_error;
+
+  // Generate write-enables
+  assign intr_state_we = addr_hit[0] & reg_we & !reg_error;
+
+  assign intr_state_io_status_change_wd = reg_wdata[0];
+
+  assign intr_state_init_status_change_wd = reg_wdata[1];
+  assign intr_enable_we = addr_hit[1] & reg_we & !reg_error;
+
+  assign intr_enable_io_status_change_wd = reg_wdata[0];
+
+  assign intr_enable_init_status_change_wd = reg_wdata[1];
+  assign intr_test_we = addr_hit[2] & reg_we & !reg_error;
+
+  assign intr_test_io_status_change_wd = reg_wdata[0];
+
+  assign intr_test_init_status_change_wd = reg_wdata[1];
+  assign alert_test_we = addr_hit[3] & reg_we & !reg_error;
 
   assign alert_test_recov_alert_wd = reg_wdata[0];
 
   assign alert_test_fatal_alert_wd = reg_wdata[1];
-  assign cfg_regwen_we = addr_hit[1] & reg_we & !reg_error;
+
+  assign alert_test_regwen_wd = reg_wdata[31];
+  assign cfg_regwen_we = addr_hit[4] & reg_we & !reg_error;
 
   assign cfg_regwen_wd = reg_wdata[0];
-  assign alert_trig_we = addr_hit[2] & reg_we & !reg_error;
+  assign alert_trig_we = addr_hit[5] & reg_we & !reg_error;
 
   assign alert_trig_val_0_wd = reg_wdata[0];
 
@@ -1715,11 +2717,40 @@ module sensor_ctrl_reg_top (
   assign alert_trig_val_9_wd = reg_wdata[9];
 
   assign alert_trig_val_10_wd = reg_wdata[10];
+  assign alert_en_0_we = addr_hit[6] & reg_we & !reg_error;
 
-  assign alert_trig_val_11_wd = reg_wdata[11];
+  assign alert_en_0_wd = reg_wdata[3:0];
+  assign alert_en_1_we = addr_hit[7] & reg_we & !reg_error;
 
-  assign alert_trig_val_12_wd = reg_wdata[12];
-  assign fatal_alert_en_we = addr_hit[3] & reg_we & !reg_error;
+  assign alert_en_1_wd = reg_wdata[3:0];
+  assign alert_en_2_we = addr_hit[8] & reg_we & !reg_error;
+
+  assign alert_en_2_wd = reg_wdata[3:0];
+  assign alert_en_3_we = addr_hit[9] & reg_we & !reg_error;
+
+  assign alert_en_3_wd = reg_wdata[3:0];
+  assign alert_en_4_we = addr_hit[10] & reg_we & !reg_error;
+
+  assign alert_en_4_wd = reg_wdata[3:0];
+  assign alert_en_5_we = addr_hit[11] & reg_we & !reg_error;
+
+  assign alert_en_5_wd = reg_wdata[3:0];
+  assign alert_en_6_we = addr_hit[12] & reg_we & !reg_error;
+
+  assign alert_en_6_wd = reg_wdata[3:0];
+  assign alert_en_7_we = addr_hit[13] & reg_we & !reg_error;
+
+  assign alert_en_7_wd = reg_wdata[3:0];
+  assign alert_en_8_we = addr_hit[14] & reg_we & !reg_error;
+
+  assign alert_en_8_wd = reg_wdata[3:0];
+  assign alert_en_9_we = addr_hit[15] & reg_we & !reg_error;
+
+  assign alert_en_9_wd = reg_wdata[3:0];
+  assign alert_en_10_we = addr_hit[16] & reg_we & !reg_error;
+
+  assign alert_en_10_wd = reg_wdata[3:0];
+  assign fatal_alert_en_we = addr_hit[17] & reg_we & !reg_error;
 
   assign fatal_alert_en_val_0_wd = reg_wdata[0];
 
@@ -1742,11 +2773,7 @@ module sensor_ctrl_reg_top (
   assign fatal_alert_en_val_9_wd = reg_wdata[9];
 
   assign fatal_alert_en_val_10_wd = reg_wdata[10];
-
-  assign fatal_alert_en_val_11_wd = reg_wdata[11];
-
-  assign fatal_alert_en_val_12_wd = reg_wdata[12];
-  assign recov_alert_we = addr_hit[4] & reg_we & !reg_error;
+  assign recov_alert_we = addr_hit[18] & reg_we & !reg_error;
 
   assign recov_alert_val_0_wd = reg_wdata[0];
 
@@ -1769,25 +2796,114 @@ module sensor_ctrl_reg_top (
   assign recov_alert_val_9_wd = reg_wdata[9];
 
   assign recov_alert_val_10_wd = reg_wdata[10];
+  assign manual_pad_attr_regwen_0_we = addr_hit[21] & reg_we & !reg_error;
 
-  assign recov_alert_val_11_wd = reg_wdata[11];
+  assign manual_pad_attr_regwen_0_wd = reg_wdata[0];
+  assign manual_pad_attr_regwen_1_we = addr_hit[22] & reg_we & !reg_error;
 
-  assign recov_alert_val_12_wd = reg_wdata[12];
+  assign manual_pad_attr_regwen_1_wd = reg_wdata[0];
+  assign manual_pad_attr_regwen_2_we = addr_hit[23] & reg_we & !reg_error;
+
+  assign manual_pad_attr_regwen_2_wd = reg_wdata[0];
+  assign manual_pad_attr_regwen_3_we = addr_hit[24] & reg_we & !reg_error;
+
+  assign manual_pad_attr_regwen_3_wd = reg_wdata[0];
+  assign manual_pad_attr_0_re = addr_hit[25] & reg_re & !reg_error;
+  assign manual_pad_attr_0_we = addr_hit[25] & reg_we & !reg_error;
+
+  assign manual_pad_attr_0_pull_en_0_wd = reg_wdata[2];
+
+  assign manual_pad_attr_0_pull_select_0_wd = reg_wdata[3];
+
+  assign manual_pad_attr_0_input_disable_0_wd = reg_wdata[7];
+  assign manual_pad_attr_1_re = addr_hit[26] & reg_re & !reg_error;
+  assign manual_pad_attr_1_we = addr_hit[26] & reg_we & !reg_error;
+
+  assign manual_pad_attr_1_pull_en_1_wd = reg_wdata[2];
+
+  assign manual_pad_attr_1_pull_select_1_wd = reg_wdata[3];
+
+  assign manual_pad_attr_1_input_disable_1_wd = reg_wdata[7];
+  assign manual_pad_attr_2_re = addr_hit[27] & reg_re & !reg_error;
+  assign manual_pad_attr_2_we = addr_hit[27] & reg_we & !reg_error;
+
+  assign manual_pad_attr_2_pull_en_2_wd = reg_wdata[2];
+
+  assign manual_pad_attr_2_pull_select_2_wd = reg_wdata[3];
+
+  assign manual_pad_attr_2_input_disable_2_wd = reg_wdata[7];
+  assign manual_pad_attr_3_re = addr_hit[28] & reg_re & !reg_error;
+  assign manual_pad_attr_3_we = addr_hit[28] & reg_we & !reg_error;
+
+  assign manual_pad_attr_3_pull_en_3_wd = reg_wdata[2];
+
+  assign manual_pad_attr_3_pull_select_3_wd = reg_wdata[3];
+
+  assign manual_pad_attr_3_input_disable_3_wd = reg_wdata[7];
+
+  // Assign write-enables to checker logic vector.
+  always_comb begin
+    reg_we_check[0] = intr_state_we;
+    reg_we_check[1] = intr_enable_we;
+    reg_we_check[2] = intr_test_we;
+    reg_we_check[3] = alert_test_we;
+    reg_we_check[4] = cfg_regwen_we;
+    reg_we_check[5] = alert_trig_we;
+    reg_we_check[6] = alert_en_0_gated_we;
+    reg_we_check[7] = alert_en_1_gated_we;
+    reg_we_check[8] = alert_en_2_gated_we;
+    reg_we_check[9] = alert_en_3_gated_we;
+    reg_we_check[10] = alert_en_4_gated_we;
+    reg_we_check[11] = alert_en_5_gated_we;
+    reg_we_check[12] = alert_en_6_gated_we;
+    reg_we_check[13] = alert_en_7_gated_we;
+    reg_we_check[14] = alert_en_8_gated_we;
+    reg_we_check[15] = alert_en_9_gated_we;
+    reg_we_check[16] = alert_en_10_gated_we;
+    reg_we_check[17] = fatal_alert_en_gated_we;
+    reg_we_check[18] = recov_alert_we;
+    reg_we_check[19] = 1'b0;
+    reg_we_check[20] = 1'b0;
+    reg_we_check[21] = manual_pad_attr_regwen_0_we;
+    reg_we_check[22] = manual_pad_attr_regwen_1_we;
+    reg_we_check[23] = manual_pad_attr_regwen_2_we;
+    reg_we_check[24] = manual_pad_attr_regwen_3_we;
+    reg_we_check[25] = manual_pad_attr_0_gated_we;
+    reg_we_check[26] = manual_pad_attr_1_gated_we;
+    reg_we_check[27] = manual_pad_attr_2_gated_we;
+    reg_we_check[28] = manual_pad_attr_3_gated_we;
+  end
 
   // Read data return
   always_comb begin
     reg_rdata_next = '0;
     unique case (1'b1)
       addr_hit[0]: begin
+        reg_rdata_next[0] = intr_state_io_status_change_qs;
+        reg_rdata_next[1] = intr_state_init_status_change_qs;
+      end
+
+      addr_hit[1]: begin
+        reg_rdata_next[0] = intr_enable_io_status_change_qs;
+        reg_rdata_next[1] = intr_enable_init_status_change_qs;
+      end
+
+      addr_hit[2]: begin
         reg_rdata_next[0] = '0;
         reg_rdata_next[1] = '0;
       end
 
-      addr_hit[1]: begin
+      addr_hit[3]: begin
+        reg_rdata_next[0] = '0;
+        reg_rdata_next[1] = '0;
+        reg_rdata_next[31] = alert_test_regwen_qs;
+      end
+
+      addr_hit[4]: begin
         reg_rdata_next[0] = cfg_regwen_qs;
       end
 
-      addr_hit[2]: begin
+      addr_hit[5]: begin
         reg_rdata_next[0] = alert_trig_val_0_qs;
         reg_rdata_next[1] = alert_trig_val_1_qs;
         reg_rdata_next[2] = alert_trig_val_2_qs;
@@ -1799,11 +2915,53 @@ module sensor_ctrl_reg_top (
         reg_rdata_next[8] = alert_trig_val_8_qs;
         reg_rdata_next[9] = alert_trig_val_9_qs;
         reg_rdata_next[10] = alert_trig_val_10_qs;
-        reg_rdata_next[11] = alert_trig_val_11_qs;
-        reg_rdata_next[12] = alert_trig_val_12_qs;
       end
 
-      addr_hit[3]: begin
+      addr_hit[6]: begin
+        reg_rdata_next[3:0] = alert_en_0_qs;
+      end
+
+      addr_hit[7]: begin
+        reg_rdata_next[3:0] = alert_en_1_qs;
+      end
+
+      addr_hit[8]: begin
+        reg_rdata_next[3:0] = alert_en_2_qs;
+      end
+
+      addr_hit[9]: begin
+        reg_rdata_next[3:0] = alert_en_3_qs;
+      end
+
+      addr_hit[10]: begin
+        reg_rdata_next[3:0] = alert_en_4_qs;
+      end
+
+      addr_hit[11]: begin
+        reg_rdata_next[3:0] = alert_en_5_qs;
+      end
+
+      addr_hit[12]: begin
+        reg_rdata_next[3:0] = alert_en_6_qs;
+      end
+
+      addr_hit[13]: begin
+        reg_rdata_next[3:0] = alert_en_7_qs;
+      end
+
+      addr_hit[14]: begin
+        reg_rdata_next[3:0] = alert_en_8_qs;
+      end
+
+      addr_hit[15]: begin
+        reg_rdata_next[3:0] = alert_en_9_qs;
+      end
+
+      addr_hit[16]: begin
+        reg_rdata_next[3:0] = alert_en_10_qs;
+      end
+
+      addr_hit[17]: begin
         reg_rdata_next[0] = fatal_alert_en_val_0_qs;
         reg_rdata_next[1] = fatal_alert_en_val_1_qs;
         reg_rdata_next[2] = fatal_alert_en_val_2_qs;
@@ -1815,11 +2973,9 @@ module sensor_ctrl_reg_top (
         reg_rdata_next[8] = fatal_alert_en_val_8_qs;
         reg_rdata_next[9] = fatal_alert_en_val_9_qs;
         reg_rdata_next[10] = fatal_alert_en_val_10_qs;
-        reg_rdata_next[11] = fatal_alert_en_val_11_qs;
-        reg_rdata_next[12] = fatal_alert_en_val_12_qs;
       end
 
-      addr_hit[4]: begin
+      addr_hit[18]: begin
         reg_rdata_next[0] = recov_alert_val_0_qs;
         reg_rdata_next[1] = recov_alert_val_1_qs;
         reg_rdata_next[2] = recov_alert_val_2_qs;
@@ -1831,11 +2987,9 @@ module sensor_ctrl_reg_top (
         reg_rdata_next[8] = recov_alert_val_8_qs;
         reg_rdata_next[9] = recov_alert_val_9_qs;
         reg_rdata_next[10] = recov_alert_val_10_qs;
-        reg_rdata_next[11] = recov_alert_val_11_qs;
-        reg_rdata_next[12] = recov_alert_val_12_qs;
       end
 
-      addr_hit[5]: begin
+      addr_hit[19]: begin
         reg_rdata_next[0] = fatal_alert_val_0_qs;
         reg_rdata_next[1] = fatal_alert_val_1_qs;
         reg_rdata_next[2] = fatal_alert_val_2_qs;
@@ -1848,13 +3002,51 @@ module sensor_ctrl_reg_top (
         reg_rdata_next[9] = fatal_alert_val_9_qs;
         reg_rdata_next[10] = fatal_alert_val_10_qs;
         reg_rdata_next[11] = fatal_alert_val_11_qs;
-        reg_rdata_next[12] = fatal_alert_val_12_qs;
-        reg_rdata_next[13] = fatal_alert_val_13_qs;
       end
 
-      addr_hit[6]: begin
+      addr_hit[20]: begin
         reg_rdata_next[0] = status_ast_init_done_qs;
         reg_rdata_next[2:1] = status_io_pok_qs;
+      end
+
+      addr_hit[21]: begin
+        reg_rdata_next[0] = manual_pad_attr_regwen_0_qs;
+      end
+
+      addr_hit[22]: begin
+        reg_rdata_next[0] = manual_pad_attr_regwen_1_qs;
+      end
+
+      addr_hit[23]: begin
+        reg_rdata_next[0] = manual_pad_attr_regwen_2_qs;
+      end
+
+      addr_hit[24]: begin
+        reg_rdata_next[0] = manual_pad_attr_regwen_3_qs;
+      end
+
+      addr_hit[25]: begin
+        reg_rdata_next[2] = manual_pad_attr_0_pull_en_0_qs;
+        reg_rdata_next[3] = manual_pad_attr_0_pull_select_0_qs;
+        reg_rdata_next[7] = manual_pad_attr_0_input_disable_0_qs;
+      end
+
+      addr_hit[26]: begin
+        reg_rdata_next[2] = manual_pad_attr_1_pull_en_1_qs;
+        reg_rdata_next[3] = manual_pad_attr_1_pull_select_1_qs;
+        reg_rdata_next[7] = manual_pad_attr_1_input_disable_1_qs;
+      end
+
+      addr_hit[27]: begin
+        reg_rdata_next[2] = manual_pad_attr_2_pull_en_2_qs;
+        reg_rdata_next[3] = manual_pad_attr_2_pull_select_2_qs;
+        reg_rdata_next[7] = manual_pad_attr_2_input_disable_2_qs;
+      end
+
+      addr_hit[28]: begin
+        reg_rdata_next[2] = manual_pad_attr_3_pull_en_3_qs;
+        reg_rdata_next[3] = manual_pad_attr_3_pull_select_3_qs;
+        reg_rdata_next[7] = manual_pad_attr_3_input_disable_3_qs;
       end
 
       default: begin
@@ -1868,17 +3060,7 @@ module sensor_ctrl_reg_top (
   assign shadow_busy = 1'b0;
 
   // register busy
-  logic reg_busy_sel;
-  assign reg_busy = reg_busy_sel | shadow_busy;
-  always_comb begin
-    reg_busy_sel = '0;
-    unique case (1'b1)
-      default: begin
-        reg_busy_sel  = '0;
-      end
-    endcase
-  end
-
+  assign reg_busy = shadow_busy;
 
   // Unused signal tieoff
 

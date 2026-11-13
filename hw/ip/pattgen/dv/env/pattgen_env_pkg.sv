@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -27,13 +27,6 @@ package pattgen_env_pkg;
     NumPattgenIntr = 2
   } pattgen_intr_e;
 
-  typedef enum bit[1:0] {
-    NoChannels   = 2'b00,
-    Channel0     = 2'b01,
-    Channel1     = 2'b10,
-    AllChannels  = 2'b11
-  } channel_select_e;
-
   typedef enum bit {
     Enable      = 1'b1,
     Disable     = 1'b0
@@ -41,7 +34,19 @@ package pattgen_env_pkg;
 
   // alerts
   parameter uint NUM_ALERTS = 1;
-  parameter string LIST_OF_ALERTS[] = {"fatal_fault"};
+  parameter string LIST_OF_ALERTS[NUM_ALERTS] = {"fatal_fault"};
+  //Due to simulation time limits, the range of constraints
+  // is selected to be within such time limits
+  parameter uint DataMax = 32'hffffffff;
+  parameter uint DataMin = 0;
+  parameter uint PredivMaxValue = 20;
+  parameter uint PredivMinValue = 0;
+  parameter uint RepsMaxValue = 30;
+  parameter uint RepsMinValue = 0;
+  parameter uint LenMaxValue = 10;
+  parameter uint LenMinValue = 0;
+
+
 
   // package sources
   `include "pattgen_seq_cfg.sv"

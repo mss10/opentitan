@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,9 @@
 
 #include <svdpi.h>
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 
 /**
  * Allocate a new GPIO DPI interface, returned as an opaque pointer.
@@ -38,12 +40,16 @@ void gpiodpi_device_to_host(void *ctx_void, svBitVecVal *gpio_data,
  * Intended to be called from SystemVerilog.
  * @return the values to pull the GPIO pins to.
  */
-uint32_t gpiodpi_host_to_device_tick(void *ctx_void, svBitVecVal *gpio_oe);
+uint32_t gpiodpi_host_to_device_tick(void *ctx_void, svBitVecVal *gpio_oe,
+                                     svBitVecVal *gpio_pull_en,
+                                     svBitVecVal *gpio_pull_sel);
 
 /**
  * Relinquish resources held by a GPIO DPI interface.
  */
 void gpiodpi_close(void *ctx_void);
 
+#ifdef __cplusplus
 }  // extern "C"
+#endif
 #endif  // OPENTITAN_HW_DV_DPI_GPIODPI_GPIODPI_H_

@@ -1,10 +1,52 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 # AES register template
 {
-  name: "aes",
+  name:               "aes",
+  human_name:         "AES Accelerator",
+  one_line_desc:      "AES encryption and decryption engine with SCA and FI countermeasures",
+  one_paragraph_desc: '''
+  [Advanced Encryption Standard (AES)][nist-aes] is the primary symmetric encryption and decryption mechanism used in OpenTitan protocols.
+  AES Accelerator supports encryption/decryption using AES-128/192/256 in ECB, CBC, CFB, OFB, CTR, and GCM block cipher modes.
+  Its cipher core uses first-order domain-oriented masking (DOM) to deter side-channel analysis (SCA).
+  To save area, the masking can optionally be disabled using a compile-time Verilog parameter.
+  In addition, AES Accelerator features several countermeasures to deter fault injection (FI) attacks on the control path.
+
+  [nist-aes]: https://www.nist.gov/publications/advanced-encryption-standard-aes
+  '''
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "2",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_aes",
+  revisions: [
+    {
+      version:            "1.0.1",
+      life_stage:         "L1",
+      design_stage:       "D2S",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+      commit_id:          "5967df933a814f72d5212bd43d13a0041a3aaf9d",
+    },
+    {
+      version:            "1.1.0",
+      life_stage:         "L1",
+      design_stage:       "D2S",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+      commit_id:          "d30a887cde92a9449b722b07b2af79c64ddc9ae1",
+    }
+    {
+      version:            "1.2.0",
+      life_stage:         "L1",
+      design_stage:       "D2S",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+    }
+  ]
   clocking: [
     {clock: "clk_i", reset: "rst_ni", idle: "idle_o", primary: true},
     {clock: "clk_edn_i", reset: "rst_edn_ni", idle: "idle_o"}
@@ -12,6 +54,11 @@
   bus_interfaces: [
     { protocol: "tlul", direction: "device" }
   ],
+
+  ////////////////
+  // Parameters //
+  ////////////////
+
   param_list: [
     # Regular parameters
     { name:    "AES192Enable",
@@ -23,17 +70,26 @@
       local:   "false",
       expose:  "false"
     },
-    { name:    "Masking",
+    { name:    "AESGCMEnable",
       type:    "bit",
       default: "1'b1",
       desc:    '''
-        Disable (0) or enable (1) first-order masking of the AES cipher core.
-        Masking requires the use of a masked S-Box, see SBoxImpl parameter.
+        Disable (0) or enable (1) support for Galois/Counter Mode (GCM) in hardware.
       '''
       local:   "false",
       expose:  "true"
     },
-    { name:    "SBoxImpl",
+    { name:    "SecMasking",
+      type:    "bit",
+      default: "1'b1",
+      desc:    '''
+        Disable (0) or enable (1) first-order masking of the AES cipher core and the GHASH operation of GCM.
+        Masking requires the use of a masked S-Box, see SecSBoxImpl parameter.
+      '''
+      local:   "false",
+      expose:  "true"
+    },
+    { name:    "SecSBoxImpl",
       type:    "aes_pkg::sbox_impl_e",
       default: "aes_pkg::SBoxImplDom",
       desc:    '''
@@ -56,7 +112,7 @@
       type:    "bit",
       default: "1'b0",
       desc:    '''
-        Forbid (0) or allow (1) forcing the mask to zero via FORCE_ZERO_MASK bit in the Control Register.
+        Forbid (0) or allow (1) forcing the masking PRNG output to a constant value via FORCE_MASKS bit in the Auxiliary Control Register.
         Useful for SCA measurements.
         Meaningful only if masking is enabled.
       '''
@@ -104,15 +160,15 @@
       desc:    '''
         Default seed of the PRNG used for masking.
       '''
-      randcount: "160",
+      randcount: "288",
       randtype:  "data"
     },
-    { name:    "RndCnstMskgChunkLfsrPerm",
-      type:    "aes_pkg::mskg_chunk_lfsr_perm_t",
+    { name:    "RndCnstMaskingLfsrPerm",
+      type:    "aes_pkg::masking_lfsr_perm_t",
       desc:    '''
-        Permutation applied to the LFSR chunks of the PRNG used for masking.
+        Permutation applied to the output of the PRNG used for masking.
       '''
-      randcount: "32",
+      randcount: "160",
       randtype:  "perm"
     },
     # Note: All parameters below are local, they are not actually configurable.
@@ -136,11 +192,28 @@
       local:   "true"
     }
   ],
+
+  /////////////////////////////
+  // Intermodule Connections //
+  /////////////////////////////
+
   inter_signal_list: [
     { name:    "idle",
       type:    "uni",
       act:     "req",
-      package: "",
+      package: "prim_mubi_pkg",
+      struct:  "mubi4",
+      width:   "1"
+    },
+    { name:    "output_valid",
+      type:    "uni",
+      act:     "req",
+      struct:  "logic",
+      width:   "1"
+    },
+    { name:    "input_ready",
+      type:    "uni",
+      act:     "req",
       struct:  "logic",
       width:   "1"
     },
@@ -161,9 +234,14 @@
       type:    "uni"
       name:    "keymgr_key"
       act:     "rcv"
-      package: "keymgr_pkg"
+      package: "keymgr_dpe_pkg"
     }
   ],
+
+  ///////////////////////////
+  // Interrupts and Alerts //
+  ///////////////////////////
+
   alert_list: [
     //{ name: "informative",
     //  desc: '''
@@ -194,6 +272,225 @@
       '''
     }
   ],
+
+  //////////////
+  // Features //
+  //////////////
+
+  features: [
+    {
+      name: "AES.KEY_LEN.128",
+      desc: "AES can perform both operations (encryption and decryption) for key length 128."
+    }
+    {
+      name: "AES.KEY_LEN.192",
+      desc: '''
+            AES can perform both operations (encryption and decryption) for key length 192.
+            This feature can be disabled using a compile-time Verilog parameter.
+            '''
+    }
+    {
+      name: "AES.KEY_LEN.256",
+      desc: "AES can perform both operations (encryption and decryption) for key length 256."
+    }
+    {
+      name: "AES.MODE.ECB",
+      desc: "AES can perform both operations (encryption and decryption) in Electronic Codebook (ECB) Mode for all three key lengths (128/192/256)."
+    }
+    {
+      name: "AES.MODE.CBC",
+      desc: "AES can perform both operations (encryption and decryption) in Cipher Block Chaining (CBC) Mode for all three key lengths (128/192/256)."
+    }
+    {
+      name: "AES.MODE.CFB-128",
+      desc: '''
+            AES can perform both operations (encryption and decryption) in Cipher Feedback (CFB) Mode for all three key lengths (128/192/256).
+            Note that the only supported data-segment size is 128.
+            '''
+    }
+    {
+      name: "AES.MODE.OFB",
+      desc: "AES can perform both operations (encryption and decryption) in Output Feedback (OFB) Mode for all three key lengths (128/192/256)."
+    }
+    {
+      name: "AES.MODE.CTR",
+      desc: "AES can perform both operations (encryption and decryption) in Counter (CTR) Mode for all three key lengths (128/192/256)."
+    }
+    {
+      name: "AES.MODE.GCM",
+      desc: "AES can perform both operations (encryption and decryption) in Galois/Counter Mode (GCM) for all three key lengths (128/192/256)."
+    }
+    {
+      name: "AES.KEY.SIDELOAD",
+      desc: "The key can be loaded directly from the keymgr."
+    }
+    {
+      name: "AES.CLEAR.DATA_OUT",
+      desc: "Output data registers can be cleared using pseudo-random data."
+    }
+    {
+      name: "AES.CLEAR.KEY_IV_DATA_IN",
+      desc: "Keys, IV registers and input data registers can be cleared using pseudo-random data."
+    }
+    {
+      name: "AES.PRNG.RESEED_RATE",
+      desc: '''
+            Reseed rate of the internal PRNG used for masking.
+            It can be set to three different values:
+            -Once per block
+            -Once per approximately 64 blocks
+            -Once per approximately 8K blocks
+            '''
+    }
+    {
+      name: "AES.PRNG.KEY_TOUCH_FORCES_RESEED",
+      desc: "AES can force re-seeding of internal PRNGs used for masking and clearing every time a new key is provided."
+    }
+    {
+      name: "AES.PRNG.FORCE_MASKS",
+      desc: '''
+            AES can block advancing of the internal PRNG used for masking, thereby forcing masks to a constant value.
+            This feature can be disabled using a compile-time Verilog parameter.
+            '''
+    }
+    {
+      name: "AES.MANUAL_OPERATION",
+      desc: '''
+            Operations (encryption and decryption) could be processed in two ways:
+            -AES tracks whether data has been written/read, and starts the operation automatically (default).
+            -AES only starts the operation after receiving a start trigger.
+            '''
+    }
+  ],
+
+  /////////////////////
+  // Countermeasures //
+  /////////////////////
+
+  countermeasures: [
+    { name: "BUS.INTEGRITY",
+      desc: "End-to-end bus integrity scheme."
+    }
+    { name: "LC_ESCALATE_EN.INTERSIG.MUBI",
+      desc: "The global escalation input signal from life cycle is multibit encoded."
+    }
+    { name: "MAIN.CONFIG.SHADOW",
+      desc: "Main control register shadowed."
+    }
+    { name: "MAIN.CONFIG.SPARSE",
+      desc: "Critical fields in main control register one-hot encoded."
+    }
+    { name: "AUX.CONFIG.SHADOW",
+      desc: "Auxiliary control register shadowed."
+    }
+    { name: "AUX.CONFIG.REGWEN",
+      desc: "Auxiliary control register can be locked until reset."
+    }
+    { name: "GCM.CONFIG.SHADOW",
+      desc: "GCM control register shadowed."
+    }
+    { name: "GCM.CONFIG.SPARSE",
+      desc: "Critical fields in GCM control register one-hot encoded."
+    }
+    { name: "KEY.SIDELOAD",
+      desc: "The key can be loaded from a key manager via sideload interface without exposing it to software."
+    }
+    { name: "KEY.SW_UNREADABLE",
+      desc: "Key registers are not readable by software."
+    }
+    { name: "DATA_REG.SW_UNREADABLE",
+      desc: "Data input and internal state registers are not readable by software."
+    }
+    { name: "KEY.SEC_WIPE",
+      desc: "Key registers are cleared with pseudo-random data."
+    }
+    { name: "IV.CONFIG.SEC_WIPE",
+      desc: "IV registers are cleared with pseudo-random data."
+    }
+    { name: "DATA_REG.SEC_WIPE",
+      desc: "Data input/output and internal state registers are cleared with pseudo-random data."
+    }
+    { name: "DATA_REG.KEY.SCA",
+      desc: '''
+        Internal state register cleared with pseudo-random data at the end of the last round.
+        This uses the same mechanism as KEY.SEC_WIPE and is active independent of KEY.MASKING.
+      '''
+    }
+    { name: "KEY.MASKING",
+      desc: '''
+        1st-order domain-oriented masking of the cipher core including data path and key expand.
+        1st-order masking of the GHASH operation.
+        Can optionally be disabled via compile-time Verilog parameter for instantiations that don't need SCA hardening.
+      '''
+    }
+    { name: "MAIN.FSM.SPARSE",
+      desc: "The main control FSM uses a sparse state encoding."
+    }
+    { name: "MAIN.FSM.REDUN",
+      desc: "The main control FSM uses multiple, independent logic rails."
+    }
+    { name: "CIPHER.FSM.SPARSE",
+      desc: "The cipher core FSM uses a sparse state encoding."
+    }
+    { name: "CIPHER.FSM.REDUN",
+      desc: "The cipher core FSM uses multiple, independent logic rails."
+    }
+    { name: "CIPHER.CTR.REDUN",
+      desc: "The AES round counter inside the cipher core FSM is protected with multiple, independent logic rails."
+    }
+    { name: "CTR.FSM.SPARSE",
+      desc: "The CTR mode FSM uses a sparse state encoding."
+    }
+    { name: "CTR.FSM.REDUN",
+      desc: "The CTR mode FSM uses multiple, independent logic rails."
+    }
+    { name: "GHASH.FSM.SPARSE",
+      desc: "The GHASH FSM uses a sparse state encoding."
+    }
+    { name: "CTRL.SPARSE",
+      desc: "Critical control signals such as handshake and MUX control signals use sparse encodings."
+    }
+    { name: "MAIN.FSM.GLOBAL_ESC",
+      desc: "The main control FSM moves to a terminal error state upon global escalation."
+    }
+    { name: "MAIN.FSM.LOCAL_ESC",
+      desc: '''
+        The main control FSM moves to a terminal error state upon local escalation.
+        Can be triggered by MAIN.FSM.SPARSE, MAIN.FSM.REDUN, CTRL.SPARSE, as well as CIPHER.FSM.LOCAL_ESC, CTR.FSM.LOCAL_ESC, GHASH.FSM.LOCAL_ESC.
+      '''
+    }
+    { name: "CIPHER.FSM.LOCAL_ESC",
+      desc: '''
+        The cipher core FSM moves to a terminal error state upon local escalation.
+        Can be triggered by CIPHER.FSM.SPARSE, CIPHER.FSM.REDUN, CIPHER.CTR.REDUN, CTRL.SPARSE as well as MAIN.FSM.LOCAL_ESC.
+      '''
+    }
+    { name: "CTR.FSM.LOCAL_ESC",
+      desc: '''
+        The CTR mode FSM moves to a terminal error state upon local escalation.
+        Can be triggered by CTR.FSM.SPARSE, CTR.FSM.REDUN, and CTRL.SPARSE.
+      '''
+    }
+    { name: "GHASH.FSM.LOCAL_ESC",
+      desc: '''
+        The GHASH FSM moves to a terminal error state upon local escalation.
+        Can be triggered by GHASH.FSM.SPARSE, CTRL.SPARSE, as well as MAIN.FSM.LOCAL_ESC.
+      '''
+    }
+    { name: "DATA_REG.LOCAL_ESC",
+      desc: "Upon local escalation, the module doesn't output intermediate state."
+    }
+    // This is work in progress.
+    // Datapath FI hardening hasn't been a strict requirement but with the current cipher core architecture it can be done at relatively low area/performance overhead and therefore is a nice-to-have.
+    //{ name: "DATA_REG.INTEGRITY",
+    //  desc: "Datapath FI hardening."
+    //}
+  ]
+
+  ///////////////
+  // Registers //
+  ///////////////
+
   regwidth: "32",
   registers: [
 ##############################################################################
@@ -221,6 +518,9 @@
       fields: [
         { bits: "31:0", name: "key_share0", desc: "Initial Key Share 0" }
       ],
+      tags: [// Updates based on writes to other regs.
+             // These registers are reset to 0, but the reset also triggers internal operations that clear these registers with pseudo-random data shortly afterwards (See Trigger Register).
+             "excl:CsrHwResetTest:CsrExclCheck"]
       }
     },
     { multireg: {
@@ -246,6 +546,9 @@
       fields: [
         { bits: "31:0", name: "key_share1", desc: "Initial Key Share 1" }
       ],
+      tags: [// Updates based on writes to other regs.
+             // These registers are reset to 0, but the reset also triggers internal operations that clear these registers with pseudo-random data shortly afterwards (See Trigger Register).
+             "excl:CsrHwResetTest:CsrExclCheck"]
       }
     },
 ##############################################################################
@@ -268,13 +571,17 @@
       '''
       count: "NumRegsIv",
       cname: "IV",
-      swaccess: "wo",
+      swaccess: "rw",
       hwaccess: "hrw",
       hwext:    "true",
       hwqe:     "true",
       fields: [
         { bits: "31:0", name: "iv", desc: "Initialization Vector" }
       ],
+      tags: [// Updated by the HW.
+             // Updates based on writes to other regs.
+             // These registers are reset to 0, but the reset also triggers internal operations that clear these registers with pseudo-random data shortly afterwards (See Trigger Register).
+             "excl:CsrAllTests:CsrExclCheck"]
       }
     },
 ##############################################################################
@@ -300,6 +607,9 @@
       fields: [
         { bits: "31:0", name: "data_in", desc: "Input Data" }
       ],
+      tags: [// Updates based on writes to other regs.
+             // These registers are reset to 0, but the reset also triggers internal operations that clear these registers with pseudo-random data shortly afterwards (See Trigger Register).
+             "excl:CsrHwResetTest:CsrExclCheck"]
       }
     },
 ##############################################################################
@@ -346,6 +656,11 @@
       Any write operation to this register will clear the status tracking required for automatic mode (See MANUAL_OPERATION field).
       A write to the Control Register is considered the start of a new message.
       Hence, software needs to provide new key, IV and input data afterwards.
+
+      If sideload was enabled for the previous message, the second write operation will set the !!TRIGGER.KEY_IV_DATA_IN_CLEAR bit.
+      If sideload is enabled for the next message and the AES unit is presented a valid sideload key, the AES unit loads this key and then sets the !!TRIGGER.PRNG_RESEED bit if !!CTRL_AUX_SHADOWED.KEY_TOUCH_FORCES_RESEED is set.
+      The AES unit will then become busy to handle these triggers.
+      Software must wait for the AES unit to again become idle before providing new key, IV and input data after updating this register.
     '''
     swaccess: "rw",
     hwaccess: "hrw",
@@ -355,21 +670,38 @@
     update_err_alert: "recov_ctrl_update_err",
     storage_err_alert: "fatal_fault",
     fields: [
-      { bits: "0",
+      { bits: "1:0",
         name: "OPERATION",
-        resval: "0",
+        resval: "0x1",
+        hwaccess: "hrw",
         desc:  '''
-          Select encryption(0) or decryption(1) operation of AES unit.
+          2-bit one-hot field to select the operation of AES unit.
+          Invalid input values, i.e., values with multiple bits set and value 2'b00, are mapped to AES_ENC (2'b01).
         '''
+        enum: [
+          { value: "1",
+            name: "AES_ENC",
+            desc: '''
+              2'b01: Encryption.
+              Invalid input values, i.e., 2'b00 and 2'b11, are mapped to AES_ENC.
+            '''
+          },
+          { value: "2",
+            name: "AES_DEC",
+            desc: '''
+              2'b10: Decryption.
+            '''
+          },
+        ]
         tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_operation"]
       }
-      { bits: "6:1",
+      { bits: "7:2",
         name: "MODE",
-        resval: "0x20",
+        resval: "0x3f",
         hwaccess: "hrw",
         desc:  '''
           6-bit one-hot field to select AES block cipher mode.
-          Invalid input values, i.e., values with multiple bits set and value 6'b00_0000, are mapped to AES_NONE (6'b10_0000).
+          Invalid input values, i.e., values with multiple bits set and value 6'b00_0000, are mapped to AES_NONE (6'b11_1111).
         '''
         enum: [
           { value: "1",
@@ -403,15 +735,22 @@
             '''
           },
           { value: "32",
+            name: "AES_GCM",
+            desc: '''
+              6'b10_0000: Galois/Counter Mode (GCM).
+              In case support for GCM has been disabled at compile time, setting this value results in configuring AES_NONE (6'b11_1111).
+            '''
+          },
+          { value: "63",
             name: "AES_NONE",
             desc: '''
-              6'b10_0000: Invalid input values, i.e., value with multiple bits set and value 6'b00_0000, are mapped to AES_NONE.
+              6'b11_1111: Invalid input values, i.e., value with multiple bits set, value 6'b00_0000, and value 6'b10_0000 in case GCM is not supported (because disabled at compile time) are mapped to AES_NONE.
             '''
           }
         ]
         tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_mode"]
       }
-      { bits: "9:7",
+      { bits: "10:8",
         name: "KEY_LEN",
         resval: "1",
         hwaccess: "hrw",
@@ -443,7 +782,7 @@
         ]
         tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_key_len"]
       }
-      { bits: "10",
+      { bits: "11",
         name: "SIDELOAD",
         resval: "0",
         desc: '''
@@ -451,35 +790,120 @@
         '''
         tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_sideload"]
       }
-      { bits: "11",
+      { bits: "14:12",
+        name: "PRNG_RESEED_RATE",
+        resval: "1",
+        hwaccess: "hrw",
+        desc: '''
+          3-bit one-hot field to control the reseeding rate of the internal pseudo-random number generator (PRNG) used for masking.
+          Invalid input values, i.e., values with multiple bits set and value 3'b000 are mapped to the highest reseeding rate PER_1 (3'b001).
+        '''
+        enum: [
+          { value: "1",
+            name: "PER_1",
+            desc: '''
+              3'b001: Reseed the masking PRNG once per block.
+              Invalid input values, i.e., values with multiple bits set and value 3'b000 are mapped to PER_1 (3'b001).
+              This results in a max entropy consumption rate of ~343 Mbit/s.
+            '''
+          },
+          { value: "2",
+            name: "PER_64",
+            desc: '''
+              3'b010: Reseed the masking PRNG approximately once per every 64 blocks.
+              This results in a max entropy consumption rate of ~5.4 Mbit/s.
+            '''
+          },
+          { value: "4",
+            name: "PER_8K",
+            desc: '''
+              3'b100: Reseed the masking PRNG approximately once per every 8192 blocks.
+              This results in a max entropy consumption rate of ~0.042 Mbit/s.
+            '''
+          }
+        ]
+        tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_prng_reseed_rate"]
+      }
+      { bits: "15",
         name: "MANUAL_OPERATION",
         resval: "0"
         desc:  '''
           Controls whether the AES unit is operated in normal/automatic mode (0) or fully manual mode (1).
           In automatic mode (0), the AES unit automatically i) starts to encrypt/decrypt when it receives new input data, and ii) stalls during the last encryption/decryption cycle if the previous output data has not yet been read.
           This is the most efficient mode to operate in.
+          Software is recommended to operate the AES unit in this mode whenever possible.
           Note that the corresponding status tracking is automatically cleared upon a write to the Control Register.
           In manual mode (1), the AES unit i) only starts to encrypt/decrypt after receiving a start trigger (see Trigger Register), and ii) overwrites previous output data irrespective of whether it has been read out or not.
           This mode is useful if software needs full control over the AES unit.
         '''
         tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_manual_operation"]
       }
-      { bits: "12",
-        name: "FORCE_ZERO_MASKS",
-        resval: "0"
-        desc:  '''
-          Use masks generated by internal masking PRNG (0) or force all masks constantly to zero (1).
-          Setting all masks to constant zero can be useful when performing SCA.
-          To completely disable the masking, the second key share (KEY_SHARE1_0 - KEY_SHARE1_7) must be zero as well.
-          Only applicable if both the Masking parameter and the SecAllowForcingMasks parameter are set to one.
-        '''
-        tags: ["shadowed_reg_path:u_aes_core.u_ctrl_reg_shadowed.u_ctrl_reg_shadowed_force_zero_masks"]
-      }
     ]
     tags: [// Updated by the HW.
            // Updates based on writes to this reg (reset test possible).
            // Exclude from write-read checks.
            "excl:CsrNonInitTests:CsrExclWriteCheck"]
+  },
+  { name: "CTRL_AUX_SHADOWED",
+    desc: '''
+      Auxiliary Control Register.
+
+      This register is shadowed, meaning two subsequent write operations are required to change its content.
+      If the two write operations try to set a different value, a recoverable alert is triggered (See Status Register).
+      A read operation clears the internal phase tracking: The next write operation is always considered a first write operation of an update sequence.
+    '''
+    swaccess: "rw",
+    hwaccess: "hro",
+    shadowed: "true",
+    regwen:   "CTRL_AUX_REGWEN",
+    update_err_alert: "recov_ctrl_update_err",
+    storage_err_alert: "fatal_fault",
+    fields: [
+      { bits:   "0",
+        name:   "KEY_TOUCH_FORCES_RESEED",
+        desc:   '''
+                Controls whether providing a new key triggers the reseeding of internal pseudo-random number generators used for clearing and masking (1) or not (0).
+                ''',
+        resval: 1,
+      }
+      { bits:   "1",
+        name:   "FORCE_MASKS",
+        desc:   '''
+                Allow the internal masking PRNG to advance (0) or force its internal state (1) leading to constant masks.
+                Setting all masks to constant value can be useful when performing SCA.
+                To completely disable the masking, the second key share (KEY_SHARE1_0 - KEY_SHARE1_7) must be zero as well.
+                In addition, a special seed needs to be loaded into the masking PRNG using the EDN interface.
+                Only applicable if both the Masking parameter and the SecAllowForcingMasks parameter are set to one.
+                '''
+        resval: "0"
+      }
+      { bits:   "2",
+        name:   "KEEP_START_TRIGGER_HIGH",
+        desc:   '''
+                Setting the START bit in the Trigger Register triggers at most one encryption/decryption (0) or causes the module to continuously run encryption/decryption when configured with MANUAL_OPERATION=1 and with a valid MODE value (1).
+                Continuously performing encryption/decryption can be useful for power virus testing.
+                To maximize power consumption, it is recommended to set PRNG_RESEED_RATE to PER_1 (See Control Register).
+                If support for GCM has been enabled at compile time, it is recommended to enable this bit in the GCM_TEXT phase.
+                '''
+        resval: "0"
+      }
+    ]
+  },
+  { name:     "CTRL_AUX_REGWEN",
+    desc:     '''
+              Lock bit for Auxiliary Control Register.
+              '''
+    swaccess: "rw0c",
+    hwaccess: "none",
+    fields: [
+    {   bits:   "0",
+        desc:   '''
+                Auxiliary Control Register configuration enable bit.
+                If this is cleared to 0, the Auxiliary Control Register cannot be written anymore.
+                ''',
+        resval: 1,
+      }
+    ]
   },
   { name: "TRIGGER",
     desc: '''
@@ -488,10 +912,10 @@
       Each bit is individually cleared to zero when executing the corresponding trigger.
       While executing any of the triggered operations, the AES unit will set the IDLE bit in the Status Register to zero.
       The processor must check the Status Register before triggering further actions.
-      For example, writes to Initial Key and IV Registers are ignored while the AES unit is busy.
+      For example, writes to Control and GCM Control, Initial Key and IV Registers are ignored while the AES unit is busy.
       Writes to the Input Data Registers are not ignored but the data will be cleared if a KEY_IV_DATA_IN_CLEAR operation is pending.
     '''
-    swaccess: "wo",
+    swaccess: "rw1s",
     hwaccess: "hrw",
     # Tag info (CSR test exclusions):
     #  Updated by the HW.
@@ -505,7 +929,7 @@
         resval: "0"
         desc:  '''
           Keep AES unit paused (0) or trigger the encryption/decryption of one data block (1).
-          This trigger is ignored if MANUAL_OPERATION=0 (see Control Register).
+          This trigger is cleared to `0` if MANUAL_OPERATION=0 or if MODE=AES_NONE (see Control Register).
         '''
         tags: ["excl:CsrNonInitTests:CsrExclWriteCheck"]
       }
@@ -529,7 +953,8 @@
         name: "PRNG_RESEED",
         resval: "1"
         desc:  '''
-          Keep continuing with the current internal state of the internal pseudo-random number generator used for register clearing (0) or perform a reseed of the internal state from the connected entropy source (1).
+          Keep continuing with the current states of the internal pseudo-random number generators used for register clearing and masking (0) or perform a reseed of the internal states from the connected entropy source (1).
+          If the KEY_TOUCH_FORCES_RESEED bit in the Auxiliary Control Register is set to one, this trigger will automatically get set after providing a new initial key.
         '''
         tags: ["excl:CsrAllTests:CsrExclCheck"]
       }
@@ -549,6 +974,7 @@
       { bits: "0",
         name: "IDLE",
         resval: "0",
+        hwaccess: "hrw",
         desc:  '''
           The AES unit is idle (1) or busy (0).
           This flag is `0` if one of the following operations is currently running: i) encryption/decryption, ii) register clearing or iii) PRNG reseeding.
@@ -582,7 +1008,8 @@
       }
       { bits: "3",
         name: "OUTPUT_VALID",
-        resval: "0"
+        resval: "0",
+        hwaccess: "hrw",
         desc:  '''
           The AES unit has no valid output (0) or has valid output data (1).
         '''
@@ -591,6 +1018,7 @@
       { bits: "4",
         name: "INPUT_READY",
         resval: "0",
+        hwaccess: "hrw",
         desc:  '''
           The AES unit is ready (1) or not ready (0) to receive new data input via the DATA_IN registers.
           If the present values in the DATA_IN registers have not yet been loaded into the
@@ -623,6 +1051,110 @@
         '''
       }
     ]
+  },
+  { name: "CTRL_GCM_SHADOWED",
+    desc: '''
+      Galois/Counter Mode (GCM) Control Register.
+
+      Can only be updated when the AES unit is idle.
+      If the AES unit is non-idle, writes to this register are ignored.
+      This register is shadowed, meaning two subsequent write operations are required to change its content.
+      If the two write operations try to set a different value, a recoverable alert is triggered (See Status Register).
+      A read operation clears the internal phase tracking: The next write operation is always considered a first write operation of an update sequence.
+    '''
+    swaccess: "rw",
+    hwaccess: "hrw",
+    hwext:    "true",
+    hwqe:     "true",
+    shadowed: "true",
+    update_err_alert: "recov_ctrl_update_err",
+    storage_err_alert: "fatal_fault",
+    fields: [
+      { bits: "5:0",
+        name: "PHASE",
+        resval: "0x01",
+        hwaccess: "hrw",
+        desc:  '''
+          6-bit one-hot field to select the phase of the Galois/Counter Mode (GCM) of operation.
+          Invalid input values, i.e., values with multiple bits set and value 6'b00_0000, are mapped to GCM_INIT (6'b00_0001).
+          In case support for GCM has been disabled at compile time, this field is not writable and always reads as GCM_INIT (6'b00_0001).
+        '''
+        enum: [
+          { value: "1",
+            name: "GCM_INIT",
+            desc: '''
+              6'b00_0001: Initialization phase.
+              Software configures the Initial Key and IV Registers.
+              The hardware then performs two encryption operations to 1) generate the hash subkey and 2) encrypt the IV.
+              Both results are loaded into the internal GHASH block.
+              Once the AES unit is idle again, software can advance to the next phase.
+              Possible next phases are GCM_RESTORE, GCM_AAD, GCM_TEXT, and GCM_TAG.
+              Invalid input values, i.e., values with multiple bits set, value 6'b00_0000, and all other values in case GCM is not supported (because disabled at compile time) are mapped to GCM_INIT.
+            '''
+          },
+          { value: "2",
+            name: "GCM_RESTORE",
+            desc: '''
+              6'b00_0010: Optional context restore phase.
+              Software configures the IV and Input Data Registers to restore a previously saved AES-GCM context (IV and GHASH state).
+              Possible next phases are GCM_INIT, GCM_AAD and GCM_TEXT.
+            '''
+          },
+          { value: "4",
+            name: "GCM_AAD",
+            desc: '''
+              6'b00_0100: Optional additional authenticated data phase (AAD).
+              Software inputs the AAD via Input Data Registers block by block via Input Data Registers.
+              Possible next phases are GCM_INIT, GCM_TEXT, GCM_SAVE and GCM_TAG.
+            '''
+          },
+          { value: "8",
+            name: "GCM_TEXT",
+            desc: '''
+              6'b00_1000: Optional plaintext/ciphertext phase.
+              Software inputs the plaintext/ciphertext block by block via Input Data Registers, and retrieves the output ciphertext/plaintext block by block via Output Data Registers.
+              Possible next phases are GCM_INIT, GCM_SAVE and GCM_TAG.
+            '''
+          },
+          { value: "16",
+            name: "GCM_SAVE",
+            desc: '''
+              6'b01_0000: Optional context save phase.
+              The hardware stops accepting inputs.
+              Software reads the current GHASH state and IV via Output Data and IV Registers, respectively.
+              The only possible next phase is GCM_INIT.
+            '''
+          },
+          { value: "32",
+            name: "GCM_TAG",
+            desc: '''
+              6'b10_0000: Tag phase.
+              Software inputs a single data block containing the length of the AAD and the ciphertext via Input Data Registers.
+              The hardware then produces the final integrity tag.
+              Once the AES unit is idle again, software reads the final integrity tag via Data Out Registers.
+              The only possible next phase is GCM_INIT.
+            '''
+          },
+        ]
+        tags: ["shadowed_reg_path:u_aes_core.u_ctrl_gcm_reg_shadowed.gen_ctrl_gcm_reg_shadowed.u_ctrl_gcm_reg_shadowed_phase"]
+      }
+      { bits: "10:6",
+        name: "NUM_VALID_BYTES",
+        resval: "16",
+        hwaccess: "hrw",
+        desc: '''
+          Number of valid bytes of the current input block.
+          Only the last block in the GCM_AAD and GCM_TEXT phases are expected to have not all bytes marked as valid.
+          For all other blocks, the number of valid bytes should be set to 16.
+          Invalid input values, i.e., the value 5'b0_0000, and all other values different from 5'b1_0000 in case GCM is not supported (because disabled at compile time) are mapped to 5'b1_0000.
+        '''
+        tags: ["shadowed_reg_path:u_aes_core.u_ctrl_gcm_reg_shadowed.gen_ctrl_gcm_reg_shadowed.u_ctrl_gcm_reg_shadowed_num_valid_bytes"]
+      }
+    ]
+    tags: [// Updated by the HW.
+           // Updates based on writes to this reg (reset test possible).
+           // Exclude from write-read checks.
+           "excl:CsrNonInitTests:CsrExclWriteCheck"]
   },
   ],
 }

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -34,16 +34,18 @@ def gen_program(config: Config,
     # at address 0: a strict Harvard architecture. (mems[x][0] is the LMA
     # for memory x, not the VMA)
     mems = get_memory_layout()
-    imem_lma, imem_size = mems['IMEM']
-    dmem_lma, dmem_size = mems['DMEM']
 
-    program = Program(imem_lma, imem_size, dmem_lma, dmem_size)
-    model = Model(dmem_size, fuel)
+    program = Program(mems.imem_address, mems.imem_size_bytes,
+                      mems.dmem_address, mems.dmem_size_bytes)
+    model = Model(mems.dmem_size_bytes, fuel)
 
     # Generate some initialised data to start with. Otherwise, it takes a while
     # before we start issuing loads (because we need stores to happen first).
     # Tell the model that we've done so.
-    init_data = InitData.gen(dmem_size)
+    #
+    # Note that we only use the bus-accessible part of DMEM for initialised
+    # data.
+    init_data = InitData.gen(mems.dmem_bus_size_bytes)
     for addr in init_data.keys():
         model.touch_mem('dmem', addr, 4)
 

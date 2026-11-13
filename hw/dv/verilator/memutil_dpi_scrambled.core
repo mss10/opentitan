@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,3 +19,8 @@ targets:
   default:
     filesets:
       - files_cpp
+    tools:
+      vcs:
+        vcs_options:
+          - '-CFLAGS -I../../src/lowrisc_dv_verilator_memutil_dpi_scrambled_0/cpp'
+          - '-lelf'

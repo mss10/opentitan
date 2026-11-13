@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -32,7 +32,9 @@ from .gens.bad_insn import BadInsn
 from .gens.bad_giant_loop import BadGiantLoop
 from .gens.bad_load_store import BadLoadStore
 from .gens.bad_zero_loop import BadZeroLoop
+from .gens.bad_ispr import BadIspr
 from .gens.misaligned_load_store import MisalignedLoadStore
+from .gens.untaken_branch import UntakenBranch
 
 
 class SnippetGens:
@@ -47,6 +49,7 @@ class SnippetGens:
         SmallVal,
         StraightLineInsn,
         KnownWDR,
+        UntakenBranch,
 
         ECall,
         BadAtEnd,
@@ -58,12 +61,13 @@ class SnippetGens:
         BadGiantLoop,
         BadLoadStore,
         BadZeroLoop,
+        BadIspr,
         MisalignedLoadStore
     ]
 
     def __init__(self, cfg: Config, insns_file: InsnsFile) -> None:
-        self._cont_generators = []  # type: List[Tuple[SnippetGen, float]]
-        self._end_generators = []   # type: List[Tuple[SnippetGen, float]]
+        self._cont_generators: List[Tuple[SnippetGen, float]] = []
+        self._end_generators: List[Tuple[SnippetGen, float]] = []
 
         # Grab an ECall generator. We'll use it in self.gens to append an ECALL
         # instruction if necessary.
@@ -189,7 +193,7 @@ class SnippetGens:
         model.pc at the place where the next instruction should be inserted).
 
         '''
-        children = []  # type: List[Snippet]
+        children: List[Snippet] = []
         while True:
             gen_ecall = False
             # If we've run out of space and end is False, we stop immediately.
@@ -215,11 +219,10 @@ class SnippetGens:
                     children.append(self._gen_ecall(model.pc, program))
                 break
 
-            snippet, done, model = gen_res
+            snippet, model = gen_res
             children.append(snippet)
 
-            if done:
-                assert end
+            if end:
                 break
 
             assert model.fuel < old_fuel

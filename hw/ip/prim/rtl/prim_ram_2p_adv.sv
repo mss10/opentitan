@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -12,8 +12,6 @@
 //
 // Note that the write mask needs to be per Byte if parity is enabled. If ECC is enabled, the write
 // mask cannot be used and has to be tied to {Width{1'b1}}.
-
-`include "prim_assert.sv"
 
 module prim_ram_2p_adv import prim_ram_2p_pkg::*; #(
   parameter  int Depth                = 512,
@@ -55,7 +53,8 @@ module prim_ram_2p_adv import prim_ram_2p_pkg::*; #(
   output logic             b_rvalid_o, // read response (b_rdata_o) is valid
   output logic [1:0]       b_rerror_o, // Bit1: Uncorrectable, Bit0: Correctable
 
-  input ram_2p_cfg_t       cfg_i
+  input  ram_2p_cfg_req_t  cfg_i,
+  output ram_2p_cfg_rsp_t  cfg_o
 );
 
   prim_ram_2p_async_adv #(
@@ -89,7 +88,8 @@ module prim_ram_2p_adv import prim_ram_2p_pkg::*; #(
     .b_rdata_o,
     .b_rvalid_o,
     .b_rerror_o,
-    .cfg_i
+    .cfg_i,
+    .cfg_o
   );
 
 endmodule : prim_ram_2p_adv

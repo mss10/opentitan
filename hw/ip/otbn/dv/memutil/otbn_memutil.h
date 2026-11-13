@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 #ifndef OPENTITAN_HW_IP_OTBN_DV_MEMUTIL_OTBN_MEMUTIL_H_
@@ -29,7 +29,7 @@ class OtbnMemUtil : public DpiMemUtil {
   const StagedMem::SegMap &GetSegs(bool is_imem) const;
 
   // Get access to a memory area
-  const MemArea &GetMemArea(bool is_imem) const {
+  const ScrambledEcc32MemArea &GetMemArea(bool is_imem) const {
     return is_imem ? imem_ : dmem_;
   }
 

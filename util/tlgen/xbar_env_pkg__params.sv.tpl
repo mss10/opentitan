@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,13 +6,16 @@
 
 <%
   name_len = max([len(x.name) for x in xbar.devices])
+  # TODO: Add support for multiple ASIDs within an xbar.
+  addr_space = sorted(xbar.hosts[0].addr_spaces)[0]
 %>\
 
 // List of Xbar device memory map
 tl_device_t xbar_devices[$] = '{
 % for device in xbar.devices:
     '{"${device.esc_name()}", '{
-    % for addr in device.addr_range:
+<%    addr_range = device.addr_ranges[addr_space] %>\
+    % for addr in addr_range:
         '{32'h${"%08x" % addr[0]}, 32'h${"%08x" % addr[1]}}${"," if not loop.last else ""}
     % endfor
   % if loop.last:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -82,7 +82,7 @@ def get_summary(str_buffer):
     summary["pass_rate"] = format_percentage(summary["proven"],
                                              summary["cex"] + summary["undetermined"])
     summary["cov_rate"] = format_percentage(summary["covered"],
-                                             summary["unreachable"])
+                                            summary["unreachable"])
 
     return summary
 
@@ -125,7 +125,7 @@ def get_cov_results(logpath, dut_name):
                 else:
                     cov_results[key] = "N/A"
                     log.warning("Parse %s coverage error. Expect one matching value, get %s",
-                              key, item)
+                                key, item)
             return cov_results
 
     except IOError as err:

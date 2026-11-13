@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -63,19 +63,13 @@
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_pattgen"
+      name:   "tl_gpio0"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_pwm_aon"
-      act:    "req"
-      package: "tlul_pkg"
-    }
-    { struct: "tl"
-      type:   "req_rsp"
-      name:   "tl_gpio"
+      name:   "tl_gpio1"
       act:    "req"
       package: "tlul_pkg"
     }
@@ -87,49 +81,31 @@
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_spi_host0"
-      act:    "req"
-      package: "tlul_pkg"
-    }
-    { struct: "tl"
-      type:   "req_rsp"
-      name:   "tl_spi_host1"
-      act:    "req"
-      package: "tlul_pkg"
-    }
-    { struct: "tl"
-      type:   "req_rsp"
       name:   "tl_rv_timer"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_usbdev"
+      name:   "tl_pwrmgr"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_pwrmgr_aon"
+      name:   "tl_rstmgr"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_rstmgr_aon"
+      name:   "tl_clkmgr"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_clkmgr_aon"
-      act:    "req"
-      package: "tlul_pkg"
-    }
-    { struct: "tl"
-      type:   "req_rsp"
-      name:   "tl_pinmux_aon"
+      name:   "tl_pinmux"
       act:    "req"
       package: "tlul_pkg"
     }
@@ -141,13 +117,7 @@
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_otp_ctrl__prim"
-      act:    "req"
-      package: "tlul_pkg"
-    }
-    { struct: "tl"
-      type:   "req_rsp"
-      name:   "tl_lc_ctrl"
+      name:   "tl_lc_ctrl__regs"
       act:    "req"
       package: "tlul_pkg"
     }
@@ -165,31 +135,31 @@
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_sram_ctrl_ret_aon__regs"
+      name:   "tl_sram_ctrl_ret__regs"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_sram_ctrl_ret_aon__ram"
+      name:   "tl_sram_ctrl_ret__ram"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_aon_timer_aon"
+      name:   "tl_aon_timer"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_sysrst_ctrl_aon"
+      name:   "tl_sysrst_ctrl"
       act:    "req"
       package: "tlul_pkg"
     }
     { struct: "tl"
       type:   "req_rsp"
-      name:   "tl_adc_ctrl_aon"
+      name:   "tl_adc_ctrl"
       act:    "req"
       package: "tlul_pkg"
     }

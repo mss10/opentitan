@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,8 +7,7 @@
 
 package spi_host_cmd_pkg;
 
-  parameter int CSW = prim_util_pkg::vbits(spi_host_reg_pkg::NumCS);
-  parameter int CmdSize = CSW + 45;
+  parameter int CmdSize = 56;
 
   // For decoding the direction register
   typedef enum logic [1:0] {
@@ -37,15 +36,14 @@ package spi_host_cmd_pkg;
   } configopts_t;
 
   typedef struct packed {
-    logic [1:0] speed;
-    logic       cmd_wr_en;
-    logic       cmd_rd_en;
-    logic [8:0] len;
-    logic       csaat;
+    logic [1:0]  speed;
+    logic        cmd_wr_en;
+    logic        cmd_rd_en;
+    logic [19:0] len;
+    logic        csaat;
   } segment_t;
 
   typedef struct packed {
-    logic [CSW-1:0] csid;
     segment_t segment;
     configopts_t configopts;
   } command_t;

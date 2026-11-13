@@ -1,4 +1,10 @@
-/* Copyright 2018 ETH Zurich and University of Bologna.
+/*
+ * Copyright lowRISC contributors (OpenTitan project).
+ *
+ * Conversion to CHERIoT Ibex ISA from RISC-V
+ *   Copyright SCI Semiconductor 2025
+ *
+ * Copyright 2018 ETH Zurich and University of Bologna.
  * Copyright and related rights are licensed under the Solderpad Hardware
  * License, Version 0.51 (the “License”); you may not use this file except in
  * compliance with the License.  You may obtain a copy of the License at
@@ -26,8 +32,8 @@ package dm;
 
   // address to which a hart should jump when it was requested to halt
   localparam logic [63:0] HaltAddress = 64'h800;
-  localparam logic [63:0] ResumeAddress = HaltAddress + 4;
-  localparam logic [63:0] ExceptionAddress = HaltAddress + 8;
+  localparam logic [63:0] ResumeAddress = HaltAddress + 8;
+  localparam logic [63:0] ExceptionAddress = HaltAddress + 16;
 
   // address where data0-15 is shadowed or if shadowed in a CSR
   // address of the first CSR used for shadowing the data
@@ -197,6 +203,12 @@ package dm;
     DTM_WRITE = 2'h2
   } dtm_op_e;
 
+  typedef enum logic [1:0] {
+    DTM_SUCCESS = 2'h0,
+    DTM_ERR     = 2'h2,
+    DTM_BUSY    = 2'h3
+  } dtm_op_status_e;
+
   typedef struct packed {
     logic [31:29] sbversion;
     logic [28:23] zero0;
@@ -215,10 +227,8 @@ package dm;
     logic         sbaccess8;
   } sbcs_t;
 
-  localparam logic [1:0] DTM_SUCCESS = 2'h0;
-
   typedef struct packed {
-    logic [6:0]  addr;
+    logic [31:0] addr;
     dtm_op_e     op;
     logic [31:0] data;
   } dmi_req_t;
@@ -227,6 +237,17 @@ package dm;
     logic [31:0] data;
     logic [1:0]  resp;
   } dmi_resp_t;
+
+  typedef struct packed {
+    logic [31:18] zero1;
+    logic         dmihardreset;
+    logic         dmireset;
+    logic         zero0;
+    logic [14:12] idle;
+    logic [11:10] dmistat;
+    logic [9:4]   abits;
+    logic [3:0]   version;
+  } dtmcs_t;
 
   // privilege levels
   typedef enum logic[1:0] {
@@ -313,6 +334,17 @@ package dm;
     CSR_TIME           = 12'hC01,
     CSR_INSTRET        = 12'hC02
   } csr_reg_t;
+
+  // CHERIoT Special Capability Registers (SCRs).
+  //
+  // In CHERIoT mode the debug scratch registers are capability registers reached with CSpecialRW
+  // rather than CSRs reached with CSRRW, and they are addressed by a five bit SCR index instead of
+  // a twelve bit CSR address. The RV32I CSR_DSCRATCH0/CSR_DSCRATCH1 entries above are deliberately
+  // kept. A debug module that supports both ISAs needs both encodings.
+  typedef enum logic [4:0] {
+    SCR_DSCRATCHC0 = 5'h19,
+    SCR_DSCRATCHC1 = 5'h1a
+  } spec_csr_e;
 
   // SBA state
   typedef enum logic [2:0] {
@@ -406,6 +438,19 @@ package dm;
                                         logic [4:0] dest);
     // rs1, CSRRS, rd, OpCode System
     return {csr, 5'h0, 3'h2, dest, 7'h73};
+  endfunction
+
+  // CHERIoT equivalents of csrw/csrr for the Special Capability Registers.
+  function automatic logic [31:0] cspecialw (logic [4:0] csr,
+                                             logic [4:0] rs1);
+    // CSpecialRW c0, scr, csrc -> discards the read value
+    return {7'h01, csr, rs1, 3'h0, 5'h0, 7'h5b};
+  endfunction
+
+  function automatic logic [31:0] cspecialr (logic [4:0] csr,
+                                             logic [4:0] dest);
+    // CSpecialRW cdest, scr, c0 -> leaves the register unchanged
+    return {7'h01, csr, 5'h0, 3'h0, dest, 7'h5b};
   endfunction
 
   function automatic logic [31:0] branch(logic [4:0]  src2,

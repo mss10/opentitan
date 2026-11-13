@@ -1,4 +1,4 @@
-/* Copyright lowRISC contributors. */
+/* Copyright lowRISC contributors (OpenTitan project). */
 /* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
 /* SPDX-License-Identifier: Apache-2.0 */
 
@@ -6,15 +6,19 @@
    Multiplies usings BN.MULQACC with the result placed into w3, w2 (upper half
    in w3). */
 
-.section .text
+.section .text.start
+/* Initialise WDRs before using them */
+bn.xor w2, w2, w2
+bn.xor w3, w3, w3
 
 /* Load operands into WDRs */
 li x2, 0
-li x3, 1
-li x4, 32
+la x3, operand1
+bn.lid x2, 0(x3)
 
-bn.lid x2, 0(x0)
-bn.lid x3, 0(x4)
+li x2, 1
+la x3, operand2
+bn.lid x2, 0(x3)
 
 /* Perform the multiply, limbs are 64-bit. Each instance of `mulqacc` will
    operate on two limbs as a 64-bit multiply produces a 128-bit result. */

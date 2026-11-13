@@ -1,11 +1,11 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Testbench module for ping timer in alert handler. Intended to use with
 // a formal tool.
 
-module alert_handler_ping_timer_tb import alert_pkg::*; (
+module alert_handler_ping_timer_tb import alert_handler_pkg::*; (
   input                          clk_i,
   input                          rst_ni,
   output logic                   edn_req_o,

@@ -1,6 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+//
+// -------- W A R N I N G: A U T O - G E N E R A T E D  C O D E !! -------- //
+// PLEASE DO NOT HAND-EDIT THIS FILE. IT HAS BEEN AUTO-GENERATED (by closed source generator).
+//
 //############################################################################
 // *Name: ast_bhv_pkg
 // *Module Description: AST Behavioral Package
@@ -40,7 +44,7 @@ package ast_bhv_pkg;
   parameter time RNG_EN_RDLY     = 5us;
 `endif  // of SYNTHESIS
   // ADC
-  parameter int unsigned AdcCnvtClks = 22;
+  parameter int unsigned AdcCnvtClks = 19;
 
 endpackage  // of ast_bhv_pkg
 `endif // of __AST_BHV_PKG_SV

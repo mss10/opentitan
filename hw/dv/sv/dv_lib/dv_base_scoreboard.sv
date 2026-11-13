@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -69,6 +69,7 @@ class dv_base_scoreboard #(type RAL_T = dv_base_reg_block,
     // have errors in the check phase.
     if (has_uvm_fatal_occurred() &&
         !under_pre_abort &&
+        m_current_phase != null &&
         m_current_phase.is(uvm_run_phase::get())) begin
 
       under_pre_abort = 1;
@@ -78,4 +79,3 @@ class dv_base_scoreboard #(type RAL_T = dv_base_reg_block,
   endfunction : pre_abort
 
 endclass
-

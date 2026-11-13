@@ -1,8 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // adc_ctrl core module
+
+`include "prim_assert.sv"
 
 module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   input  clk_aon_i,//Always-on 200KHz clock(logic)
@@ -20,12 +22,15 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   output adc_ctrl_hw2reg_filter_status_reg_t aon_filter_status_o,
 
   // interrupt and wakeup outputs
-  output debug_cable_wakeup_o,
-  output intr_debug_cable_o,
+  output wkup_req_o,
+  output intr_o,
 
   // adc interface
   input  ast_pkg::adc_ast_rsp_t adc_i,
-  output ast_pkg::adc_ast_req_t adc_o
+  output ast_pkg::adc_ast_req_t adc_o,
+
+  // FSM state output for debug purposes.
+  output adc_ctrl_pkg::fsm_state_e aon_fsm_state_o
 );
 
   logic chn0_val_we, chn1_val_we;//write enable for the latest ADC sample
@@ -33,6 +38,7 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
 
   logic [NumAdcFilter-1:0] chn0_match, chn1_match, match;
   logic [NumAdcFilter-1:0] match_pulse;
+  logic aon_fsm_trans;
 
   //write enable for the ADC sample when the interrupt is triggered
   logic adc_ctrl_done, oneshot_done;
@@ -76,8 +82,8 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   // completion of one shot mode
   // match detection from the filters
   logic chn_val_intr_we;
-  assign chn_val_intr_we = reg2hw_i.adc_en_ctl.oneshot_mode.q ? oneshot_done  :
-                           reg2hw_i.adc_en_ctl.adc_enable.q   ? adc_ctrl_done : '0;
+  assign chn_val_intr_we = reg2hw_i.adc_en_ctl.oneshot_mode.q ? oneshot_done :
+                           reg2hw_i.adc_en_ctl.adc_enable.q   ? |match_pulse : '0;
 
   assign adc_chn_val_o[0].adc_chn_value_intr.de = chn_val_intr_we;
   assign adc_chn_val_o[0].adc_chn_value_intr.d  = chn0_val;
@@ -95,7 +101,7 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   assign adc_chn_val_o[1].adc_chn_value_intr_ext.de = 1'b0;
   assign adc_chn_val_o[1].adc_chn_value_intr_ext.d  = 2'b0;
 
-  //Evaluate if there is a match from chn0 and chn1 samples
+  // Evaluate if there is a match from chn0 and chn1 samples
   for (genvar k = 0 ; k < NumAdcFilter ; k++) begin : gen_filter_match
     assign chn0_match[k] = (!aon_filter_ctl[0][k].cond) ?
             (aon_filter_ctl[0][k].min_v <= chn0_val) && (chn0_val <= aon_filter_ctl[0][k].max_v) :
@@ -104,19 +110,44 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
             (aon_filter_ctl[1][k].min_v <= chn1_val) && (chn1_val <= aon_filter_ctl[1][k].max_v) :
             (aon_filter_ctl[1][k].min_v >  chn1_val) || (chn1_val >  aon_filter_ctl[1][k].max_v);
 
-    assign match[k] = (chn0_match[k] & aon_filter_ctl[0][k].en) &
-                      (chn1_match[k] & aon_filter_ctl[1][k].en);
+    // If the filter on a particular channel is NOT enabled, it does not participate in the final
+    // match decision.  This means the match value should have no impact on the final result.
+    // For example, if channel 0's filter is enabled, but channel 1's is not, the match result
+    // is determined solely based on whether channel 0's filter shows a match.
+    // On the other hand, if all channel's filters are enabled, then a match is seen only when
+    // both filters match.
+    assign match[k] = |{aon_filter_ctl[0][k].en, aon_filter_ctl[1][k].en} &
+                      (!aon_filter_ctl[0][k].en | (chn0_match[k] & aon_filter_ctl[0][k].en)) &
+                      (!aon_filter_ctl[1][k].en | (chn1_match[k] & aon_filter_ctl[1][k].en)) ;
+
     assign match_pulse[k] = adc_ctrl_done && match[k];
+
+   // Explicitly create assertions for all the matching conditions.
+   // These assertions are unwieldy and not suitable for expansion to more channels.
+   // They should be adjusted eventually.
+   `ASSERT(MatchCheck00_A, !aon_filter_ctl[0][k].en & !aon_filter_ctl[1][k].en |->
+           !match[k], clk_aon_i, !rst_aon_ni)
+   `ASSERT(MatchCheck01_A, !aon_filter_ctl[0][k].en & aon_filter_ctl[1][k].en  |->
+           match[k] == chn1_match[k], clk_aon_i, !rst_aon_ni)
+   `ASSERT(MatchCheck10_A, aon_filter_ctl[0][k].en & !aon_filter_ctl[1][k].en  |->
+           match[k] == chn0_match[k], clk_aon_i, !rst_aon_ni)
+   `ASSERT(MatchCheck11_A, aon_filter_ctl[0][k].en & aon_filter_ctl[1][k].en   |->
+           match[k] == (chn0_match[k] & chn1_match[k]), clk_aon_i, !rst_aon_ni)
   end
 
   // adc filter status
-  assign aon_filter_status_o.d  = match_pulse;
-  assign aon_filter_status_o.de = 1'b1;
+  assign aon_filter_status_o.match.d  = match_pulse | reg2hw_i.filter_status.match.q;
+  assign aon_filter_status_o.match.de = |match_pulse;
+  // transition status
+  assign aon_filter_status_o.trans.d  = aon_fsm_trans | reg2hw_i.filter_status.trans.q;
+  assign aon_filter_status_o.trans.de = aon_fsm_trans;
 
   // generate wakeup to external power manager if filter status
   // and wakeup enable are set.
-  assign debug_cable_wakeup_o = |(reg2hw_i.filter_status.q &
-                                  reg2hw_i.adc_wakeup_ctl.q);
+  assign wkup_req_o = |(reg2hw_i.filter_status.match.q &
+                        reg2hw_i.adc_wakeup_ctl.match_en.q) ||
+                       (reg2hw_i.filter_status.trans.q &
+                        reg2hw_i.adc_wakeup_ctl.trans_en.q);
 
   //instantiate the main state machine
   adc_ctrl_fsm u_adc_ctrl_fsm (
@@ -142,10 +173,12 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
     .chn0_val_o(chn0_val),
     .chn1_val_o(chn1_val),
     .adc_ctrl_done_o(adc_ctrl_done),
-    .oneshot_done_o(oneshot_done)
+    .oneshot_done_o(oneshot_done),
+    .aon_fsm_state_o,
+    .aon_fsm_trans_o(aon_fsm_trans)
   );
 
-  // synchronzie from clk_aon into cfg domain
+  // synchronize from clk_aon into cfg domain
   logic cfg_oneshot_done;
   prim_pulse_sync u_oneshot_done_sync (
     .clk_src_i(clk_aon_i),
@@ -160,15 +193,21 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   adc_ctrl_intr u_adc_ctrl_intr (
     .clk_i,
     .rst_ni,
-    .aon_filter_status_i(reg2hw_i.filter_status.q),
-    .cfg_intr_en_i(reg2hw_i.adc_intr_ctl.q),
+    .clk_aon_i,
+    .rst_aon_ni,
+    .aon_filter_match_i(match_pulse),
+    .aon_fsm_trans_i(aon_fsm_trans),
     .cfg_oneshot_done_i(cfg_oneshot_done),
+    .cfg_intr_en_i(reg2hw_i.adc_intr_ctl.match_en.q),
+    .cfg_intr_trans_en_i(reg2hw_i.adc_intr_ctl.trans_en.q),
+    .cfg_oneshot_done_en_i(reg2hw_i.adc_intr_ctl.oneshot_en.q),
     .intr_state_i(reg2hw_i.intr_state),
     .intr_enable_i(reg2hw_i.intr_enable),
     .intr_test_i(reg2hw_i.intr_test),
     .intr_state_o,
+    .adc_intr_status_i(reg2hw_i.adc_intr_status),
     .adc_intr_status_o,
-    .intr_debug_cable_o
+    .intr_o
   );
 
   // unused register inputs
@@ -179,7 +218,6 @@ module adc_ctrl_core import adc_ctrl_reg_pkg::* ; (
   // Assertions
   //////////////////////
 
-  `ASSERT_INIT(MaxFilters_A, NumAdcFilter <= 32)
-  `ASSERT(OneHotMatch_A, adc_ctrl_done |-> $onehot0(match_pulse))
+  `ASSERT(MaxFilters_A, NumAdcFilter <= 32, clk_aon_i, !rst_aon_ni)
 
 endmodule

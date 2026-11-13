@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,6 +6,13 @@ class kmac_app_vseq extends kmac_sideload_vseq;
 
   `uvm_object_utils(kmac_app_vseq)
   `uvm_object_new
+
+  // Restrict all tests based on this sequence to static interfaces until the complete DV can
+  // handle dynamic interfaces.
+  // TODO: Remove constraint once DV fully supports dynamic interfaces.
+  constraint app_mode_c {
+    app_mode inside {AppKeymgr, AppLc, AppRom};
+  }
 
   constraint en_app_c {
     en_app dist {
@@ -21,15 +28,8 @@ class kmac_app_vseq extends kmac_sideload_vseq;
 
   constraint kmac_app_c {
     if (en_app) {
-      // application interface outputs 384-bit digest (48 bytes)
+      // application interface outputs 512-bit digest (64 bytes)
       output_len == kmac_pkg::AppDigestW / 8;
-
-      // LC_CTRL uses 128-bit strength, KeyMgr and OTP_CTRL use 256-bit strength
-      if (app_mode == AppLc) {
-        strength == sha3_pkg::L128;
-      } else {
-        strength == sha3_pkg::L256;
-      }
 
       // KMAC_APP will never use XOF mode
       xof_en == 0;
@@ -38,13 +38,7 @@ class kmac_app_vseq extends kmac_sideload_vseq;
 
   constraint hash_mode_c {
     if (en_app) {
-      hash_mode == sha3_pkg::CShake;
-      if (app_mode == AppKeymgr) {
-        kmac_en == 1;
-        en_sideload == 1;
-      } else {
-        kmac_en == 0;
-      }
+      kmac_en == ((app_mode == AppKeymgr) && cfg.enable_full_kmac);
     } else {
       if (kmac_en) {
         hash_mode == sha3_pkg::CShake;

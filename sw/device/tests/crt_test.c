@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,18 +6,24 @@
 #include <stdint.h>
 
 #include "sw/device/lib/arch/device.h"
-#include "sw/device/lib/base/memory.h"
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/base/stdasm.h"
-#include "sw/device/lib/dif/dif_uart.h"
+#include "sw/device/lib/coverage/api.h"
+#include "sw/device/lib/runtime/hart.h"
+#include "sw/device/lib/runtime/ibex.h"
 #include "sw/device/lib/runtime/log.h"
 #include "sw/device/lib/runtime/print.h"
-#include "sw/device/lib/testing/check.h"
-#include "sw/device/lib/testing/test_framework/test_status.h"
+#include "sw/device/lib/testing/test_framework/check.h"
+#include "sw/device/lib/testing/test_framework/ottf_console.h"
+#include "sw/device/lib/testing/test_framework/ottf_isrs.h"
+#include "sw/device/lib/testing/test_framework/ottf_test_config.h"
+#include "sw/device/lib/testing/test_framework/status.h"
+#include "sw/device/silicon_creator/lib/manifest_def.h"
 
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
+OTTF_DEFINE_TEST_CONFIG();
 
-// Symbols defined in sw/device/exts/common/flash_link.ld, which we use to
-// check that the CRT did what it was supposed to.
+// Symbols defined in `sw/device/lib/testing/test_framework/ottf.ld`,
+// which we use to check that the CRT did what it was supposed to.
 extern char _bss_start;
 extern char _bss_end;
 extern char _data_start;
@@ -36,18 +42,21 @@ static const uintptr_t data_init_start_addr = (uintptr_t)&_data_init_start;
 volatile char ensure_data_exists = 42;
 volatile char ensure_bss_exists;
 
-static dif_uart_t uart0;
-static void init_uart(void) {
-  CHECK_DIF_OK(dif_uart_init(
-      mmio_region_from_addr(TOP_EARLGREY_UART0_BASE_ADDR), &uart0));
-  CHECK_DIF_OK(
-      dif_uart_configure(&uart0, (dif_uart_config_t){
-                                     .baudrate = kUartBaudrate,
-                                     .clk_freq_hz = kClockFreqPeripheralHz,
-                                     .parity_enable = kDifToggleDisabled,
-                                     .parity = kDifUartParityEven,
-                                 }));
-  base_uart_stdout(&uart0);
+volatile size_t expect_trap;
+volatile size_t trap_seen;
+void ottf_illegal_instr_fault_handler(uint32_t *exc_info) {
+  if (!expect_trap) {
+    // In all other cases, we are in an invalid test state.  Invoke the
+    // generic fault handler.
+    ottf_generic_fault_print(exc_info, "Illegal Instruction",
+                             ibex_mcause_read());
+    abort();
+  }
+  trap_seen += 1;
+
+  // Overwrite mepc to return from crt function
+  // i.e. mepc = ra
+  exc_info[0] = exc_info[1];
 }
 
 /**
@@ -69,11 +78,22 @@ static void test_crt_section_clear(void) {
   const struct {
     size_t start;
     size_t end;
-  } kTests[] = {{.start = 0, .end = 0},           {.start = 0, .end = 1},
-                {.start = kLen - 1, .end = kLen}, {.start = 0, .end = kLen - 1},
-                {.start = 1, .end = kLen},        {.start = 0, .end = kLen}};
+    size_t trap;
+  } kTests[] = {
+      {.start = 0, .end = 0, .trap = 0},
+      {.start = 0, .end = 1, .trap = 0},
+      {.start = kLen - 1, .end = kLen, .trap = 0},
+      {.start = 0, .end = kLen - 1, .trap = 0},
+      {.start = 1, .end = kLen, .trap = 0},
+      {.start = 0, .end = kLen, .trap = 0},
+      {.start = kLen, .end = 0, .trap = 1},
+  };
 
   for (size_t t = 0; t < ARRAYSIZE(kTests); ++t) {
+    // Set the trap expectation
+    expect_trap = kTests[t].trap;
+    trap_seen = 0;
+
     // Set target array to non-zero values.
     uint32_t section[kLen];
     const uint32_t kVal = ~0u;
@@ -93,6 +113,8 @@ static void test_crt_section_clear(void) {
             "%s case %u: section[%u] got 0x%08x, want 0x%08x", __func__, t, i,
             section[i], expect);
     }
+    CHECK(trap_seen == kTests[t].trap, "incorrect trap count: got %d, want %d",
+          trap_seen, kTests[t].trap);
   }
 }
 
@@ -118,22 +140,30 @@ static void test_crt_section_copy(void) {
     size_t start;
     size_t end;
     size_t source;
-  } kTests[] = {{.start = 0, .end = 0, .source = 0},
-                {.start = 0, .end = 1, .source = 1},
-                {.start = kLen - 1, .end = kLen, .source = 2},
-                {.start = 0, .end = kLen - 1, .source = 1},
-                {.start = 1, .end = kLen, .source = 1},
-                {.start = 0, .end = kLen, .source = 0},
-                {.start = 0, .end = kLen, .source = 0},
-                {.start = 1, .end = kLen, .source = 0},
-                {.start = 2, .end = kLen, .source = 0},
-                {.start = 3, .end = kLen, .source = 0},
-                {.start = 0, .end = kLen / 2, .source = 0},
-                {.start = 1, .end = kLen / 2, .source = 0},
-                {.start = 2, .end = kLen / 2, .source = 0},
-                {.start = 3, .end = kLen / 2, .source = 0}};
+    char trap;
+  } kTests[] = {
+      {.start = 0, .end = 0, .source = 0, .trap = 0},
+      {.start = 0, .end = 1, .source = 1, .trap = 0},
+      {.start = 1, .end = 0, .source = 1, .trap = 1},
+      {.start = kLen - 1, .end = kLen, .source = 2, .trap = 0},
+      {.start = 0, .end = kLen - 1, .source = 1, .trap = 0},
+      {.start = 1, .end = kLen, .source = 1, .trap = 0},
+      {.start = 0, .end = kLen, .source = 0, .trap = 0},
+      {.start = 0, .end = kLen, .source = 0, .trap = 0},
+      {.start = 1, .end = kLen, .source = 0, .trap = 0},
+      {.start = 2, .end = kLen, .source = 0, .trap = 0},
+      {.start = 3, .end = kLen, .source = 0, .trap = 0},
+      {.start = 0, .end = kLen / 2, .source = 0, .trap = 0},
+      {.start = 1, .end = kLen / 2, .source = 0, .trap = 0},
+      {.start = 2, .end = kLen / 2, .source = 0, .trap = 0},
+      {.start = 3, .end = kLen / 2, .source = 0, .trap = 0},
+  };
 
   for (size_t t = 0; t < ARRAYSIZE(kTests); ++t) {
+    // Set the trap expectation
+    expect_trap = kTests[t].trap;
+    trap_seen = 0;
+
     // Clear target array and setup source array with known values (index + 1).
     uint32_t dst[kLen], src[kLen];
     for (size_t i = 0; i < kLen; ++i) {
@@ -156,10 +186,12 @@ static void test_crt_section_copy(void) {
       CHECK(dst[i] == expect, "%s case %u: dst[%u] got 0x%08x, want 0x%08x",
             __func__, t, i, dst[i], expect);
     }
+    CHECK(trap_seen == kTests[t].trap, "incorrect trap count: got %d, want %d",
+          trap_seen, kTests[t].trap);
   }
 }
 
-int main(int argc, char **argv) {
+void _ottf_main(void) {
   // NOTE: we cannot call any external functions until all checks of post-CRT
   // state are complete; this is to ensure that our checks are not tainted by
   // external functions.
@@ -176,11 +208,8 @@ int main(int argc, char **argv) {
   // cause this entire function to get deleted by the compiler.
   if (&_bss_start > &_bss_end || &_data_start > &_data_end) {
     // Something has gone terribly wrong and we have no hope of continuing the
-    // test, so we're going to return and let the test time out.
-    //
-    // The best method for debugging a failure like this is to stare at an
-    // instruction trace.
-    return 1;
+    // test, so we're going to just abort.
+    abort();
   }
 
   // Ensure that .bss was *actually* zeroed at the start of execution. If it
@@ -211,7 +240,7 @@ int main(int argc, char **argv) {
   test_status_set(kTestStatusInTest);
   // Initialize the UART to enable logging for non-DV simulation platforms.
   if (kDeviceType != kDeviceSimDV) {
-    init_uart();
+    ottf_console_init();
   }
 
   CHECK(bss_start_addr % sizeof(uint32_t) == 0,
@@ -225,18 +254,18 @@ int main(int argc, char **argv) {
   CHECK(data_init_start_addr % sizeof(uint32_t) == 0,
         "_data_init_start not word-aligned: 0x%08x", data_init_start_addr);
 
-  CHECK(bad_bss_index == -1, "found non-zero .bss byte at *0x%08x == 0x%02x",
-        bss_start_addr + bad_bss_index, (uint32_t)bss[bad_bss_index]);
+  CHECK(bad_bss_index == -1,
+        "found non-zero .bss byte at *(0x%08x + %d) == 0x%02x", bss_start_addr,
+        bad_bss_index, (uint32_t)bss[bad_bss_index]);
   CHECK(bad_data_index == -1,
-        "found bad .data byte at *0x%08x == 0x%02x, expected 0x%02x",
-        data_start_addr + bad_data_index, (uint32_t)data_init[bad_data_index]);
+        "found bad .data byte at *(0x%08x + %d) == 0x%02x", data_start_addr,
+        bad_data_index, (uint32_t)data_init[bad_data_index]);
 
   // Unit test CRT utility functions.
   test_crt_section_clear();
   test_crt_section_copy();
 
-  test_status_set(kTestStatusPassed);
+  coverage_report();
 
-  // Unreachable code.
-  return 1;
+  test_status_set(kTestStatusPassed);
 }

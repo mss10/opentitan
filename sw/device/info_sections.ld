@@ -1,4 +1,4 @@
-/* Copyright lowRISC contributors. */
+/* Copyright lowRISC contributors (OpenTitan project). */
 /* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
 /* SPDX-License-Identifier: Apache-2.0 */
 
@@ -38,15 +38,21 @@
 /**
  * The following section contains log fields constructed from the logs using
  * the log_fields_t struct defined in sw/device/lib/runtime/log.h. The size of
- * each log field is fixed - 20 bytes.
+ * each log field is fixed - 20 bytes. To distinguish between the fields of
+ * different ELF files we add an offset to the address. We register that offset
+ * here as a header before the log fields.
  */
-.logs.fields _dv_log_offset (INFO): {
+.logs.fields 0 (INFO): {
+  LONG(_dv_log_offset);
   *(.logs.fields)
 }
 
 /*
  * End DV Sections
  */
+
+/* Coverage Runtime Sections. */
+INCLUDE sw/device/lib/coverage/info.ld
 
 /* ELF-internal Sections. */
 .symtab 0x0 : { *(.symtab) }
@@ -65,6 +71,26 @@
 .debug_ranges 0x0 : { *(.debug_ranges) }
 .debug_str 0x0 : { *(.debug_str) }
 .debug_frame 0x0 : { *(.debug_frame) }
+.debug_line_str 0x0 : { *(.debug_line_str) }
+.debug_loclists 0x0 : { *(.debug_loclists) }
+.debug_rnglists 0x0 : { *(.debug_rnglists) }
+.debug_addr 0x0 : { *(.debug_addr) }
+.debug_str_offsets 0x0 : { *(.debug_str_offsets) }
+
+/**
+ * Status create recording section.
+ *
+ * This section contains status_create_record_t entries that are used to provide better status_t
+ * decoding and needs to be accessible by tools. This section is not needed for the execution
+ * on the target and can safely be discarded.
+ */
+.ot.status_create_record 0x0 (INFO) : {
+  /* Make sure the section is always present */
+  . = .;
+  /* The variables created in this section are not referenced by anything so we need to prevent
+   * garbage collection from removing them */
+  KEEP(*(.ot.status_create_record))
+}
 
 /* Discarded Sections (Not needed in device images). */
 /DISCARD/ : {

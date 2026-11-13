@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:opentitan:bus_params_pkg"
@@ -8,7 +8,7 @@ description: "Package holding common bus parameters such as widths."
 filesets:
   files_dv:
     depend:
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
     files:
       - bus_params_pkg.sv
     file_type: systemVerilogSource

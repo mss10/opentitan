@@ -1,5 +1,6 @@
 // Copyright lowRISC contributors.
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
+// Copyright Microsoft Corporation
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -34,10 +35,11 @@
  * to the one produced by objdump. This simplifies the correlation between the static program
  * information from the objdump-generated disassembly, and the runtime information from this tracer.
  */
-module ibex_tracer (
+module ibex_tracer import ibex_cheriot_pkg::*; import ibex_pkg::*; (
   input logic        clk_i,
   input logic        rst_ni,
 
+  input ibex_mubi_t  cheriot_enable_i,
   input logic [31:0] hart_id_i,
 
   // RVFI as described at https://github.com/SymbioticEDA/riscv-formal/blob/master/docs/rvfi.md
@@ -55,17 +57,25 @@ module ibex_tracer (
   input logic [ 4:0] rvfi_rs2_addr,
   input logic [ 4:0] rvfi_rs3_addr,
   input logic [31:0] rvfi_rs1_rdata,
+  input cap_t        rvfi_rs1_rcap,
   input logic [31:0] rvfi_rs2_rdata,
+  input cap_t        rvfi_rs2_rcap,
   input logic [31:0] rvfi_rs3_rdata,
   input logic [ 4:0] rvfi_rd_addr,
   input logic [31:0] rvfi_rd_wdata,
+  input cap_t        rvfi_rd_wcap,
   input logic [31:0] rvfi_pc_rdata,
   input logic [31:0] rvfi_pc_wdata,
   input logic [31:0] rvfi_mem_addr,
   input logic [ 3:0] rvfi_mem_rmask,
   input logic [ 3:0] rvfi_mem_wmask,
   input logic [31:0] rvfi_mem_rdata,
-  input logic [31:0] rvfi_mem_wdata
+  input logic [31:0] rvfi_mem_wdata,
+  input logic        rvfi_mem_is_cap,
+  input cap_t        rvfi_mem_rcap,
+  input cap_t        rvfi_mem_wcap,
+  input logic        rvfi_ext_expanded_insn_valid,
+  input logic [15:0] rvfi_ext_expanded_insn
 );
 
   // These signals are part of RVFI, but not used in this module currently.
@@ -89,12 +99,17 @@ module ibex_tracer (
   logic        insn_is_compressed;
 
   // Data items accessed during this instruction
-  localparam logic [4:0] RS1 = (1 << 0);
-  localparam logic [4:0] RS2 = (1 << 1);
-  localparam logic [4:0] RS3 = (1 << 2);
-  localparam logic [4:0] RD  = (1 << 3);
-  localparam logic [4:0] MEM = (1 << 4);
-  logic [4:0] data_accessed;
+  localparam logic [9:0] RS1 = (1 << 0);
+  localparam logic [9:0] RS2 = (1 << 1);
+  localparam logic [9:0] RS3 = (1 << 2);
+  localparam logic [9:0] RD  = (1 << 3);
+  localparam logic [9:0] MEM = (1 << 4);
+  localparam logic [9:0] CS1 = (1 << 5);
+  localparam logic [9:0] CS2 = (1 << 6);
+  localparam logic [9:0] CD  = (1 << 7);
+  localparam logic [9:0] MEMC = (1 << 8);
+  // MEM2 removed — TBRE second-access path not implemented
+  logic [9:0] data_accessed;
 
   logic trace_log_enable;
   initial begin
@@ -107,55 +122,82 @@ module ibex_tracer (
     end
   end
 
-  function automatic void printbuffer_dumpline();
+  function automatic void printbuffer_dumpline(int fh);
     string rvfi_insn_str;
-
-    if (file_handle == 32'h0) begin
-      string file_name_base = "trace_core";
-      $value$plusargs("ibex_tracer_file_base=%s", file_name_base);
-      $sformat(file_name, "%s_%h.log", file_name_base, hart_id_i);
-
-      $display("%m: Writing execution trace to %s", file_name);
-      file_handle = $fopen(file_name, "w");
-      $fwrite(file_handle,
-              "Time\tCycle\tPC\tInsn\tDecoded instruction\tRegister and memory contents\n");
-    end
+    string disp_str;
+    logic [32:0] tmp33;
 
     // Write compressed instructions as four hex digits (16 bit word), and
     // uncompressed ones as 8 hex digits (32 bit words).
     if (insn_is_compressed) begin
-      rvfi_insn_str = $sformatf("%h", rvfi_insn[15:0]);
+      rvfi_insn_str = $sformatf("    %4h", rvfi_insn[15:0]);
     end else begin
-      rvfi_insn_str = $sformatf("%h", rvfi_insn);
+      rvfi_insn_str = $sformatf("%8h", rvfi_insn);
     end
 
-    $fwrite(file_handle, "%15t\t%d\t%h\t%s\t%s\t",
-            $time, cycle, rvfi_pc_rdata, rvfi_insn_str, decoded_str);
+    if (rvfi_trap) disp_str = $sformatf("-->%s", decoded_str);
+    else if (rvfi_intr) disp_str = $sformatf("==>%s", decoded_str);
+    else disp_str = decoded_str;
+
+    $fwrite(fh, "%15t\t%d\t%h\t%s\t%s\t",
+            $time, cycle, rvfi_pc_rdata, rvfi_insn_str, disp_str);
 
     if ((data_accessed & RS1) != 0) begin
-      $fwrite(file_handle, " %s:0x%08x", reg_addr_to_str(rvfi_rs1_addr), rvfi_rs1_rdata);
+      $fwrite(fh, " %s:0x%08x", reg_addr_to_str(rvfi_rs1_addr), rvfi_rs1_rdata);
+    end
+    if ((data_accessed & CS1) != 0) begin
+      tmp33 = cheriot_cap_to_mem(rvfi_rs1_rcap);
+      $fwrite(fh, " %s:0x%08x+0x%09x", reg_addr_to_str(rvfi_rs1_addr), rvfi_rs1_rdata, tmp33);
     end
     if ((data_accessed & RS2) != 0) begin
-      $fwrite(file_handle, " %s:0x%08x", reg_addr_to_str(rvfi_rs2_addr), rvfi_rs2_rdata);
+      $fwrite(fh, " %s:0x%08x", reg_addr_to_str(rvfi_rs2_addr), rvfi_rs2_rdata);
+    end
+    if ((data_accessed & CS2) != 0) begin
+      tmp33 = cheriot_cap_to_mem(rvfi_rs2_rcap);
+      $fwrite(fh, " %s:0x%08x+0x%09x", reg_addr_to_str(rvfi_rs2_addr), rvfi_rs2_rdata, tmp33);
     end
     if ((data_accessed & RS3) != 0) begin
-      $fwrite(file_handle, " %s:0x%08x", reg_addr_to_str(rvfi_rs3_addr), rvfi_rs3_rdata);
+      $fwrite(fh, " %s:0x%08x", reg_addr_to_str(rvfi_rs3_addr), rvfi_rs3_rdata);
     end
     if ((data_accessed & RD) != 0) begin
-      $fwrite(file_handle, " %s=0x%08x", reg_addr_to_str(rvfi_rd_addr), rvfi_rd_wdata);
+      $fwrite(fh, " %s=0x%08x", reg_addr_to_str(rvfi_rd_addr), rvfi_rd_wdata);
     end
+
+    if ((data_accessed & CD) != 0) begin
+      tmp33 = cheriot_cap_to_mem(rvfi_rd_wcap);
+      $fwrite(fh, " %s=0x%08x+0x%09x", reg_addr_to_str(rvfi_rd_addr), rvfi_rd_wdata, tmp33);
+    end
+
     if ((data_accessed & MEM) != 0) begin
-      $fwrite(file_handle, " PA:0x%08x", rvfi_mem_addr);
+      $fwrite(fh, " PA:0x%08x", rvfi_mem_addr);
 
-      if (rvfi_mem_rmask != 4'b0000) begin
-        $fwrite(file_handle, " store:0x%08x", rvfi_mem_wdata);
-      end
-      if (rvfi_mem_wmask != 4'b0000) begin
-        $fwrite(file_handle, " load:0x%08x", rvfi_mem_rdata);
-      end
+      if (rvfi_mem_wmask == 4'b0001)
+        $fwrite(fh, " store:0x??????%02x", rvfi_mem_wdata[7:0]);
+      else if (rvfi_mem_wmask == 4'b0011)
+        $fwrite(fh, " store:0x????%04x",  rvfi_mem_wdata[15:0]);
+      else if (rvfi_mem_wmask != 4'b0000)
+        $fwrite(fh, " store:0x%08x", rvfi_mem_wdata);
+
+      if (rvfi_mem_rmask != 4'b0000)
+        $fwrite(fh, " load:0x%08x", rvfi_mem_rdata);
     end
 
-    $fwrite(file_handle, "\n");
+    if ((data_accessed & MEMC) != 0) begin
+      $fwrite(fh, " PA:0x%08x", rvfi_mem_addr);
+
+      if (rvfi_mem_wmask != 0) begin
+        tmp33 = cheriot_cap_to_mem(rvfi_mem_wcap);
+        $fwrite(fh, " store:0x%08x+0x%09x", rvfi_mem_wdata, tmp33);
+      end else begin
+        tmp33 = cheriot_cap_to_mem(rvfi_mem_rcap);
+        $fwrite(fh, " load:0x%08x+0x%09x", rvfi_mem_rdata, tmp33);
+      end
+    end
+    if (rvfi_ext_expanded_insn_valid) begin
+      $fwrite(fh, " expand_insn: (0x%04x %s)", rvfi_ext_expanded_insn, decode_expanded_insn());
+    end
+
+    $fwrite(fh, "\n");
   endfunction
 
 
@@ -166,6 +208,43 @@ module ibex_tracer (
     end else begin
       return $sformatf("x%0d", addr);
     end
+  endfunction
+
+  // Format register address with "x" prefix, left-aligned to a fixed width of 3 characters.
+  function automatic string reg_addr_to_abi_str(input logic [4:0] addr);
+    case (addr)
+      // Hard-wired Zero Register
+      5'd0: return "zero";
+      // Return Address and Pointers
+      5'd1: return "ra";   // Return Address
+      5'd2: return "sp";   // Stack Pointer
+      5'd3: return "gp";   // Global Pointer
+      5'd4: return "tp";   // Thread Pointer
+      // Temporary Registers
+      5'd5, 5'd6, 5'd7: return $sformatf("t%0d", addr - 5);
+      // Saved Registers
+      5'd8, 5'd9: return $sformatf("s%0d", addr - 8);
+      // Function Arguments / Return Values
+      5'd10, 5'd11, 5'd12, 5'd13,
+      5'd14, 5'd15, 5'd16, 5'd17: return $sformatf("a%0d", addr - 10);
+      // Saved Registers
+      5'd18, 5'd19, 5'd20, 5'd21, 5'd22,
+      5'd23, 5'd24, 5'd25, 5'd26, 5'd27: return $sformatf("s%0d", addr - 16);
+      // Temporary Registers
+      5'd28, 5'd29, 5'd30, 5'd31: return $sformatf("t%0d", addr - 25);
+      default: return $sformatf("x%0d", addr);
+    endcase
+  endfunction
+
+  // Get a SCR name for a CHERIoT SCR address.
+  function automatic string get_scr_name(input logic [4:0] scr_addr);
+    unique case (scr_addr)
+      5'd28:   return "mtcc";
+      5'd29:   return "mtdc";
+      5'd30:   return "mscratchc";
+      5'd31:   return "mepcc";
+      default: return $sformatf("scr%d", scr_addr);
+    endcase
   endfunction
 
   // Get a CSR name for a CSR address.
@@ -409,6 +488,9 @@ module ibex_tracer (
       12'd900: return "mdbase";
       12'd901: return "mdbound";
       12'd800: return "mcountinhibit";
+      12'd3009: return "mshwm";
+      12'd3010: return "mshwmb";
+      12'd3012: return "cdbgctrl";
       default: return $sformatf("0x%x", csr_addr);
     endcase
   endfunction
@@ -428,18 +510,6 @@ module ibex_tracer (
     decoded_str = $sformatf("%s\tx%0d,x%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr);
   endfunction
 
-  function automatic void decode_r_cmixcmov_insn(input string mnemonic);
-    data_accessed = RS1 | RS2 | RS3 | RD;
-    decoded_str = $sformatf("%s\tx%0d,x%0d,x%0d,x%0d", mnemonic, rvfi_rd_addr, rvfi_rs2_addr,
-        rvfi_rs1_addr, rvfi_rs3_addr);
-  endfunction
-
-  function automatic void decode_r_funnelshift_insn(input string mnemonic);
-    data_accessed = RS1 | RS2 | RS3 | RD;
-    decoded_str = $sformatf("%s\tx%0d,x%0d,x%0d,x%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr,
-        rvfi_rs3_addr, rvfi_rs2_addr);
-  endfunction
-
   function automatic void decode_i_insn(input string mnemonic);
     data_accessed = RS1 | RD;
     decoded_str = $sformatf("%s\tx%0d,x%0d,%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr,
@@ -447,27 +517,26 @@ module ibex_tracer (
   endfunction
 
   function automatic void decode_i_shift_insn(input string mnemonic);
-    // SLLI, SRLI, SRAI, SROI, SLOI, RORI
+    // SLLI, SRLI, SRAI, RORI
     logic [4:0] shamt;
     shamt = {rvfi_insn[24:20]};
     data_accessed = RS1 | RD;
     decoded_str = $sformatf("%s\tx%0d,x%0d,0x%0x", mnemonic, rvfi_rd_addr, rvfi_rs1_addr, shamt);
   endfunction
 
-  function automatic void decode_i_funnelshift_insn( input string mnemonic);
-    // fsri
-    logic [5:0] shamt;
-    shamt = {rvfi_insn[25:20]};
-    data_accessed = RS1 | RS3 | RD;
-    decoded_str = $sformatf("%s\tx%0d,x%0d,x%0d,0x%0x", mnemonic, rvfi_rd_addr, rvfi_rs1_addr,
-        rvfi_rs3_addr, shamt);
-  endfunction
-
   function automatic void decode_i_jalr_insn(input string mnemonic);
     // JALR
-    data_accessed = RS1 | RD;
-    decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr,
-        $signed({{20 {rvfi_insn[31]}}, rvfi_insn[31:20]}), rvfi_rs1_addr);
+    if ((cheriot_enable_i == IbexMuBiOn)) begin
+      data_accessed = CS1 | CD;
+      // CH.cjalr
+      decoded_str = $sformatf("CH.c%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr,
+          $signed({{20 {rvfi_insn[31]}}, rvfi_insn[31:20]}), rvfi_rs1_addr);
+    end else begin
+      // jalr
+      data_accessed = RS1 | RD;
+      decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr,
+          $signed({{20 {rvfi_insn[31]}}, rvfi_insn[31:20]}), rvfi_rs1_addr);
+    end
   endfunction
 
   function automatic void decode_u_insn(input string mnemonic);
@@ -477,8 +546,13 @@ module ibex_tracer (
 
   function automatic void decode_j_insn(input string mnemonic);
     // JAL
-    data_accessed = RD;
-    decoded_str = $sformatf("%s\tx%0d,%0x", mnemonic, rvfi_rd_addr, rvfi_pc_wdata);
+    if ((cheriot_enable_i == IbexMuBiOn)) begin
+      data_accessed = CD;
+      decoded_str = $sformatf("%s\tc%0d,%0x", "CH.cjal", rvfi_rd_addr, rvfi_pc_wdata);
+    end else begin
+      data_accessed = RD;
+      decoded_str = $sformatf("%s\tx%0d,%0x", mnemonic, rvfi_rd_addr, rvfi_pc_wdata);
+    end
   endfunction
 
   function automatic void decode_b_insn(input string mnemonic);
@@ -490,7 +564,7 @@ module ibex_tracer (
              rvfi_insn[30:25], rvfi_insn[11:8], 1'b0 });
     branch_target = rvfi_pc_rdata + imm;
 
-    data_accessed = RS1 | RS2 | RD;
+    data_accessed = RS1 | RS2;
     decoded_str = $sformatf("%s\tx%0d,x%0d,%0x",
                             mnemonic, rvfi_rs1_addr, rvfi_rs2_addr, branch_target);
   endfunction
@@ -515,14 +589,23 @@ module ibex_tracer (
 
   function automatic void decode_cr_insn(input string mnemonic);
     if (rvfi_rs2_addr == 5'b0) begin
-      if (rvfi_insn[12] == 1'b1) begin
+      if ((rvfi_insn[12] == 1'b1) && (cheriot_enable_i == IbexMuBiOn)) begin
+        // C.CH.JALR
+        data_accessed = CS1 | CD;
+        decoded_str = $sformatf("%s\tc%0d", "c.CH.cjalr", rvfi_rs1_addr);
+      end else if (rvfi_insn[12] == 1'b1) begin
         // C.JALR
         data_accessed = RS1 | RD;
+        decoded_str = $sformatf("%s\tx%0d", mnemonic, rvfi_rs1_addr);
+      end else if ((cheriot_enable_i == IbexMuBiOn)) begin
+        // C.CH.JR
+        data_accessed = CS1;
+        decoded_str = $sformatf("%s\tc%0d", "c.CH.cjr" , rvfi_rs1_addr);
       end else begin
         // C.JR
         data_accessed = RS1;
+        decoded_str = $sformatf("%s\tx%0d", mnemonic, rvfi_rs1_addr);
       end
-      decoded_str = $sformatf("%s\tx%0d", mnemonic, rvfi_rs1_addr);
     end else begin
       data_accessed = RS1 | RS2 | RD; // RS1 == RD
       decoded_str = $sformatf("%s\tx%0d,x%0d", mnemonic, rvfi_rd_addr, rvfi_rs2_addr);
@@ -546,8 +629,13 @@ module ibex_tracer (
   function automatic void decode_ci_caddi16sp_insn(input string mnemonic);
     logic [9:0] nzimm;
     nzimm = {rvfi_insn[12], rvfi_insn[4:3], rvfi_insn[5], rvfi_insn[2], rvfi_insn[6], 4'b0};
-    data_accessed = RS1 | RD;
-    decoded_str = $sformatf("%s\tx%0d,%0d", mnemonic, rvfi_rd_addr, $signed(nzimm));
+    if ((cheriot_enable_i == IbexMuBiOn)) begin
+      data_accessed = CS1 | CD;
+      decoded_str = $sformatf("%s\tc%0d,%0d", "c.CH.cinc16csp", rvfi_rd_addr, $signed(nzimm));
+    end else begin
+      data_accessed = RS1 | RD;
+      decoded_str = $sformatf("%s\tx%0d,%0d", mnemonic, rvfi_rd_addr, $signed(nzimm));
+    end
   endfunction
 
   function automatic void decode_ci_clui_insn(input string mnemonic);
@@ -568,8 +656,15 @@ module ibex_tracer (
     // C.ADDI4SPN
     logic [9:0] nzuimm;
     nzuimm = {rvfi_insn[10:7], rvfi_insn[12:11], rvfi_insn[5], rvfi_insn[6], 2'b00};
-    data_accessed = RD;
-    decoded_str = $sformatf("%s\tx%0d,x2,%0d", mnemonic, rvfi_rd_addr, nzuimm);
+    if ((cheriot_enable_i == IbexMuBiOn)) begin
+      // c.CH.incaddr4spn
+      data_accessed = CD | CS1;
+      decoded_str = $sformatf("%s\tc%0d,csp,%0d", mnemonic, rvfi_rd_addr, nzuimm);
+    end else begin
+      // c.addi4spn
+      data_accessed = RD;
+      decoded_str = $sformatf("%s\tx%0d,x2,%0d", mnemonic, rvfi_rd_addr, nzuimm);
+    end
   endfunction
 
   function automatic void decode_cb_sr_insn(input string mnemonic);
@@ -609,40 +704,170 @@ module ibex_tracer (
   function automatic void decode_cj_insn(input string mnemonic);
     if (rvfi_insn[15:13] == 3'b001) begin
       // C.JAL
-      data_accessed = RD;
+      if ((cheriot_enable_i == IbexMuBiOn)) begin
+        data_accessed = CD;
+        decoded_str = $sformatf("%s\t%0x", "c.CH.cjal", rvfi_pc_wdata);
+      end else begin
+        data_accessed = RD;
+        decoded_str = $sformatf("%s\t%0x", mnemonic, rvfi_pc_wdata);
+      end
+    end else begin
+      // C.J
+      if ((cheriot_enable_i == IbexMuBiOn))
+        decoded_str = $sformatf("%s\t%0x", "c.CH.cj", rvfi_pc_wdata);
+      else
+        decoded_str = $sformatf("%s\t%0x", mnemonic, rvfi_pc_wdata);
     end
-    decoded_str = $sformatf("%s\t%0x", mnemonic, rvfi_pc_wdata);
+  endfunction
+
+  function automatic void decode_Zc_cu_insn(input string mnemonic);
+    data_accessed = RS1 | RD; // RS1 == RD
+    decoded_str = $sformatf("%s\tx%0d", mnemonic, rvfi_rd_addr);
   endfunction
 
   function automatic void decode_compressed_load_insn(input string mnemonic);
-    logic [7:0] imm;
+    logic [8:0] imm;
 
-    if (rvfi_insn[1:0] == OPCODE_C0) begin
-      // C.LW
-      imm = {1'b0, rvfi_insn[5], rvfi_insn[12:10], rvfi_insn[6], 2'b00};
+    if ((rvfi_insn[15:13] == 3'b011) && (rvfi_insn[1:0] == OPCODE_C0))  begin
+      // CHERIoT: c.clc, use RV64 c.ld encoding
+      imm = {1'b0, rvfi_insn[6:5], rvfi_insn[12:10], 3'b000};
+      data_accessed = CS1 | CD | MEMC;
+      decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
+    end else if ((rvfi_insn[15:13] == 3'b011) && (rvfi_insn[1:0] == OPCODE_C2))  begin
+      // CHERIoT: c.clcsp, RV32: c.ldsp
+      imm = {rvfi_insn[4:2], rvfi_insn[12], rvfi_insn[6:5], 3'b000};
+      data_accessed = CS1 | CD | MEMC;
+      decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
     end else begin
-      // C.LWSP
-      imm = {rvfi_insn[3:2], rvfi_insn[12], rvfi_insn[6:4], 2'b00};
+      if (rvfi_insn[1:0] == OPCODE_C0) begin
+        // C.LW
+        imm = {2'b00, rvfi_insn[5], rvfi_insn[12:10], rvfi_insn[6], 2'b00};
+      end else begin
+        // C.LWSP
+        imm = {1'b0, rvfi_insn[3:2], rvfi_insn[12], rvfi_insn[6:4], 2'b00};
+      end
+      if ((cheriot_enable_i == IbexMuBiOn)) begin
+        data_accessed = CS1 | RD | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
+      end else begin
+        data_accessed = RS1 | RD | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
+      end
+    end
+  endfunction
+
+  function automatic void decode_Zc_load_insn(input string mnemonic);
+    logic [1:0] imm;
+
+    if (rvfi_insn[10] == 1'b0) begin
+      // C.LBU
+      imm = {rvfi_insn[5], rvfi_insn[6]};
+    end else begin
+      // C.LHU, C.LH
+      imm = {rvfi_insn[5], 1'b0};
     end
     data_accessed = RS1 | RD | MEM;
     decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
   endfunction
 
   function automatic void decode_compressed_store_insn(input string mnemonic);
-    logic [7:0] imm;
-    if (rvfi_insn[1:0] == OPCODE_C0) begin
-      // C.SW
-      imm = {1'b0, rvfi_insn[5], rvfi_insn[12:10], rvfi_insn[6], 2'b00};
+    logic [8:0] imm;
+
+
+    if ((rvfi_insn[15:13] == 3'b111) && (rvfi_insn[1:0] == OPCODE_C0)) begin
+      // CHERIoT: c.csc, use RV64 c.sd encoding
+      imm = {1'b0, rvfi_insn[6:5], rvfi_insn[12:10], 3'b000};
+      data_accessed = CS1 | CS2 | MEMC;
+      decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rs2_addr, imm, rvfi_rs1_addr);
+    end else if ((rvfi_insn[15:13] == 3'b111) && (rvfi_insn[1:0] == OPCODE_C2)) begin
+      // CHERIoT: c.cscsp, RV32: c.sdsp
+      imm = {rvfi_insn[9:7], rvfi_insn[12:10], 3'b000};
+      data_accessed = CS1 | CS2 | MEMC;
+      decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rs2_addr, imm, rvfi_rs1_addr);
     end else begin
-      // C.SWSP
-      imm = {rvfi_insn[8:7], rvfi_insn[12:9], 2'b00};
+      if (rvfi_insn[1:0] == OPCODE_C0) begin
+        // C.SW
+        imm = {2'b00, rvfi_insn[5], rvfi_insn[12:10], rvfi_insn[6], 2'b00};
+      end else begin
+        // C.SWSP
+        imm = {1'b0, rvfi_insn[8:7], rvfi_insn[12:9], 2'b00};
+      end
+      if ((cheriot_enable_i == IbexMuBiOn)) begin
+        data_accessed = CS1 | RS2 | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(c%0d)", mnemonic, rvfi_rs2_addr, imm, rvfi_rs1_addr);
+      end else begin
+        data_accessed = RS1 | RS2 | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rs2_addr, imm, rvfi_rs1_addr);
+      end
+    end
+  endfunction
+
+  function automatic void decode_Zc_store_insn(input string mnemonic);
+    logic [1:0] imm;
+
+    if (rvfi_insn[10] == 1'b0) begin
+      // C.SB
+      imm = {rvfi_insn[5], rvfi_insn[6]};
+    end else begin
+      // C.SH
+      imm = {rvfi_insn[5], 1'b0};
     end
     data_accessed = RS1 | RS2 | MEM;
-    decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rs2_addr, imm, rvfi_rs1_addr);
+    decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr, imm, rvfi_rs1_addr);
+  endfunction
+
+  function automatic string cm_reg_to_str(input logic [2:0] addr);
+    logic [4:0] xreg = {addr[2:1] > 0, addr[2:1]==0, addr[2:0]};
+    return reg_addr_to_abi_str(xreg);
+  endfunction
+
+  function automatic string decode_Zcmp_cmmv_insn(input string mnemonic);
+    return $sformatf("%s\t%0s,%0s", mnemonic, cm_reg_to_str(rvfi_ext_expanded_insn[9:7]),
+                     cm_reg_to_str(rvfi_ext_expanded_insn[4:2]));
+  endfunction
+
+  function automatic string decode_Zcmp_cmpp_insn(input string mnemonic);
+    logic [3:0] rlist;
+    logic [1:0] spimm;
+    string rlist_str;
+    int base;
+    int spimm_val;
+    rlist = rvfi_ext_expanded_insn[7:4];
+    spimm = rvfi_ext_expanded_insn[3:2];
+    // Decode rlist to string
+    if (rlist < 4) begin
+      rlist_str = $sformatf("{INVALID (%0d)}", rlist);
+    end else begin
+      case(rlist)
+        4:  rlist_str = "{ra}";
+        5:  rlist_str = "{ra, s0}";
+        15: rlist_str = "{ra, s0-s11}"; // The special case for s10/s11
+        // The default case handles the general pattern for rlist 6 through 14
+        default: rlist_str = $sformatf("{ra, s0-s%0d}", rlist - 5);
+      endcase
+    end
+    // Decode spimm
+    base = (rlist == 15) ? 64 : (32'(rlist) >> 2) * 16;
+    spimm_val = base + (spimm * 16);
+    spimm_val = mnemonic == "cm.push" ? -spimm_val : spimm_val;
+    return $sformatf("%s\t%s,%0d", mnemonic, rlist_str, spimm_val);
+  endfunction
+
+  function automatic string decode_expanded_insn();
+    unique casez (rvfi_ext_expanded_insn)
+      INSN_CMPUSH:    return decode_Zcmp_cmpp_insn("cm.push");
+      INSN_CMPOP:     return decode_Zcmp_cmpp_insn("cm.pop");
+      INSN_CMPOPRETZ: return decode_Zcmp_cmpp_insn("cm.popretz");
+      INSN_CMPOPRET:  return decode_Zcmp_cmpp_insn("cm.popret");
+      INSN_CMMVSA01:  return decode_Zcmp_cmmv_insn("cm.mvsa01");
+      INSN_CMMVA01S:  return decode_Zcmp_cmmv_insn("cm.mva01s");
+      default:        return "Decoding error";
+    endcase
   endfunction
 
   function automatic void decode_load_insn();
-    string      mnemonic;
+    string       mnemonic;
+    logic [13:0] imm;
 
     /*
     Gives wrong results in Verilator < 4.020.
@@ -662,49 +887,92 @@ module ibex_tracer (
     endcase
     */
     logic [2:0] size;
+    logic is_cap;
+
     size = rvfi_insn[14:12];
+    is_cap = 1'b0;
+
     if (size == 3'b000) begin
-      mnemonic = "lb";
+      mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "clb" : "lb";
     end else if (size == 3'b001) begin
-      mnemonic = "lh";
+      mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "clh" :"lh";
     end else if (size == 3'b010) begin
-      mnemonic = "lw";
+      mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "clw" :"lw";
     end else if (size == 3'b100) begin
-      mnemonic = "lbu";
+      mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "clbu" :"lbu";
     end else if (size == 3'b101) begin
-      mnemonic = "lhu";
+      mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "clhu" :"lhu";
+    end else if (size == 3'b011) begin
+      mnemonic = "CH.clc";
+      is_cap = 1'b1;
     end else begin
       decode_mnemonic("INVALID");
       return;
     end
 
+    imm = {{3{rvfi_insn[31]}}, rvfi_insn[30:20]};
 
-    data_accessed = RD | RS1 | MEM;
-    decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr,
-                    $signed({{20 {rvfi_insn[31]}}, rvfi_insn[31:20]}), rvfi_rs1_addr);
+    if (is_cap) begin
+      data_accessed = CD | CS1 | MEMC;
+      decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr,
+                      $signed(imm), rvfi_rs1_addr);
+    end else if ((cheriot_enable_i == IbexMuBiOn)) begin
+      data_accessed = RD | CS1 | MEM;
+      decoded_str = $sformatf("%s\tx%0d,%0d(c%0d)", mnemonic, rvfi_rd_addr,
+                      $signed(imm), rvfi_rs1_addr);
+    end else begin
+      data_accessed = RD | RS1 | MEM;
+      decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)", mnemonic, rvfi_rd_addr,
+                      $signed(imm), rvfi_rs1_addr);
+    end
   endfunction
 
   function automatic void decode_store_insn();
     string    mnemonic;
+    logic     is_cap;
+    logic [13:0] imm;
 
+    is_cap = 1'b0;
     unique case (rvfi_insn[13:12])
-      2'b00:  mnemonic = "sb";
-      2'b01:  mnemonic = "sh";
-      2'b10:  mnemonic = "sw";
+      2'b00:  mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "csb" : "sb";
+      2'b01:  mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "csh" : "sh";
+      2'b10:  mnemonic = (cheriot_enable_i == IbexMuBiOn) ? "csw" : "sw";
+      2'b11:  begin
+        mnemonic = "CH.csc";
+        is_cap = 1'b1;
+      end
       default: begin
         decode_mnemonic("INVALID");
         return;
       end
     endcase
 
+    imm = {{3{rvfi_insn[31]}}, rvfi_insn[30:25], rvfi_insn[11:7]};
+
     if (!rvfi_insn[14]) begin
       // regular store
-      data_accessed = RS1 | RS2 | MEM;
-      decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)",
-                              mnemonic,
-                              rvfi_rs2_addr,
-                              $signed({{20{rvfi_insn[31]}}, rvfi_insn[31:25], rvfi_insn[11:7]}),
-                              rvfi_rs1_addr);
+      if (is_cap) begin
+        data_accessed = CS1 | CS2 | MEMC;
+        decoded_str = $sformatf("%s\tc%0d,%0d(c%0d)",
+                                mnemonic,
+                                rvfi_rs2_addr,
+                                $signed(imm),
+                                rvfi_rs1_addr);
+      end else if ((cheriot_enable_i == IbexMuBiOn)) begin
+        data_accessed = CS1 | RS2 | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(c%0d)",
+                                mnemonic,
+                                rvfi_rs2_addr,
+                                $signed(imm),
+                                rvfi_rs1_addr);
+      end else begin
+        data_accessed = RS1 | RS2 | MEM;
+        decoded_str = $sformatf("%s\tx%0d,%0d(x%0d)",
+                                mnemonic,
+                                rvfi_rs2_addr,
+                                $signed(imm),
+                                rvfi_rs1_addr);
+      end
     end else begin
       decode_mnemonic("INVALID");
     end
@@ -735,6 +1003,104 @@ module ibex_tracer (
     decoded_str = $sformatf("fence\t%s,%s", predecessor, successor);
   endfunction
 
+  function automatic void decode_cheriot_rd_rs1_insn(input string mnemonic);
+    data_accessed = RS1 | RD;
+    decoded_str = $sformatf("%s\tx%0d,x%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr);
+  endfunction
+
+  function automatic void decode_cheriot_rd_cs1_insn(input string mnemonic);
+    data_accessed = CS1 | RD;
+    decoded_str = $sformatf("%s\tx%0d,c%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr);
+  endfunction
+
+  function automatic void decode_cheriot_cd_cs1_insn(input string mnemonic);
+    data_accessed = CS1 | CD;
+    decoded_str = $sformatf("%s\tc%0d,c%0d", mnemonic, rvfi_rd_addr, rvfi_rs1_addr);
+  endfunction
+
+  function automatic void decode_cheriot_rd_cs1_cs2_insn(input string mnemonic);
+    data_accessed = CS2 | CS1 | RD;
+    decoded_str = $sformatf("%s\tx%0d,c%0d,c%0d", mnemonic,
+        rvfi_rd_addr, rvfi_rs1_addr, rvfi_rs2_addr);
+  endfunction
+
+  function automatic void decode_cheriot_cd_cs1_cs2_insn(input string mnemonic);
+    data_accessed = CS2 | CS1 | CD;
+    decoded_str = $sformatf("%s\tc%0d,c%0d,c%0d", mnemonic,
+        rvfi_rd_addr, rvfi_rs1_addr, rvfi_rs2_addr);
+  endfunction
+
+  function automatic void decode_cheriot_cd_cs1_rs2_insn(input string mnemonic);
+    data_accessed = RS2 | CS1 | CD;
+    decoded_str = $sformatf("%s\tc%0d,c%0d,x%0d", mnemonic,
+        rvfi_rd_addr, rvfi_rs1_addr, rvfi_rs2_addr);
+  endfunction
+
+  function automatic void decode_cheriot_cd_cs1_imm_insn(input string mnemonic);
+    logic [13:0] imm;
+
+    data_accessed = CS1 | CD;
+
+    // cincaddrimm and csetboundsimm
+    imm = {{3{rvfi_insn[31]}}, rvfi_insn[30:20]};  // imm not extended
+
+    if (rvfi_insn[14:12] == 3'b001) // cincaddrimm
+      decoded_str = $sformatf("%s\tc%0d,c%0d,%0d", mnemonic,
+          rvfi_rd_addr, rvfi_rs1_addr, $signed(imm));
+    else                            // csetboundsimm
+      decoded_str = $sformatf("%s\tc%0d,c%0d,%0d", mnemonic,
+          rvfi_rd_addr, rvfi_rs1_addr, imm);
+
+  endfunction
+
+  function automatic void decode_cheriot_auipcc_insn();
+    logic [31:0] imm;
+
+    // We cannot use rvfi_pc_wdata for conditional jumps.
+    imm = {12'b0, rvfi_insn[31:12]};
+    data_accessed = CD;
+    if ((cheriot_enable_i == IbexMuBiOn)) begin
+      decoded_str = $sformatf("%s\tc%0d,0x%0x", "CH.auipcc", rvfi_rd_addr, imm);
+    end else begin
+      decoded_str = $sformatf("%s\tx%0d,0x%0x", "auipc", rvfi_rd_addr, imm);
+    end
+
+  endfunction
+
+
+  function automatic void decode_cheriot_auicgp_insn();
+    logic [31:0] imm;
+
+    // We cannot use rvfi_pc_wdata for conditional jumps.
+    imm = {12'b0, rvfi_insn[31:12]};
+    data_accessed = CD | CS1;
+    decoded_str = $sformatf("%s\tc%0d,0x%0x", "CH.auicgp", rvfi_rd_addr, imm);
+  endfunction
+
+
+  function automatic void decode_cheriot_cs1_cs2_insn(input string mnemonic);
+    data_accessed = CS2 | CS1;
+    decoded_str = $sformatf("%s\tc%0d,c%0d", mnemonic, rvfi_rs1_addr, rvfi_rs2_addr);
+  endfunction
+
+  function automatic void decode_cheriot_scrrw_insn();
+    string mnemonic, scr_name;
+
+    scr_name = get_scr_name(rvfi_insn[24:20]);
+    data_accessed = CS1 | CD;
+
+    if (rvfi_rd_addr == 0) begin
+      mnemonic = "CH.cspecialw";
+      decoded_str = $sformatf("%s\t%s,c%0d", mnemonic, scr_name, rvfi_rs1_addr);
+    end else if (rvfi_rs1_addr == 0) begin
+      mnemonic = "CH.cspecialr";
+      decoded_str = $sformatf("%s\tc%0d,%s", mnemonic, rvfi_rd_addr, scr_name);
+    end else begin
+      mnemonic = "CH.cspecialrw";
+      decoded_str = $sformatf("%s\tc%0d,%s,c%0d", mnemonic, rvfi_rd_addr, scr_name, rvfi_rs1_addr);
+    end
+  endfunction
+
   // cycle counter
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -747,20 +1113,42 @@ module ibex_tracer (
   // close output file for writing
   final begin
     if (file_handle != 32'h0) begin
-      $fclose(file_handle);
+      // This dance with "fh" is a bit silly. Some versions of Verilator treat a call of $fclose(xx)
+      // as a blocking assignment to xx. They then complain about the mixture with that an the
+      // non-blocking assignment we use when opening the file. The bug is fixed with recent versions
+      // of Verilator, but this hack is probably worth it for now.
+      int fh;
+      fh = file_handle;
+      $fclose(fh);
     end
   end
 
   // log execution
-  always_ff @(posedge clk_i) begin
+  always @(posedge clk_i) begin
     if (rvfi_valid && trace_log_enable) begin
-      printbuffer_dumpline();
+
+      int fh;
+      fh = file_handle;
+
+      if (fh == 32'h0) begin
+        string file_name_base;
+        file_name_base = "trace_core";
+        void'($value$plusargs("ibex_tracer_file_base=%s", file_name_base));
+        $sformat(file_name, "%s_%h.log", file_name_base, hart_id_i);
+
+        $display("%m: Writing execution trace to %s", file_name);
+        fh = $fopen(file_name, "w");
+        file_handle <= fh;
+        $fwrite(fh, "Time\tCycle\tPC\tInsn\tDecoded instruction\tRegister and memory contents\n");
+      end
+
+      printbuffer_dumpline(fh);
     end
   end
 
   always_comb begin
     decoded_str = "";
-    data_accessed = 5'h0;
+    data_accessed = 10'h0;
     insn_is_compressed = 0;
 
     // Check for compressed instructions
@@ -796,6 +1184,15 @@ module ibex_tracer (
           end
           INSN_CLW:        decode_compressed_load_insn("c.lw");
           INSN_CSW:        decode_compressed_store_insn("c.sw");
+          INSN_CCLC:       decode_compressed_load_insn("c.CH.clc");
+          INSN_CCSC:       decode_compressed_store_insn("c.CH.csc");
+          // Zc extension C0
+          INSN_CLBU:        decode_Zc_load_insn("c.lbu");
+          INSN_CLHU:        decode_Zc_load_insn("c.lhu");
+          INSN_CLH:         decode_Zc_load_insn("c.lh");
+          INSN_CSB:         decode_Zc_store_insn("c.sb");
+          INSN_CSH:         decode_Zc_store_insn("c.sh");
+
           // C1 Opcodes
           INSN_CADDI:      decode_ci_caddi_insn("c.addi");
           INSN_CJAL:       decode_cj_insn("c.jal");
@@ -818,10 +1215,23 @@ module ibex_tracer (
           INSN_CAND:       decode_cs_insn("c.and");
           INSN_CBEQZ:      decode_cb_insn("c.beqz");
           INSN_CBNEZ:      decode_cb_insn("c.bnez");
+          // Zc extension C1
+          INSN_CZEXTB:     decode_Zc_cu_insn("c.zext.b");
+          INSN_CSEXTB:     decode_Zc_cu_insn("c.sext.b");
+          INSN_CZEXTH:     decode_Zc_cu_insn("c.zext.h");
+          INSN_CSEXTH:     decode_Zc_cu_insn("c.sext.h");
+          INSN_CNOT:       decode_Zc_cu_insn("c.not");
+          INSN_CMUL:       decode_cs_insn("c.mul");
+
           // C2 Opcodes
           INSN_CSLLI:      decode_ci_cslli_insn("c.slli");
           INSN_CLWSP:      decode_compressed_load_insn("c.lwsp");
           INSN_SWSP:       decode_compressed_store_insn("c.swsp");
+          INSN_CCLCSP:     decode_compressed_load_insn("c.CH.clcsp");
+          INSN_CCSCSP:     decode_compressed_store_insn("c.CH.cscsp");
+          // Zc extension C2: We should never see those on the rvfi_insn interface since they must
+          // get expanded into other instructions. They will be annotated through the
+          // `decode_expanded_insn` function instead and the `rvfi_ext_expanded_insn` signal.
           default:         decode_mnemonic("INVALID");
         endcase
       end
@@ -829,7 +1239,6 @@ module ibex_tracer (
       unique casez (rvfi_insn)
         // Regular opcodes
         INSN_LUI:        decode_u_insn("lui");
-        INSN_AUIPC:      decode_u_insn("auipc");
         INSN_JAL:        decode_j_insn("jal");
         INSN_JALR:       decode_i_jalr_insn("jalr");
         // BRANCH
@@ -855,9 +1264,12 @@ module ibex_tracer (
         INSN_SLTIU:      decode_i_insn("sltiu");
         INSN_XORI:       decode_i_insn("xori");
         INSN_ORI:        decode_i_insn("ori");
-        // Version 0.92 of the Bitmanip Extension defines the pseudo-instruction
-        // zext.b rd rs = andi rd, rs, 255.
-        // Currently instruction set simulators don't output this pseudo-instruction.
+        // Unlike the ratified v.1.0.0 bitmanip extension, the v.0.94 draft extension continues to
+        // define the pseudo-instruction
+        //   zext.b rd rs = andi rd, rs, 255.
+        // However, for now the tracer doesn't emit this due to a lack of support in the LLVM and
+        // GCC toolchains. Enabling this functionality when the time is right is tracked in
+        // https://github.com/lowRISC/ibex/issues/1228
         INSN_ANDI:       decode_i_insn("andi");
         // INSN_ANDI:begin
           // casez (rvfi_insn)
@@ -907,12 +1319,12 @@ module ibex_tracer (
         // MISC-MEM
         INSN_FENCE:      decode_fence();
         INSN_FENCEI:     decode_mnemonic("fence.i");
+        // RV32B - ZBA
+        INSN_SH1ADD:     decode_r_insn("sh1add");
+        INSN_SH2ADD:     decode_r_insn("sh2add");
+        INSN_SH3ADD:     decode_r_insn("sh3add");
         // RV32B - ZBB
-        INSN_SLOI:       decode_i_shift_insn("sloi");
-        INSN_SROI:       decode_i_shift_insn("sroi");
         INSN_RORI:       decode_i_shift_insn("rori");
-        INSN_SLO:        decode_r_insn("slo");
-        INSN_SRO:        decode_r_insn("sro");
         INSN_ROL:        decode_r_insn("rol");
         INSN_ROR:        decode_r_insn("ror");
         INSN_MIN:        decode_r_insn("min");
@@ -922,137 +1334,83 @@ module ibex_tracer (
         INSN_XNOR:       decode_r_insn("xnor");
         INSN_ORN:        decode_r_insn("orn");
         INSN_ANDN:       decode_r_insn("andn");
-        // Version 0.92 of the Bitmanip Extension defines the pseudo-instruction
-        // zext.h rd rs = pack rd, rs, zero.
-        // Currently instruction set simulators don't output this pseudo-instruction.
-        INSN_PACK:       decode_r_insn("pack");
-        // INSN_PACK: begin
-          // casez (rvfi_insn)
-            // INSN_ZEXTH:  decode_r1_insn("zext.h");
-            // default:     decode_r_insn("pack");
-          // endcase
-        // end
+        // zext.h (Zbb) is the pseudo-instruction `pack rd, rs, x0`
+        INSN_PACK: begin
+          unique casez (rvfi_insn)
+            INSN_ZEXTH:  decode_r1_insn("zext.h");
+            default:     decode_r_insn("pack");
+          endcase
+        end
         INSN_PACKH:      decode_r_insn("packh");
-        INSN_PACKU:      decode_r_insn("packu");
         INSN_CLZ:        decode_r1_insn("clz");
         INSN_CTZ:        decode_r1_insn("ctz");
-        INSN_PCNT:       decode_r1_insn("pcnt");
+        INSN_CPOP:       decode_r1_insn("cpop");
         INSN_SEXTB:      decode_r1_insn("sext.b");
         INSN_SEXTH:      decode_r1_insn("sext.h");
         // RV32B - ZBS
-        INSN_SBCLRI:     decode_i_insn("sbclri");
-        INSN_SBSETI:     decode_i_insn("sbseti");
-        INSN_SBINVI:     decode_i_insn("sbinvi");
-        INSN_SBEXTI:     decode_i_insn("sbexti");
-        INSN_SBCLR:      decode_r_insn("sbclr");
-        INSN_SBSET:      decode_r_insn("sbset");
-        INSN_SBINV:      decode_r_insn("sbinv");
-        INSN_SBEXT:      decode_r_insn("sbext");
-        // RV32B - ZBE
-        INSN_BDEP:       decode_r_insn("bdep");
-        INSN_BEXT:       decode_r_insn("bext");
-        // RV32B - ZBP
-        INSN_GREV:       decode_r_insn("grev");
-        INSN_GREVI: begin
-          unique casez (rvfi_insn)
-            INSN_REV_P:  decode_r1_insn("rev.p");
-            INSN_REV2_N: decode_r1_insn("rev2.n");
-            INSN_REV_N:  decode_r1_insn("rev.n");
-            INSN_REV4_B: decode_r1_insn("rev4.b");
-            INSN_REV2_B: decode_r1_insn("rev2.b");
-            INSN_REV_B:  decode_r1_insn("rev.b");
-            INSN_REV8_H: decode_r1_insn("rev8.h");
-            INSN_REV4_H: decode_r1_insn("rev4.h");
-            INSN_REV2_H: decode_r1_insn("rev2.h");
-            INSN_REV_H:  decode_r1_insn("rev.h");
-            INSN_REV16:  decode_r1_insn("rev16");
-            INSN_REV8:   decode_r1_insn("rev8");
-            INSN_REV4:   decode_r1_insn("rev4");
-            INSN_REV2:   decode_r1_insn("rev2");
-            INSN_REV:    decode_r1_insn("rev");
-            default:     decode_i_insn("grevi");
-          endcase
-        end
-        INSN_GORC:       decode_r_insn("gorc");
-        INSN_GORCI: begin
-          unique casez (rvfi_insn)
-            INSN_ORC_P:  decode_r1_insn("orc.p");
-            INSN_ORC2_N: decode_r1_insn("orc2.n");
-            INSN_ORC_N:  decode_r1_insn("orc.n");
-            INSN_ORC4_B: decode_r1_insn("orc4.b");
-            INSN_ORC2_B: decode_r1_insn("orc2.b");
-            INSN_ORC_B:  decode_r1_insn("orc.b");
-            INSN_ORC8_H: decode_r1_insn("orc8.h");
-            INSN_ORC4_H: decode_r1_insn("orc4.h");
-            INSN_ORC2_H: decode_r1_insn("orc2.h");
-            INSN_ORC_H:  decode_r1_insn("orc.h");
-            INSN_ORC16:  decode_r1_insn("orc16");
-            INSN_ORC8:   decode_r1_insn("orc8");
-            INSN_ORC4:   decode_r1_insn("orc4");
-            INSN_ORC2:   decode_r1_insn("orc2");
-            INSN_ORC:    decode_r1_insn("orc");
-            default:     decode_i_insn("gorci");
-          endcase
-        end
-        INSN_SHFL:       decode_r_insn("shfl");
-        INSN_SHFLI: begin
-          unique casez (rvfi_insn)
-            INSN_ZIP_N:  decode_r1_insn("zip.n");
-            INSN_ZIP2_B: decode_r1_insn("zip2.b");
-            INSN_ZIP_B:  decode_r1_insn("zip.b");
-            INSN_ZIP4_H: decode_r1_insn("zip4.h");
-            INSN_ZIP2_H: decode_r1_insn("zip2.h");
-            INSN_ZIP_H:  decode_r1_insn("zip.h");
-            INSN_ZIP8:   decode_r1_insn("zip8");
-            INSN_ZIP4:   decode_r1_insn("zip4");
-            INSN_ZIP2:   decode_r1_insn("zip2");
-            INSN_ZIP:    decode_r1_insn("zip");
-            default:     decode_i_insn("shfli");
-          endcase
-        end
-        INSN_UNSHFL:       decode_r_insn("unshfl");
-        INSN_UNSHFLI: begin
-          unique casez (rvfi_insn)
-            INSN_UNZIP_N:  decode_r1_insn("unzip.n");
-            INSN_UNZIP2_B: decode_r1_insn("unzip2.b");
-            INSN_UNZIP_B:  decode_r1_insn("unzip.b");
-            INSN_UNZIP4_H: decode_r1_insn("unzip4.h");
-            INSN_UNZIP2_H: decode_r1_insn("unzip2.h");
-            INSN_UNZIP_H:  decode_r1_insn("unzip.h");
-            INSN_UNZIP8:   decode_r1_insn("unzip8");
-            INSN_UNZIP4:   decode_r1_insn("unzip4");
-            INSN_UNZIP2:   decode_r1_insn("unzip2");
-            INSN_UNZIP:    decode_r1_insn("unzip");
-            default:       decode_i_insn("unshfli");
-          endcase
-        end
-
-        // RV32B - ZBT
-        INSN_CMIX:       decode_r_cmixcmov_insn("cmix");
-        INSN_CMOV:       decode_r_cmixcmov_insn("cmov");
-        INSN_FSR:        decode_r_funnelshift_insn("fsr");
-        INSN_FSL:        decode_r_funnelshift_insn("fsl");
-        INSN_FSRI:       decode_i_funnelshift_insn("fsri");
-
-        // RV32B - ZBF
-        INSN_BFP:        decode_r_insn("bfp");
+        INSN_BCLRI:     decode_i_shift_insn("bclri");
+        INSN_BSETI:     decode_i_shift_insn("bseti");
+        INSN_BINVI:     decode_i_shift_insn("binvi");
+        INSN_BEXTI:     decode_i_shift_insn("bexti");
+        INSN_BCLR:      decode_r_insn("bclr");
+        INSN_BSET:      decode_r_insn("bset");
+        INSN_BINV:      decode_r_insn("binv");
+        INSN_BEXT:      decode_r_insn("bext");
+        // RV32B - Zbb / Zbkb
+        INSN_BREV8:      decode_r1_insn("brev8");
+        INSN_REV8:       decode_r1_insn("rev8");
+        INSN_ORC_B:      decode_r1_insn("orc.b");
+        INSN_ZIP:        decode_r1_insn("zip");
+        INSN_UNZIP:      decode_r1_insn("unzip");
+        INSN_XPERM4:     decode_r_insn("xperm4");
+        INSN_XPERM8:     decode_r_insn("xperm8");
 
         // RV32B - ZBC
         INSN_CLMUL:      decode_r_insn("clmul");
         INSN_CLMULR:     decode_r_insn("clmulr");
         INSN_CLMULH:     decode_r_insn("clmulh");
 
-        // RV32B - ZBR
-        INSN_CRC32_B:    decode_r1_insn("crc32.b");
-        INSN_CRC32_H:    decode_r1_insn("crc32.h");
-        INSN_CRC32_W:    decode_r1_insn("crc32.w");
-        INSN_CRC32C_B:   decode_r1_insn("crc32c.b");
-        INSN_CRC32C_H:   decode_r1_insn("crc32c.h");
-        INSN_CRC32C_W:   decode_r1_insn("crc32c.w");
+        // CHERIoT, get fields
+        INSN_CHGETPERM:    decode_cheriot_rd_cs1_insn("CH.cgetperm");
+        INSN_CHGETTYPE:    decode_cheriot_rd_cs1_insn("CH.cgettype");
+        INSN_CHGETBASE:    decode_cheriot_rd_cs1_insn("CH.cgetbase");
+        INSN_CHGETTOP:     decode_cheriot_rd_cs1_insn("CH.cgettop");
+        INSN_CHGETLEN:     decode_cheriot_rd_cs1_insn("CH.cgetlen");
+        INSN_CHGETTAG:     decode_cheriot_rd_cs1_insn("CH.cgettag");
+        INSN_CHGETSEALED:  decode_cheriot_rd_cs1_insn("CH.cgetseald");
+        INSN_CHGETADDR:    decode_cheriot_rd_cs1_insn("CH.cgetaddr");
+        INSN_CHGETHIGH:     decode_cheriot_rd_cs1_insn("CH.cgethigh");
+
+        INSN_CHSEAL:       decode_cheriot_cd_cs1_cs2_insn("CH.cseal");
+        INSN_CHUNSEAL:     decode_cheriot_cd_cs1_cs2_insn("CH.cunseal");
+        INSN_CHANDPERM:    decode_cheriot_cd_cs1_rs2_insn("CH.candperm");
+        INSN_CHSETADDR:    decode_cheriot_cd_cs1_rs2_insn("CH.csetaddr");
+        INSN_CHINCADDR:    decode_cheriot_cd_cs1_rs2_insn("CH.cincaddr");
+        INSN_CHINCADDRIMM: decode_cheriot_cd_cs1_imm_insn("CH.cincaddrimm");
+        INSN_CHSETBOUNDS:  decode_cheriot_cd_cs1_rs2_insn("CH.csetbounds");
+        INSN_CHSETBOUNDSEX:  decode_cheriot_cd_cs1_rs2_insn("CH.csetboundsexact");
+        INSN_CHSETBOUNDSRNDN: decode_cheriot_cd_cs1_rs2_insn("CH.csetboundsrounddown");
+
+        INSN_CHSETBOUNDSIMM: decode_cheriot_cd_cs1_imm_insn("CH.csetboundsimm");
+        INSN_CHCLEARTAG:     decode_cheriot_cd_cs1_insn("CH.ccleartag");
+        INSN_CHCRRL:         decode_cheriot_rd_rs1_insn("CH.crrl");
+        INSN_CHCRAM:         decode_cheriot_rd_rs1_insn("CH.cram");
+
+        INSN_CHSUB:        decode_cheriot_rd_cs1_cs2_insn("CH.csub");
+        INSN_CHMOVE:       decode_cheriot_cd_cs1_insn("CH.cmove");
+        INSN_CHTESTSUB:    decode_cheriot_rd_cs1_cs2_insn("CH.ctestsubset");
+        INSN_CHSETEQUAL:   decode_cheriot_rd_cs1_cs2_insn("CH.csetequalexact");
+        INSN_CHSETHIGH:    decode_cheriot_cd_cs1_rs2_insn("CH.csethigh");
+        INSN_CHCSRRW:      decode_cheriot_scrrw_insn();
+        INSN_AUIPC:        decode_cheriot_auipcc_insn();
+        INSN_AUICGP:       decode_cheriot_auicgp_insn();
 
         default:         decode_mnemonic("INVALID");
       endcase
     end
   end
+
+  logic unused_cheriot_tracer_inputs;
+  assign unused_cheriot_tracer_inputs = ^{rvfi_mem_is_cap};
 
 endmodule

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,10 +12,11 @@ package cip_base_pkg;
   import dv_base_reg_pkg::*;
   import tlul_pkg::*;
   import tl_agent_pkg::*;
-  import alert_esc_agent_pkg::*;
+  import alert_agent_pkg::*;
   import push_pull_agent_pkg::*;
   import mem_model_pkg::*;
   import prim_mubi_pkg::*;
+  import sec_cm_pkg::*;
 
   // macro includes
   `include "uvm_macros.svh"
@@ -62,13 +63,62 @@ package cip_base_pkg;
     uvm_mem mems[$];
     reg_block.get_memories(mems);
 
+    has_mem_byte_access_err = 0;
+    has_wo_mem              = 0;
+    has_ro_mem              = 0;
+
     foreach (mems[i]) begin
       dv_base_mem dv_mem;
       `downcast(dv_mem, mems[i], , , msg_id)
-      if (!dv_mem.get_mem_partial_write_support()) has_mem_byte_access_err = 1;
+      // If the memory supports write (WO or RW) and doesn't have partial write support then it can
+      // generate a memory byte access error.
+      if (!dv_mem.get_mem_partial_write_support() && dv_mem.get_access() != "RO") begin
+        has_mem_byte_access_err = 1;
+      end
       if (dv_mem.get_access() == "WO") has_wo_mem = 1;
       if (dv_mem.get_access() == "RO") has_ro_mem = 1;
     end
+  endfunction
+
+  // Create functions that return a random value for the mubi type variable, based on weight
+  // settings.
+  //
+  // The function is `get_rand_mubi4|8|16_val(t_weight, f_weight, other_weight)`
+  // t_weight: randomization weight of the value True
+  // f_weight: randomization weight of the value False
+  // other_weight: collective randomization weight of all values other than True or False
+  `define _DV_MUBI_RAND_VAL(WIDTH_)                                         \
+    function automatic mubi``WIDTH_``_t get_rand_mubi``WIDTH_``_val(        \
+        int t_weight = 2, int f_weight = 2, int other_weight = 1);          \
+      bit[WIDTH_-1:0] val;                                                  \
+      `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(val,                               \
+          `DV_MUBI``WIDTH_``_DIST(val, t_weight, f_weight, other_weight), , \
+                                         msg_id)                            \
+      return mubi``WIDTH_``_t'(val);                                        \
+    endfunction
+
+  // Create function - get_rand_mubi4_val.
+  `_DV_MUBI_RAND_VAL(4)
+
+  // Create function - get_rand_mubi8_val.
+  `_DV_MUBI_RAND_VAL(8)
+
+  // Create function - get_rand_mubi12_val.
+  `_DV_MUBI_RAND_VAL(12)
+
+  // Create function - get_rand_mubi16_val.
+  `_DV_MUBI_RAND_VAL(16)
+
+  `undef _DV_MUBI_RAND_VAL
+
+  function automatic lc_ctrl_pkg::lc_tx_t get_rand_lc_tx_val(int t_weight = 2,
+                                                             int f_weight = 2,
+                                                             int other_weight = 1);
+    bit[3:0] val;
+    `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(val,
+        `DV_LC_TX_DIST(val, t_weight, f_weight, other_weight), , msg_id)
+
+    return lc_ctrl_pkg::lc_tx_t'(val);
   endfunction
 
   // package sources

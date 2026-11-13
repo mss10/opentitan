@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,4 +13,3 @@ interface pattgen_if #(
   logic [NumChannels-1:0] pcl_tx;
 
 endinterface : pattgen_if
-

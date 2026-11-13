@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,16 +8,6 @@ class csrng_host_driver extends csrng_driver;
 
   // Break down the data and send it to push_pull_host_driver through its sequencer
   csrng_sequencer   m_csrng_sequencer;
-
-  virtual task run_phase(uvm_phase phase);
-    // base class forks off reset_signals() and get_and_drive() tasks
-    super.run_phase(phase);
-  endtask
-
-  // reset signals
-  virtual task reset_signals();
-//    `uvm_fatal(`gtn, "FIXME")
-  endtask
 
   // drive trans received from sequencer
   virtual task get_and_drive();

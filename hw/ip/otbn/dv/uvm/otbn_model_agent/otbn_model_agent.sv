@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -19,7 +19,9 @@ class otbn_model_agent extends dv_base_agent #(
     `DV_CHECK_FATAL(!cfg.is_active)
 
     // get otbn_model_if handle
-    if (!uvm_config_db#(virtual otbn_model_if)::get(this, "", "vif", cfg.vif)) begin
+    if (!uvm_config_db#(
+                        virtual otbn_model_if#(.ImemSizeByte(otbn_reg_pkg::OTBN_IMEM_SIZE))
+                       )::get(this, "", "vif", cfg.vif)) begin
       `uvm_fatal(`gfn, "failed to get otbn_model_if handle from uvm_config_db")
     end
   endfunction

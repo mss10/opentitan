@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -16,10 +16,7 @@ module rom_ctrl_regs_reg_top (
   input  rom_ctrl_reg_pkg::rom_ctrl_regs_hw2reg_t hw2reg, // Read
 
   // Integrity check errors
-  output logic intg_err_o,
-
-  // Config
-  input devmode_i // If 1, explicit error return for unmapped register access
+  output logic intg_err_o
 );
 
   import rom_ctrl_reg_pkg::* ;
@@ -53,18 +50,31 @@ module rom_ctrl_regs_reg_top (
     .err_o(intg_err)
   );
 
-  logic intg_err_q;
+  // also check for spurious write enables
+  logic reg_we_err;
+  logic [17:0] reg_we_check;
+  prim_reg_we_check #(
+    .OneHotWidth(18)
+  ) u_prim_reg_we_check (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .oh_i  (reg_we_check),
+    .en_i  (reg_we && !addrmiss),
+    .err_o (reg_we_err)
+  );
+
+  logic err_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      intg_err_q <= '0;
-    end else if (intg_err) begin
-      intg_err_q <= 1'b1;
+      err_q <= '0;
+    end else if (intg_err || reg_we_err) begin
+      err_q <= 1'b1;
     end
   end
 
   // integrity error output is permanent and should be used for alert generation
   // register errors are transactional
-  assign intg_err_o = intg_err_q | intg_err;
+  assign intg_err_o = err_q | intg_err | reg_we_err;
 
   // outgoing integrity generation
   tlul_pkg::tl_d2h_t tl_o_pre;
@@ -90,6 +100,9 @@ module rom_ctrl_regs_reg_top (
     .tl_i (tl_reg_h2d),
     .tl_o (tl_reg_d2h),
 
+    .en_ifetch_i(prim_mubi_pkg::MuBi4False),
+    .intg_error_o(),
+
     .we_o    (reg_we),
     .re_o    (reg_re),
     .addr_o  (reg_addr),
@@ -103,13 +116,15 @@ module rom_ctrl_regs_reg_top (
   // cdc oversampling signals
 
   assign reg_rdata = reg_rdata_next ;
-  assign reg_error = (devmode_i & addrmiss) | wr_err | intg_err;
+  assign reg_error = addrmiss | wr_err | intg_err;
 
   // Define SW related signals
   // Format: <reg>_<field>_{wd|we|qs}
   //        or <reg>_{wd|we|qs} if field == 1 or 0
   logic alert_test_we;
-  logic alert_test_wd;
+  logic alert_test_fatal_wd;
+  logic alert_test_regwen_qs;
+  logic alert_test_regwen_wd;
   logic fatal_alert_cause_checker_error_qs;
   logic fatal_alert_cause_integrity_error_qs;
   logic [31:0] digest_0_qs;
@@ -131,17 +146,54 @@ module rom_ctrl_regs_reg_top (
 
   // Register instances
   // R[alert_test]: V(True)
+  logic alert_test_qe;
+  logic [1:0] alert_test_flds_we;
+  assign alert_test_qe = &alert_test_flds_we;
+  // Create REGWEN-gated WE signal
+  logic alert_test_gated_we;
+  assign alert_test_gated_we = alert_test_we && alert_test_regwen_qs;
+  //   F[fatal]: 0:0
   prim_subreg_ext #(
     .DW    (1)
-  ) u_alert_test (
+  ) u_alert_test_fatal (
     .re     (1'b0),
-    .we     (alert_test_we),
-    .wd     (alert_test_wd),
+    .we     (alert_test_gated_we),
+    .wd     (alert_test_fatal_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.qe),
+    .qe     (alert_test_flds_we[0]),
     .q      (reg2hw.alert_test.q),
+    .ds     (),
     .qs     ()
+  );
+  assign reg2hw.alert_test.qe = alert_test_qe;
+
+  //   F[regwen]: 31:31
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_alert_test_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_test_we),
+    .wd     (alert_test_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (alert_test_flds_we[1]),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_test_regwen_qs)
   );
 
 
@@ -150,10 +202,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_cause_checker_error (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -166,6 +220,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_cause_checker_error_qs)
@@ -175,10 +230,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_fatal_alert_cause_integrity_error (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -191,6 +248,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (fatal_alert_cause_integrity_error_qs)
@@ -202,10 +260,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -218,6 +278,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_0_qs)
@@ -229,10 +290,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -245,6 +308,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_1_qs)
@@ -256,10 +320,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -272,6 +338,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_2_qs)
@@ -283,10 +350,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -299,6 +368,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_3_qs)
@@ -310,10 +380,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -326,6 +398,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_4_qs)
@@ -337,10 +410,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -353,6 +428,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_5_qs)
@@ -364,10 +440,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -380,6 +458,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_6_qs)
@@ -391,10 +470,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_digest_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -407,6 +488,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.digest[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (digest_7_qs)
@@ -418,10 +500,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -434,6 +518,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_0_qs)
@@ -445,10 +530,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -461,6 +548,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_1_qs)
@@ -472,10 +560,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -488,6 +578,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_2_qs)
@@ -499,10 +590,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -515,6 +608,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_3_qs)
@@ -526,10 +620,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_4 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -542,6 +638,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[4].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_4_qs)
@@ -553,10 +650,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_5 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -569,6 +668,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[5].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_5_qs)
@@ -580,10 +680,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_6 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -596,6 +698,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[6].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_6_qs)
@@ -607,10 +710,12 @@ module rom_ctrl_regs_reg_top (
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_exp_digest_7 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -623,6 +728,7 @@ module rom_ctrl_regs_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.exp_digest[7].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (exp_digest_7_qs)
@@ -632,7 +738,6 @@ module rom_ctrl_regs_reg_top (
 
   logic [17:0] addr_hit;
   always_comb begin
-    addr_hit = '0;
     addr_hit[ 0] = (reg_addr == ROM_CTRL_ALERT_TEST_OFFSET);
     addr_hit[ 1] = (reg_addr == ROM_CTRL_FATAL_ALERT_CAUSE_OFFSET);
     addr_hit[ 2] = (reg_addr == ROM_CTRL_DIGEST_0_OFFSET);
@@ -677,9 +782,35 @@ module rom_ctrl_regs_reg_top (
                (addr_hit[16] & (|(ROM_CTRL_REGS_PERMIT[16] & ~reg_be))) |
                (addr_hit[17] & (|(ROM_CTRL_REGS_PERMIT[17] & ~reg_be)))));
   end
+
+  // Generate write-enables
   assign alert_test_we = addr_hit[0] & reg_we & !reg_error;
 
-  assign alert_test_wd = reg_wdata[0];
+  assign alert_test_fatal_wd = reg_wdata[0];
+
+  assign alert_test_regwen_wd = reg_wdata[31];
+
+  // Assign write-enables to checker logic vector.
+  always_comb begin
+    reg_we_check[0] = alert_test_we;
+    reg_we_check[1] = 1'b0;
+    reg_we_check[2] = 1'b0;
+    reg_we_check[3] = 1'b0;
+    reg_we_check[4] = 1'b0;
+    reg_we_check[5] = 1'b0;
+    reg_we_check[6] = 1'b0;
+    reg_we_check[7] = 1'b0;
+    reg_we_check[8] = 1'b0;
+    reg_we_check[9] = 1'b0;
+    reg_we_check[10] = 1'b0;
+    reg_we_check[11] = 1'b0;
+    reg_we_check[12] = 1'b0;
+    reg_we_check[13] = 1'b0;
+    reg_we_check[14] = 1'b0;
+    reg_we_check[15] = 1'b0;
+    reg_we_check[16] = 1'b0;
+    reg_we_check[17] = 1'b0;
+  end
 
   // Read data return
   always_comb begin
@@ -687,6 +818,7 @@ module rom_ctrl_regs_reg_top (
     unique case (1'b1)
       addr_hit[0]: begin
         reg_rdata_next[0] = '0;
+        reg_rdata_next[31] = alert_test_regwen_qs;
       end
 
       addr_hit[1]: begin
@@ -769,17 +901,7 @@ module rom_ctrl_regs_reg_top (
   assign shadow_busy = 1'b0;
 
   // register busy
-  logic reg_busy_sel;
-  assign reg_busy = reg_busy_sel | shadow_busy;
-  always_comb begin
-    reg_busy_sel = '0;
-    unique case (1'b1)
-      default: begin
-        reg_busy_sel  = '0;
-      end
-    endcase
-  end
-
+  assign reg_busy = shadow_busy;
 
   // Unused signal tieoff
 

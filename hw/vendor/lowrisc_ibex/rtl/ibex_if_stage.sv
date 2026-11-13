@@ -1,5 +1,6 @@
 // Copyright lowRISC contributors.
 // Copyright 2018 ETH Zurich and University of Bologna, see also CREDITS.md.
+// Copyright Microsoft Corporation
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,117 +12,142 @@
  */
 
 `include "prim_assert.sv"
+`include "dv_fcov_macros.svh"
 
-module ibex_if_stage import ibex_pkg::*; #(
-    parameter int unsigned DmHaltAddr        = 32'h1A110800,
-    parameter int unsigned DmExceptionAddr   = 32'h1A110808,
-    parameter bit          DummyInstructions = 1'b0,
-    parameter bit          ICache            = 1'b0,
-    parameter bit          ICacheECC         = 1'b0,
-    parameter int unsigned BusSizeECC        = BUS_SIZE,
-    parameter int unsigned TagSizeECC        = IC_TAG_SIZE,
-    parameter int unsigned LineSizeECC       = IC_LINE_SIZE,
-    parameter bit          PCIncrCheck       = 1'b0,
-    parameter bit          ResetAll          = 1'b0,
-    parameter lfsr_seed_t  RndCnstLfsrSeed   = RndCnstLfsrSeedDefault,
-    parameter lfsr_perm_t  RndCnstLfsrPerm   = RndCnstLfsrPermDefault,
-    parameter bit          BranchPredictor   = 1'b0
+module ibex_if_stage import ibex_pkg::*; import ibex_cheriot_pkg::*; #(
+  parameter base_isa_e   BaseIsa              = BaseIsaRV32I,
+  parameter int unsigned DmHaltAddr           = 32'h1A110800,
+  parameter int unsigned DmExceptionAddr      = 32'h1A110808,
+  parameter bit          DummyInstructions    = 1'b0,
+  parameter bit          ICache               = 1'b0,
+  parameter rv32zc_e     RV32ZC               = RV32ZcaZcbZcmp,
+  parameter bit          ICacheECC            = 1'b0,
+  parameter bit          ICacheTweakInfection = 1'b0,
+  parameter int unsigned BusSizeECC           = BUS_SIZE,
+  parameter int unsigned TagSizeECC           = IC_TAG_SIZE,
+  parameter int unsigned LineSizeECC          = IC_LINE_SIZE,
+  parameter bit          PCIncrCheck          = 1'b0,
+  parameter bit          ResetAll             = 1'b0,
+  parameter lfsr_seed_t  RndCnstLfsrSeed      = RndCnstLfsrSeedDefault,
+  parameter lfsr_perm_t  RndCnstLfsrPerm      = RndCnstLfsrPermDefault,
+  parameter bit          BranchPredictor      = 1'b0,
+  parameter bit          MemECC               = 1'b0,
+  parameter int unsigned MemDataWidth         = MemECC ? 32 + 7 : 32
 ) (
-    input  logic                         clk_i,
-    input  logic                         rst_ni,
+  input  logic                         clk_i,
+  input  logic                         rst_ni,
 
-    input  logic [31:0]                  boot_addr_i,              // also used for mtvec
-    input  logic                         req_i,                    // instruction request control
+  input  ibex_mubi_t                   cheriot_enable_i,
+  input  logic [31:0]                  boot_addr_i,              // also used for mtvec
+  input  logic                         req_i,                    // instruction request control
+  input  logic                         debug_mode_i,
 
-    // instruction cache interface
-    output logic                        instr_req_o,
-    output logic [31:0]                 instr_addr_o,
-    input  logic                        instr_gnt_i,
-    input  logic                        instr_rvalid_i,
-    input  logic [31:0]                 instr_rdata_i,
-    input  logic                        instr_err_i,
-    input  logic                        instr_pmp_err_i,
+  // instruction cache interface
+  output logic                        instr_req_o,
+  output logic [31:0]                 instr_addr_o,
+  input  logic                        instr_gnt_i,
+  input  logic                        instr_rvalid_i,
+  input  logic [MemDataWidth-1:0]     instr_rdata_i,
+  input  logic                        instr_bus_err_i,
+  output logic                        instr_intg_err_o,
 
-    // ICache RAM IO
-    output logic [IC_NUM_WAYS-1:0]      ic_tag_req_o,
-    output logic                        ic_tag_write_o,
-    output logic [IC_INDEX_W-1:0]       ic_tag_addr_o,
-    output logic [TagSizeECC-1:0]       ic_tag_wdata_o,
-    input  logic [TagSizeECC-1:0]       ic_tag_rdata_i [IC_NUM_WAYS],
-    output logic [IC_NUM_WAYS-1:0]      ic_data_req_o,
-    output logic                        ic_data_write_o,
-    output logic [IC_INDEX_W-1:0]       ic_data_addr_o,
-    output logic [LineSizeECC-1:0]      ic_data_wdata_o,
-    input  logic [LineSizeECC-1:0]      ic_data_rdata_i [IC_NUM_WAYS],
+  // ICache RAM IO
+  output logic [IC_NUM_WAYS-1:0]      ic_tag_req_o,
+  output logic                        ic_tag_write_o,
+  output logic [IC_INDEX_W-1:0]       ic_tag_addr_o,
+  output logic [TagSizeECC-1:0]       ic_tag_wdata_o,
+  input  logic [TagSizeECC-1:0]       ic_tag_rdata_i [IC_NUM_WAYS],
+  output logic [IC_NUM_WAYS-1:0]      ic_data_req_o,
+  output logic                        ic_data_write_o,
+  output logic [IC_INDEX_W-1:0]       ic_data_addr_o,
+  output logic [LineSizeECC-1:0]      ic_data_wdata_o,
+  input  logic [LineSizeECC-1:0]      ic_data_rdata_i [IC_NUM_WAYS],
+  input  logic                        ic_scr_key_valid_i,
+  output logic                        ic_scr_key_req_o,
 
-    // output of ID stage
-    output logic                        instr_valid_id_o,         // instr in IF-ID is valid
-    output logic                        instr_new_id_o,           // instr in IF-ID is new
-    output logic [31:0]                 instr_rdata_id_o,         // instr for ID stage
-    output logic [31:0]                 instr_rdata_alu_id_o,     // replicated instr for ID stage
-                                                                  // to reduce fan-out
-    output logic [15:0]                 instr_rdata_c_id_o,       // compressed instr for ID stage
-                                                                  // (mtval), meaningful only if
-                                                                  // instr_is_compressed_id_o = 1'b1
-    output logic                        instr_is_compressed_id_o, // compressed decoder thinks this
-                                                                  // is a compressed instr
-    output logic                        instr_bp_taken_o,         // instruction was predicted to be
-                                                                  // a taken branch
-    output logic                        instr_fetch_err_o,        // bus error on fetch
-    output logic                        instr_fetch_err_plus2_o,  // bus error misaligned
-    output logic                        illegal_c_insn_id_o,      // compressed decoder thinks this
-                                                                  // is an invalid instr
-    output logic                        dummy_instr_id_o,         // Instruction is a dummy
-    output logic [31:0]                 pc_if_o,
-    output logic [31:0]                 pc_id_o,
+  // output of ID stage
+  output logic                        instr_valid_id_o,         // instr in IF-ID is valid
+  output logic                        instr_new_id_o,           // instr in IF-ID is new
+  output logic [31:0]                 instr_rdata_id_o,         // instr for ID stage
+  output logic [31:0]                 instr_rdata_alu_id_o,     // replicated instr for ID stage
+                                                                // to reduce fan-out
+  output logic [15:0]                 instr_rdata_c_id_o,       // compressed instr for ID stage
+                                                                // (mtval), meaningful only if
+                                                                // instr_is_compressed_id_o = 1'b1
+  output logic                        instr_is_compressed_id_o, // compressed decoder thinks this
+                                                                // is a compressed instr
+  output instr_exp_e                  instr_gets_expanded_id_o, // this instruction comes from one
+                                                                // that gets expanded by the
+                                                                // compressed decoder
+  output logic [15:0]                 instr_expanded_id_o,      // the instruction that is currently
+                                                                // getting expanded
+  output logic                        instr_bp_taken_o,         // instruction was predicted to be
+                                                                // a taken branch
+  output logic                        instr_fetch_err_o,        // bus error on fetch
+  output logic                        instr_fetch_err_plus2_o,  // bus error misaligned
+  output logic                        illegal_c_insn_id_o,      // compressed decoder thinks this
+                                                                // is an invalid instr
+  output logic                        instr_fetch_cheriot_acc_vio_o,
+  output logic                        instr_fetch_cheriot_bound_vio_o,
+  output logic                        dummy_instr_id_o,         // Instruction is a dummy
+  output logic [31:0]                 pc_if_o,
+  output logic [31:0]                 pc_id_o,
+  input  logic                        pmp_err_if_i,
+  input  logic                        pmp_err_if_plus2_i,
 
-    // control signals
-    input  logic                        instr_valid_clear_i,      // clear instr valid bit in IF-ID
-    input  logic                        pc_set_i,                 // set the PC to a new value
-    input  logic                        pc_set_spec_i,
-    input  pc_sel_e                     pc_mux_i,                 // selector for PC multiplexer
-    input  logic                        nt_branch_mispredict_i,   // Not-taken branch in ID/EX was
-                                                                  // mispredicted (predicted taken)
-    input  exc_pc_sel_e                 exc_pc_mux_i,             // selects ISR address
-    input  exc_cause_e                  exc_cause,                // selects ISR address for
-                                                                  // vectorized interrupt lines
-    input logic                         dummy_instr_en_i,
-    input logic [2:0]                   dummy_instr_mask_i,
-    input logic                         dummy_instr_seed_en_i,
-    input logic [31:0]                  dummy_instr_seed_i,
-    input logic                         icache_enable_i,
-    input logic                         icache_inval_i,
+  // control signals
+  input  logic                        instr_valid_clear_i,      // clear instr valid bit in IF-ID
+  input  logic                        pc_set_i,                 // set the PC to a new value
+  input  pc_sel_e                     pc_mux_i,                 // selector for PC multiplexer
+  input  logic                        nt_branch_mispredict_i,   // Not-taken branch in ID/EX was
+                                                                // mispredicted (predicted taken)
+  input  logic [31:0]                 nt_branch_addr_i,         // Not-taken branch address in ID/EX
+  input  exc_pc_sel_e                 exc_pc_mux_i,             // selects ISR address
+  input  exc_cause_t                  exc_cause,                // selects ISR address for
+                                                                // vectorized interrupt lines
+  input  logic                        dummy_instr_en_i,
+  input  logic [2:0]                  dummy_instr_mask_i,
+  input  logic                        dummy_instr_seed_en_i,
+  input  logic [31:0]                 dummy_instr_seed_i,
+  input  logic                        icache_enable_i,
+  input  logic                        icache_inval_i,
+  output logic                        icache_ecc_error_o,
 
-    // jump and branch target
-    input  logic [31:0]                 branch_target_ex_i,       // branch/jump target address
+  // jump and branch target
+  input  logic [31:0]                 branch_target_ex_i,       // branch/jump target address
 
-    // CSRs
-    input  logic [31:0]                 csr_mepc_i,               // PC to restore after handling
-                                                                  // the interrupt/exception
-    input  logic [31:0]                 csr_depc_i,               // PC to restore after handling
-                                                                  // the debug request
-    input  logic [31:0]                 csr_mtvec_i,              // base PC to jump to on exception
-    output logic                        csr_mtvec_init_o,         // tell CS regfile to init mtvec
+  // CSRs
+  input  logic [31:0]                 csr_mepc_i,               // PC to restore after handling
+                                                                // the interrupt/exception
+  input  logic [31:0]                 csr_depc_i,               // PC to restore after handling
+                                                                // the debug request
+  input  logic [31:0]                 csr_mtvec_i,              // base PC to jump to on exception
+  output logic                        csr_mtvec_init_o,         // tell CS regfile to init mtvec
 
-    // pipeline stall
-    input  logic                        id_in_ready_i,            // ID stage is ready for new instr
+  // pipeline stall
+  input  logic                        id_in_ready_i,            // ID stage is ready for new instr
 
-    // misc signals
-    output logic                        pc_mismatch_alert_o,
-    output logic                        if_busy_o                 // IF stage is busy fetching instr
+  // misc signals
+  output logic                        pc_mismatch_alert_o,
+  output logic                        if_busy_o,                // IF stage is busy fetching instr
+  input  decoded_cap_t                pcc_cap_i
 );
 
   logic              instr_valid_id_d, instr_valid_id_q;
   logic              instr_new_id_d, instr_new_id_q;
 
+  logic              instr_err, instr_intg_err;
+
   // prefetch buffer related signals
   logic              prefetch_busy;
   logic              branch_req;
-  logic              branch_spec;
-  logic              predicted_branch;
   logic       [31:0] fetch_addr_n;
   logic              unused_fetch_addr_n0;
 
+  logic              prefetch_branch;
+  logic [31:0]       prefetch_addr;
+
+  logic              fetch_valid_raw;
   logic              fetch_valid;
   logic              fetch_ready;
   logic       [31:0] fetch_rdata;
@@ -129,15 +155,20 @@ module ibex_if_stage import ibex_pkg::*; #(
   logic              fetch_err;
   logic              fetch_err_plus2;
 
+  logic [31:0]       instr_decompressed;
+  logic              illegal_c_insn;
+  logic              instr_is_compressed;
+  instr_exp_e        instr_gets_expanded;
+
   logic              if_instr_valid;
   logic       [31:0] if_instr_rdata;
   logic       [31:0] if_instr_addr;
+  logic              if_instr_bus_err;
+  logic              if_instr_pmp_err;
   logic              if_instr_err;
+  logic              if_instr_err_plus2;
 
   logic       [31:0] exc_pc;
-
-  logic        [5:0] irq_id;
-  logic              unused_irq_bit;
 
   logic              if_id_pipe_reg_we; // IF-ID pipeline reg write enable
 
@@ -145,32 +176,59 @@ module ibex_if_stage import ibex_pkg::*; #(
   logic              stall_dummy_instr;
   logic [31:0]       instr_out;
   logic              instr_is_compressed_out;
+  instr_exp_e        instr_gets_expanded_out;
   logic              illegal_c_instr_out;
   logic              instr_err_out;
 
   logic              predict_branch_taken;
   logic       [31:0] predict_branch_pc;
 
+  logic        [4:0] irq_vec;
+
   ibex_pkg::pc_sel_e pc_mux_internal;
 
   logic        [7:0] unused_boot_addr;
   logic        [7:0] unused_csr_mtvec;
+  logic              unused_exc_cause;
+
+  logic              cheriot_acc_vio, cheriot_bound_vio;
+  logic              cheriot_force_uc;
+  decoded_cap_t      unused_pcc_cap;
+  logic              unused_cheriot_force_uc;
 
   assign unused_boot_addr = boot_addr_i[7:0];
   assign unused_csr_mtvec = csr_mtvec_i[7:0];
 
-  // extract interrupt ID from exception cause
-  assign irq_id         = {exc_cause};
-  assign unused_irq_bit = irq_id[5];   // MSB distinguishes interrupts from exceptions
+  assign unused_exc_cause = |{exc_cause.irq_ext, exc_cause.irq_int};
+
+  assign unused_pcc_cap = pcc_cap_i;
+  assign unused_cheriot_force_uc = cheriot_force_uc;  // driven to prefetch_buffer port
+
+  if (BaseIsa != BaseIsaRV32IorCHERIoT) begin : gen_no_cheriot_if
+    logic unused_cheriot_if_sigs;
+    assign unused_cheriot_if_sigs = ^cheriot_enable_i | debug_mode_i;
+  end
 
   // exception PC selection mux
   always_comb begin : exc_pc_mux
+    irq_vec = exc_cause.lower_cause;
+
+    if (exc_cause.irq_int) begin
+      // All internal interrupts go to the NMI vector
+      irq_vec = ExcCauseIrqNm.lower_cause;
+    end
+
     unique case (exc_pc_mux_i)
-      EXC_PC_EXC:     exc_pc = { csr_mtvec_i[31:8], 8'h00                    };
-      EXC_PC_IRQ:     exc_pc = { csr_mtvec_i[31:8], 1'b0, irq_id[4:0], 2'b00 };
+      EXC_PC_EXC:     exc_pc = ((BaseIsa == BaseIsaRV32IorCHERIoT)
+                                & (cheriot_enable_i == IbexMuBiOn)) ?
+                               {csr_mtvec_i[31:2], 2'b00} : {csr_mtvec_i[31:8], 8'h00};
+      EXC_PC_IRQ:     exc_pc = ((BaseIsa == BaseIsaRV32IorCHERIoT)
+                                & (cheriot_enable_i == IbexMuBiOn)) ?
+                               {csr_mtvec_i[31:2], 2'b00} :
+                               {csr_mtvec_i[31:8], 1'b0, irq_vec, 2'b00};
       EXC_PC_DBD:     exc_pc = DmHaltAddr;
       EXC_PC_DBG_EXC: exc_pc = DmExceptionAddr;
-      default:        exc_pc = { csr_mtvec_i[31:8], 8'h00                    };
+      default:        exc_pc = { csr_mtvec_i[31:8], 8'h00                };
     endcase
   end
 
@@ -197,29 +255,66 @@ module ibex_if_stage import ibex_pkg::*; #(
   // tell CS register file to initialize mtvec on boot
   assign csr_mtvec_init_o = (pc_mux_i == PC_BOOT) & pc_set_i;
 
+  // SEC_CM: BUS.INTEGRITY
+  if (MemECC) begin : g_mem_ecc
+    logic [1:0] ecc_err;
+    logic [MemDataWidth-1:0] instr_rdata_buf;
+
+    prim_buf #(.Width(MemDataWidth)) u_prim_buf_instr_rdata (
+      .in_i (instr_rdata_i),
+      .out_o(instr_rdata_buf)
+    );
+
+    prim_secded_inv_39_32_dec u_instr_intg_dec (
+      .data_i     (instr_rdata_buf),
+      .data_o     (),
+      .syndrome_o (),
+      .err_o      (ecc_err)
+    );
+
+    // Don't care if error is correctable or not, they're all treated the same
+    assign instr_intg_err = |ecc_err;
+  end else begin : g_no_mem_ecc
+    assign instr_intg_err            = 1'b0;
+  end
+
+  assign instr_err        = instr_intg_err | instr_bus_err_i;
+  assign instr_intg_err_o = instr_intg_err & instr_rvalid_i;
+
+  // There are two possible "branch please" signals that are computed in the IF stage: branch_req
+  // and nt_branch_mispredict_i. These should be mutually exclusive (see the NoMispredBranch
+  // assertion), so we can just OR the signals together.
+  assign prefetch_branch = branch_req | nt_branch_mispredict_i;
+  assign prefetch_addr   = branch_req ? {fetch_addr_n[31:1], 1'b0} : nt_branch_addr_i;
+
+  // The fetch_valid signal that comes out of the icache or prefetch buffer should be squashed if we
+  // had a misprediction.
+  assign fetch_valid = fetch_valid_raw & ~nt_branch_mispredict_i;
+
+  // We should never see a mispredict and an incoming branch on the same cycle. The mispredict also
+  // cancels any predicted branch so overall branch_req must be low.
+  `ASSERT(NoMispredBranch, nt_branch_mispredict_i |-> ~branch_req)
+
   if (ICache) begin : gen_icache
     // Full I-Cache option
     ibex_icache #(
-      .BranchPredictor (BranchPredictor),
       .ICacheECC       (ICacheECC),
       .ResetAll        (ResetAll),
       .BusSizeECC      (BusSizeECC),
       .TagSizeECC      (TagSizeECC),
-      .LineSizeECC     (LineSizeECC)
+      .LineSizeECC     (LineSizeECC),
+      .TweakInfection  (ICacheTweakInfection)
     ) icache_i (
         .clk_i               ( clk_i                      ),
         .rst_ni              ( rst_ni                     ),
 
         .req_i               ( req_i                      ),
 
-        .branch_i            ( branch_req                 ),
-        .branch_spec_i       ( branch_spec                ),
-        .predicted_branch_i  ( predicted_branch           ),
-        .branch_mispredict_i ( nt_branch_mispredict_i     ),
-        .addr_i              ( {fetch_addr_n[31:1], 1'b0} ),
+        .branch_i            ( prefetch_branch            ),
+        .addr_i              ( prefetch_addr              ),
 
         .ready_i             ( fetch_ready                ),
-        .valid_o             ( fetch_valid                ),
+        .valid_o             ( fetch_valid_raw            ),
         .rdata_o             ( fetch_rdata                ),
         .addr_o              ( fetch_addr                 ),
         .err_o               ( fetch_err                  ),
@@ -229,9 +324,8 @@ module ibex_if_stage import ibex_pkg::*; #(
         .instr_addr_o        ( instr_addr_o               ),
         .instr_gnt_i         ( instr_gnt_i                ),
         .instr_rvalid_i      ( instr_rvalid_i             ),
-        .instr_rdata_i       ( instr_rdata_i              ),
-        .instr_err_i         ( instr_err_i                ),
-        .instr_pmp_err_i     ( instr_pmp_err_i            ),
+        .instr_rdata_i       ( instr_rdata_i[31:0]        ),
+        .instr_err_i         ( instr_err                  ),
 
         .ic_tag_req_o        ( ic_tag_req_o               ),
         .ic_tag_write_o      ( ic_tag_write_o             ),
@@ -243,15 +337,17 @@ module ibex_if_stage import ibex_pkg::*; #(
         .ic_data_addr_o      ( ic_data_addr_o             ),
         .ic_data_wdata_o     ( ic_data_wdata_o            ),
         .ic_data_rdata_i     ( ic_data_rdata_i            ),
+        .ic_scr_key_valid_i  ( ic_scr_key_valid_i         ),
+        .ic_scr_key_req_o    ( ic_scr_key_req_o           ),
 
         .icache_enable_i     ( icache_enable_i            ),
         .icache_inval_i      ( icache_inval_i             ),
-        .busy_o              ( prefetch_busy              )
+        .busy_o              ( prefetch_busy              ),
+        .ecc_error_o         ( icache_ecc_error_o         )
     );
   end else begin : gen_prefetch_buffer
     // prefetch buffer, caches a fixed number of instructions
     ibex_prefetch_buffer #(
-      .BranchPredictor (BranchPredictor),
       .ResetAll        (ResetAll)
     ) prefetch_buffer_i (
         .clk_i               ( clk_i                      ),
@@ -259,37 +355,36 @@ module ibex_if_stage import ibex_pkg::*; #(
 
         .req_i               ( req_i                      ),
 
-        .branch_i            ( branch_req                 ),
-        .branch_spec_i       ( branch_spec                ),
-        .predicted_branch_i  ( predicted_branch           ),
-        .branch_mispredict_i ( nt_branch_mispredict_i     ),
-        .addr_i              ( {fetch_addr_n[31:1], 1'b0} ),
+        .branch_i            ( prefetch_branch            ),
+        .addr_i              ( prefetch_addr              ),
 
         .ready_i             ( fetch_ready                ),
-        .valid_o             ( fetch_valid                ),
+        .valid_o             ( fetch_valid_raw            ),
         .rdata_o             ( fetch_rdata                ),
         .addr_o              ( fetch_addr                 ),
         .err_o               ( fetch_err                  ),
         .err_plus2_o         ( fetch_err_plus2            ),
 
+        .cheriot_force_uc_i  ( cheriot_force_uc           ),
+
         .instr_req_o         ( instr_req_o                ),
         .instr_addr_o        ( instr_addr_o               ),
         .instr_gnt_i         ( instr_gnt_i                ),
         .instr_rvalid_i      ( instr_rvalid_i             ),
-        .instr_rdata_i       ( instr_rdata_i              ),
-        .instr_err_i         ( instr_err_i                ),
-        .instr_pmp_err_i     ( instr_pmp_err_i            ),
+        .instr_rdata_i       ( instr_rdata_i[31:0]        ),
+        .instr_err_i         ( instr_err                  ),
 
         .busy_o              ( prefetch_busy              )
     );
     // ICache tieoffs
-    logic                   unused_icen, unused_icinv;
+    logic                   unused_icen, unused_icinv, unused_scr_key_valid;
     logic [TagSizeECC-1:0]  unused_tag_ram_input [IC_NUM_WAYS];
     logic [LineSizeECC-1:0] unused_data_ram_input [IC_NUM_WAYS];
     assign unused_icen           = icache_enable_i;
     assign unused_icinv          = icache_inval_i;
     assign unused_tag_ram_input  = ic_tag_rdata_i;
     assign unused_data_ram_input = ic_data_rdata_i;
+    assign unused_scr_key_valid  = ic_scr_key_valid_i;
     assign ic_tag_req_o          = 'b0;
     assign ic_tag_write_o        = 'b0;
     assign ic_tag_addr_o         = 'b0;
@@ -298,59 +393,156 @@ module ibex_if_stage import ibex_pkg::*; #(
     assign ic_data_write_o       = 'b0;
     assign ic_data_addr_o        = 'b0;
     assign ic_data_wdata_o       = 'b0;
+    assign ic_scr_key_req_o      = 'b0;
+    assign icache_ecc_error_o    = 'b0;
+
+`ifndef SYNTHESIS
+    // If we don't instantiate an icache and this is a simulation then we have a problem because the
+    // simulator might discard the icache module entirely, including some DPI exports that it
+    // implies. This then causes problems for linking against C++ testbench code that expected them.
+    // As a slightly ugly hack, let's define the DPI functions here (the real versions are defined
+    // in prim_util_get_scramble_params.svh)
+    export "DPI-C" function simutil_get_scramble_key;
+    export "DPI-C" function simutil_get_scramble_nonce;
+    function automatic int simutil_get_scramble_key(output bit [127:0] val);
+      return 0;
+    endfunction
+    function automatic int simutil_get_scramble_nonce(output bit [319:0] nonce);
+      return 0;
+    endfunction
+`endif
   end
 
   assign unused_fetch_addr_n0 = fetch_addr_n[0];
 
   assign branch_req  = pc_set_i | predict_branch_taken;
-  assign branch_spec = pc_set_spec_i | predict_branch_taken;
 
   assign pc_if_o     = if_instr_addr;
   assign if_busy_o   = prefetch_busy;
+
+  // PMP errors
+  // An error can come from the instruction address, or the next instruction address for unaligned,
+  // uncompressed instructions.
+  assign if_instr_pmp_err = pmp_err_if_i |
+                            (if_instr_addr[1] & ~instr_is_compressed & pmp_err_if_plus2_i);
+
+  // Combine bus errors and pmp errors
+  assign if_instr_err = if_instr_bus_err | if_instr_pmp_err | cheriot_acc_vio | cheriot_bound_vio;
+
+  // Capture the second half of the address for errors on the second part of an instruction
+  // LEC_NOT_COMPATIBLE
+  assign if_instr_err_plus2 = ((if_instr_addr[1] & ~instr_is_compressed & pmp_err_if_plus2_i) |
+                               fetch_err_plus2) & ~pmp_err_if_i;
+
+  // pre-calculate headroom to improve memory read timing
+  logic [33:0] instr_hdrm;
+  logic        hdrm_ge4, hdrm_ge2, hdrm_ok, base_ok;
+  logic        allow_all;
+
+  // allow_all is used to permit the pc wraparound case (pc = 0xffff_fffe, uncompressed instruction)
+  // - in this case fetch should be allowed if pcc bounds is specified as the entire 32-bit space.
+  // - If we don't treat this as a specail case the fetch would be erred since headroom < 4
+  assign allow_all  = (pcc_cap_i.base32 == 0) & (pcc_cap_i.top33 == 33'h1_0000_0000);
+
+  assign instr_hdrm = {1'b0, pcc_cap_i.top33} - {2'b00, if_instr_addr};
+  assign hdrm_ge4   = (|instr_hdrm[32:2]) & ~instr_hdrm[33];     // >= 4
+  assign hdrm_ge2   = (|instr_hdrm[32:1]) & ~instr_hdrm[33];     // >= 2
+  logic unused_hdrm_lsb;
+  assign unused_hdrm_lsb = instr_hdrm[0];
+  assign hdrm_ok    = allow_all || (instr_is_compressed ? hdrm_ge2 : hdrm_ge4);
+  assign base_ok    = ~(if_instr_addr < pcc_cap_i.base32);
+
+  // only issue cheriot_acc_vio on valid fetches
+  assign cheriot_bound_vio = (BaseIsa == BaseIsaRV32IorCHERIoT) & (cheriot_enable_i == IbexMuBiOn)
+                           & ~debug_mode_i & (~base_ok  || ~hdrm_ok);
+
+  // In order to have constant timing (avoid side-channel leakage due to data-dependent behavior),
+  // if base vio or headroom < 4 (we are only authorized to fetch 2 bytes), force the fetch_fifo
+  // to treat the current rdata as a unaligned compressed instruction if pc[1]=1, and push it to
+  // ID stage without waiting for the 2nd part of 32-bit instruction.
+  //
+  assign cheriot_force_uc = (BaseIsa == BaseIsaRV32IorCHERIoT) & (cheriot_enable_i == IbexMuBiOn)
+                          & ~allow_all & (~base_ok | ~hdrm_ge4);
+
+  // we still check seal/perm here to be safe, however by ISA those can't happen at fetch time
+  // since they are check elsewhere already
+  assign cheriot_acc_vio = (BaseIsa == BaseIsaRV32IorCHERIoT) & (cheriot_enable_i == IbexMuBiOn)
+                         & ~debug_mode_i
+                         & (~pcc_cap_i.perms.EX || ~pcc_cap_i.valid ||
+                            (pcc_cap_i.otype != 0));
 
   // compressed instruction decoding, or more precisely compressed instruction
   // expander
   //
   // since it does not matter where we decompress instructions, we do it here
   // to ease timing closure
-  logic [31:0] instr_decompressed;
-  logic        illegal_c_insn;
-  logic        instr_is_compressed;
 
-  ibex_compressed_decoder compressed_decoder_i (
-      .clk_i           ( clk_i                    ),
-      .rst_ni          ( rst_ni                   ),
-      .valid_i         ( fetch_valid & ~fetch_err ),
-      .instr_i         ( if_instr_rdata           ),
-      .instr_o         ( instr_decompressed       ),
-      .is_compressed_o ( instr_is_compressed      ),
-      .illegal_instr_o ( illegal_c_insn           )
+  // The compressed decoder only has state for the Zcmp expanded instructions. Flush this state if
+  // there is an exception.
+  logic flush_expanded;
+  assign flush_expanded = pc_set_i & (pc_mux_i == ibex_pkg::PC_EXC);
+
+  ibex_compressed_decoder #(
+    .RV32ZC   (RV32ZC),
+    .ResetAll (ResetAll),
+    .BaseIsa  (BaseIsa)
+  ) compressed_decoder_i (
+    .clk_i            (clk_i),
+    .rst_ni           (rst_ni),
+    .valid_i          (fetch_valid & ~fetch_err),
+    .id_in_ready_i    (id_in_ready_i & ~pc_set_i),
+    .instr_i          (if_instr_rdata),
+    .cheriot_enable_i (cheriot_enable_i),
+    .instr_o          (instr_decompressed),
+    .is_compressed_o  (instr_is_compressed),
+    .gets_expanded_o  (instr_gets_expanded),
+    .flush_expanded_i (flush_expanded),
+    .illegal_instr_o  (illegal_c_insn)
   );
+
+  // Debug entry must not split a Zcmp sequence, nor an interrupt its committing micro-ops: the
+  // handler returns to the start of the instruction.
+  `ASSERT(NoDebugEntryInZcmpSequence,
+          pc_set_i && (pc_mux_i == PC_EXC) && (exc_pc_mux_i == EXC_PC_DBD)
+          |-> compressed_decoder_i.cm_state_q == compressed_decoder_i.CmIdle)
+  `ASSERT(NoIrqInZcmpCommit,
+          pc_set_i && (pc_mux_i == PC_EXC) && (exc_pc_mux_i == EXC_PC_IRQ)
+          |-> !(compressed_decoder_i.cm_state_q inside {compressed_decoder_i.CmPopZeroA0,
+                                                        compressed_decoder_i.CmPopRetRa,
+                                                        compressed_decoder_i.CmMvSecondReg}))
 
   // Dummy instruction insertion
   if (DummyInstructions) begin : gen_dummy_instr
+    // SEC_CM: CTRL_FLOW.UNPREDICTABLE
     logic        insert_dummy_instr;
+    logic        dummy_instr_hold;
     logic [31:0] dummy_instr_data;
+
+    // Hold dummies back while the next instruction is a Zcmp micro-op. The controller sees a dummy
+    // as a separate instruction, so one inside a sequence would let debug entry or an interrupt in.
+    assign dummy_instr_hold = instr_gets_expanded != INSTR_NOT_EXPANDED;
 
     ibex_dummy_instr #(
       .RndCnstLfsrSeed (RndCnstLfsrSeed),
       .RndCnstLfsrPerm (RndCnstLfsrPerm)
     ) dummy_instr_i (
-      .clk_i                 ( clk_i                 ),
-      .rst_ni                ( rst_ni                ),
-      .dummy_instr_en_i      ( dummy_instr_en_i      ),
-      .dummy_instr_mask_i    ( dummy_instr_mask_i    ),
-      .dummy_instr_seed_en_i ( dummy_instr_seed_en_i ),
-      .dummy_instr_seed_i    ( dummy_instr_seed_i    ),
-      .fetch_valid_i         ( fetch_valid           ),
-      .id_in_ready_i         ( id_in_ready_i         ),
-      .insert_dummy_instr_o  ( insert_dummy_instr    ),
-      .dummy_instr_data_o    ( dummy_instr_data      )
+      .clk_i                (clk_i),
+      .rst_ni               (rst_ni),
+      .dummy_instr_en_i     (dummy_instr_en_i),
+      .dummy_instr_mask_i   (dummy_instr_mask_i),
+      .dummy_instr_seed_en_i(dummy_instr_seed_en_i),
+      .dummy_instr_seed_i   (dummy_instr_seed_i),
+      .fetch_valid_i        (fetch_valid),
+      .id_in_ready_i        (id_in_ready_i),
+      .insert_hold_i        (dummy_instr_hold),
+      .insert_dummy_instr_o (insert_dummy_instr),
+      .dummy_instr_data_o   (dummy_instr_data)
     );
 
     // Mux between actual instructions and dummy instructions
     assign instr_out               = insert_dummy_instr ? dummy_instr_data : instr_decompressed;
     assign instr_is_compressed_out = insert_dummy_instr ? 1'b0 : instr_is_compressed;
+    assign instr_gets_expanded_out = insert_dummy_instr ? INSTR_NOT_EXPANDED : instr_gets_expanded;
     assign illegal_c_instr_out     = insert_dummy_instr ? 1'b0 : illegal_c_insn;
     assign instr_err_out           = insert_dummy_instr ? 1'b0 : if_instr_err;
 
@@ -358,6 +550,28 @@ module ibex_if_stage import ibex_pkg::*; #(
     // is currently in the ID stage and whatever is valid from the prefetch buffer this cycle. The
     // PC of the dummy instruction will match whatever is next from the prefetch buffer.
     assign stall_dummy_instr = insert_dummy_instr;
+
+    `ASSERT(NoDummyInZcmpSequence,
+            insert_dummy_instr |-> (instr_gets_expanded == INSTR_NOT_EXPANDED) &&
+                                   (compressed_decoder_i.cm_state_q == compressed_decoder_i.CmIdle))
+
+`ifdef INC_ASSERT
+    // A dummy was due, and held back, before each kind of Zcmp micro-op.
+    logic       dummy_held;
+    logic [2:0] cm_state;
+    assign dummy_held = dummy_instr_hold & dummy_instr_en_i &
+                        (dummy_instr_i.dummy_cnt_q == dummy_instr_i.dummy_cnt_threshold);
+    assign cm_state   = compressed_decoder_i.cm_state_q;
+
+    `COVER(DummyHeldCmIdle_C,         dummy_held && cm_state == compressed_decoder_i.CmIdle)
+    `COVER(DummyHeldCmPushStoreReg_C, dummy_held && cm_state == compressed_decoder_i.CmPushStoreReg)
+    `COVER(DummyHeldCmPushDecrSp_C,   dummy_held && cm_state == compressed_decoder_i.CmPushDecrSp)
+    `COVER(DummyHeldCmPopLoadReg_C,   dummy_held && cm_state == compressed_decoder_i.CmPopLoadReg)
+    `COVER(DummyHeldCmPopIncrSp_C,    dummy_held && cm_state == compressed_decoder_i.CmPopIncrSp)
+    `COVER(DummyHeldCmPopZeroA0_C,    dummy_held && cm_state == compressed_decoder_i.CmPopZeroA0)
+    `COVER(DummyHeldCmPopRetRa_C,     dummy_held && cm_state == compressed_decoder_i.CmPopRetRa)
+    `COVER(DummyHeldCmMvSecondReg_C,  dummy_held && cm_state == compressed_decoder_i.CmMvSecondReg)
+`endif
 
     // Register the dummy instruction indication into the ID stage
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -380,6 +594,7 @@ module ibex_if_stage import ibex_pkg::*; #(
     assign unused_dummy_seed       = dummy_instr_seed_i;
     assign instr_out               = instr_decompressed;
     assign instr_is_compressed_out = instr_is_compressed;
+    assign instr_gets_expanded_out = instr_gets_expanded;
     assign illegal_c_instr_out     = illegal_c_insn;
     assign instr_err_out           = if_instr_err;
     assign stall_dummy_instr       = 1'b0;
@@ -391,7 +606,7 @@ module ibex_if_stage import ibex_pkg::*; #(
   // Valid is held until it is explicitly cleared (due to an instruction completing or an exception)
   assign instr_valid_id_d = (if_instr_valid & id_in_ready_i & ~pc_set_i) |
                             (instr_valid_id_q & ~instr_valid_clear_i);
-  assign instr_new_id_d   = if_instr_valid & id_in_ready_i;
+  assign instr_new_id_d   = if_instr_valid & id_in_ready_i & ~pc_set_i;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -413,51 +628,84 @@ module ibex_if_stage import ibex_pkg::*; #(
   if (ResetAll) begin : g_instr_rdata_ra
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        instr_rdata_id_o         <= '0;
-        instr_rdata_alu_id_o     <= '0;
-        instr_fetch_err_o        <= '0;
-        instr_fetch_err_plus2_o  <= '0;
-        instr_rdata_c_id_o       <= '0;
-        instr_is_compressed_id_o <= '0;
-        illegal_c_insn_id_o      <= '0;
-        pc_id_o                  <= '0;
+        instr_rdata_id_o                <= '0;
+        instr_rdata_alu_id_o            <= '0;
+        instr_fetch_err_o               <= '0;
+        instr_fetch_err_plus2_o         <= '0;
+        instr_rdata_c_id_o              <= '0;
+        instr_is_compressed_id_o        <= '0;
+        instr_gets_expanded_id_o        <= INSTR_NOT_EXPANDED;
+        instr_expanded_id_o             <= '0;
+        illegal_c_insn_id_o             <= '0;
+        pc_id_o                         <= '0;
       end else if (if_id_pipe_reg_we) begin
-        instr_rdata_id_o         <= instr_out;
+        instr_rdata_id_o                <= instr_out;
         // To reduce fan-out and help timing from the instr_rdata_id flops they are replicated.
-        instr_rdata_alu_id_o     <= instr_out;
-        instr_fetch_err_o        <= instr_err_out;
-        instr_fetch_err_plus2_o  <= fetch_err_plus2;
-        instr_rdata_c_id_o       <= if_instr_rdata[15:0];
-        instr_is_compressed_id_o <= instr_is_compressed_out;
-        illegal_c_insn_id_o      <= illegal_c_instr_out;
-        pc_id_o                  <= pc_if_o;
+        instr_rdata_alu_id_o            <= instr_out;
+        instr_fetch_err_o               <= instr_err_out;
+        instr_fetch_err_plus2_o         <= if_instr_err_plus2;
+        instr_rdata_c_id_o              <= if_instr_rdata[15:0];
+        instr_is_compressed_id_o        <= instr_is_compressed_out;
+        instr_gets_expanded_id_o        <= instr_gets_expanded_out;
+        instr_expanded_id_o             <= if_instr_rdata[15:0];
+        illegal_c_insn_id_o             <= illegal_c_instr_out;
+        pc_id_o                         <= pc_if_o;
       end
     end
   end else begin : g_instr_rdata_nr
     always_ff @(posedge clk_i) begin
       if (if_id_pipe_reg_we) begin
-        instr_rdata_id_o         <= instr_out;
+        instr_rdata_id_o                <= instr_out;
         // To reduce fan-out and help timing from the instr_rdata_id flops they are replicated.
-        instr_rdata_alu_id_o     <= instr_out;
-        instr_fetch_err_o        <= instr_err_out;
-        instr_fetch_err_plus2_o  <= fetch_err_plus2;
-        instr_rdata_c_id_o       <= if_instr_rdata[15:0];
-        instr_is_compressed_id_o <= instr_is_compressed_out;
-        illegal_c_insn_id_o      <= illegal_c_instr_out;
-        pc_id_o                  <= pc_if_o;
+        instr_rdata_alu_id_o            <= instr_out;
+        instr_fetch_err_o               <= instr_err_out;
+        instr_fetch_err_plus2_o         <= if_instr_err_plus2;
+        instr_rdata_c_id_o              <= if_instr_rdata[15:0];
+        instr_is_compressed_id_o        <= instr_is_compressed_out;
+        instr_gets_expanded_id_o        <= instr_gets_expanded_out;
+        instr_expanded_id_o             <= if_instr_rdata[15:0];
+        illegal_c_insn_id_o             <= illegal_c_instr_out;
+        pc_id_o                         <= pc_if_o;
       end
     end
   end
 
+  if (BaseIsa == BaseIsaRV32IorCHERIoT) begin : gen_cheriot_vio_regs
+    if (ResetAll) begin : g_cheriot_vio_ra
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          instr_fetch_cheriot_acc_vio_o   <= '0;
+          instr_fetch_cheriot_bound_vio_o <= '0;
+        end else if (if_id_pipe_reg_we) begin
+          instr_fetch_cheriot_acc_vio_o   <= cheriot_acc_vio;
+          instr_fetch_cheriot_bound_vio_o <= cheriot_bound_vio;
+        end
+      end
+    end else begin : g_cheriot_vio_nr
+      always_ff @(posedge clk_i) begin
+        if (if_id_pipe_reg_we) begin
+          instr_fetch_cheriot_acc_vio_o   <= cheriot_acc_vio;
+          instr_fetch_cheriot_bound_vio_o <= cheriot_bound_vio;
+        end
+      end
+    end
+  end else begin : gen_cheriot_vio_tieoff
+    assign instr_fetch_cheriot_acc_vio_o   = 1'b0;
+    assign instr_fetch_cheriot_bound_vio_o = 1'b0;
+  end
+
   // Check for expected increments of the PC when security hardening enabled
   if (PCIncrCheck) begin : g_secure_pc
-    logic [31:0] prev_instr_addr_incr;
+    // SEC_CM: PC.CTRL_FLOW.CONSISTENCY
+    logic [31:0] prev_instr_addr_incr, prev_instr_addr_incr_buf;
     logic        prev_instr_seq_q, prev_instr_seq_d;
 
     // Do not check for sequential increase after a branch, jump, exception, interrupt or debug
-    // request, all of which will set branch_req. Also do not check after reset or for dummys.
+    // request, all of which will set branch_req. Also do not check after reset or for dummy
+    // instructions.
     assign prev_instr_seq_d = (prev_instr_seq_q | instr_new_id_d) &
-        ~branch_req & ~stall_dummy_instr;
+        ~branch_req & ~if_instr_err & ~stall_dummy_instr &
+        !(instr_gets_expanded inside {INSTR_EXPANDED, INSTR_EXPANDED_COMMIT});
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -467,11 +715,16 @@ module ibex_if_stage import ibex_pkg::*; #(
       end
     end
 
-    assign prev_instr_addr_incr = pc_id_o + ((instr_is_compressed_id_o && !instr_fetch_err_o) ?
-                                             32'd2 : 32'd4);
+    assign prev_instr_addr_incr = pc_id_o + (instr_is_compressed_id_o ? 32'd2 : 32'd4);
+
+    // Buffer anticipated next PC address to ensure optimiser cannot remove the check.
+    prim_buf #(.Width(32)) u_prev_instr_addr_incr_buf (
+      .in_i (prev_instr_addr_incr),
+      .out_o(prev_instr_addr_incr_buf)
+    );
 
     // Check that the address equals the previous address +2/+4
-    assign pc_mismatch_alert_o = prev_instr_seq_q & (pc_if_o != prev_instr_addr_incr);
+    assign pc_mismatch_alert_o = prev_instr_seq_q & (pc_if_o != prev_instr_addr_incr_buf);
 
   end else begin : g_no_secure_pc
     assign pc_mismatch_alert_o = 1'b0;
@@ -512,10 +765,11 @@ module ibex_if_stage import ibex_pkg::*; #(
     // data_gnt_i -> instr_req_o (which needs to be avoided as for some interconnects this will
     // result in a combinational loop).
 
-    assign instr_skid_en = predicted_branch & ~id_in_ready_i & ~instr_skid_valid_q;
+    assign instr_skid_en = predict_branch_taken & ~pc_set_i & ~id_in_ready_i & ~instr_skid_valid_q;
 
-    assign instr_skid_valid_d = (instr_skid_valid_q & ~id_in_ready_i & ~stall_dummy_instr) |
-                                instr_skid_en;
+    assign instr_skid_valid_d = (instr_skid_valid_q & ~id_in_ready_i & ~stall_dummy_instr &
+                                 !(instr_gets_expanded inside
+                                 {INSTR_EXPANDED, INSTR_EXPANDED_COMMIT})) | instr_skid_en;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -548,14 +802,14 @@ module ibex_if_stage import ibex_pkg::*; #(
     end
 
     ibex_branch_predict branch_predict_i (
-      .clk_i                  ( clk_i                    ),
-      .rst_ni                 ( rst_ni                   ),
-      .fetch_rdata_i          ( fetch_rdata              ),
-      .fetch_pc_i             ( fetch_addr               ),
-      .fetch_valid_i          ( fetch_valid              ),
+      .clk_i        (clk_i),
+      .rst_ni       (rst_ni),
+      .fetch_rdata_i(fetch_rdata),
+      .fetch_pc_i   (fetch_addr),
+      .fetch_valid_i(fetch_valid),
 
-      .predict_branch_taken_o ( predict_branch_taken_raw ),
-      .predict_branch_pc_o    ( predict_branch_pc        )
+      .predict_branch_taken_o(predict_branch_taken_raw),
+      .predict_branch_pc_o   (predict_branch_pc)
     );
 
     // If there is an instruction in the skid buffer there must be no branch prediction.
@@ -564,19 +818,18 @@ module ibex_if_stage import ibex_pkg::*; #(
     // Do not branch predict on instruction errors.
     assign predict_branch_taken = predict_branch_taken_raw & ~instr_skid_valid_q & ~fetch_err;
 
-    // pc_set_i takes precendence over branch prediction
-    assign predicted_branch = predict_branch_taken & ~pc_set_i;
-
-    assign if_instr_valid   = fetch_valid | instr_skid_valid_q;
+    assign if_instr_valid   = fetch_valid | (instr_skid_valid_q & ~nt_branch_mispredict_i);
     assign if_instr_rdata   = instr_skid_valid_q ? instr_skid_data_q : fetch_rdata;
     assign if_instr_addr    = instr_skid_valid_q ? instr_skid_addr_q : fetch_addr;
 
     // Don't branch predict on instruction error so only instructions without errors end up in the
     // skid buffer.
-    assign if_instr_err     = ~instr_skid_valid_q & fetch_err;
+    assign if_instr_bus_err = ~instr_skid_valid_q & fetch_err;
     assign instr_bp_taken_d = instr_skid_valid_q ? instr_skid_bp_taken_q : predict_branch_taken;
 
-    assign fetch_ready = id_in_ready_i & ~stall_dummy_instr & ~instr_skid_valid_q;
+    assign fetch_ready = id_in_ready_i & ~stall_dummy_instr &
+                         !(instr_gets_expanded inside {INSTR_EXPANDED, INSTR_EXPANDED_COMMIT}) &
+                         ~instr_skid_valid_q;
 
     assign instr_bp_taken_o = instr_bp_taken_q;
 
@@ -585,15 +838,27 @@ module ibex_if_stage import ibex_pkg::*; #(
   end else begin : g_no_branch_predictor
     assign instr_bp_taken_o     = 1'b0;
     assign predict_branch_taken = 1'b0;
-    assign predicted_branch     = 1'b0;
     assign predict_branch_pc    = 32'b0;
 
     assign if_instr_valid = fetch_valid;
     assign if_instr_rdata = fetch_rdata;
     assign if_instr_addr  = fetch_addr;
-    assign if_instr_err   = fetch_err;
-    assign fetch_ready = id_in_ready_i & ~stall_dummy_instr;
+    assign if_instr_bus_err = fetch_err;
+    assign fetch_ready = id_in_ready_i & ~stall_dummy_instr &
+                         !(instr_gets_expanded inside {INSTR_EXPANDED, INSTR_EXPANDED_COMMIT});
   end
+
+  //////////
+  // FCOV //
+  //////////
+
+`ifndef SYNTHESIS
+  // fcov signals for V2S
+  `DV_FCOV_SIGNAL_GEN_IF(logic [1:0], dummy_instr_type,
+    gen_dummy_instr.dummy_instr_i.lfsr_data.instr_type, DummyInstructions)
+  `DV_FCOV_SIGNAL_GEN_IF(logic, insert_dummy_instr,
+    gen_dummy_instr.insert_dummy_instr, DummyInstructions)
+`endif
 
   ////////////////
   // Assertions //
@@ -637,6 +902,11 @@ module ibex_if_stage import ibex_pkg::*; #(
     logic mispredicted, mispredicted_d, mispredicted_q;
 
     assign next_pc = fetch_addr + (instr_is_compressed_out ? 32'd2 : 32'd4);
+
+    logic predicted_branch;
+
+    // pc_set_i takes precedence over branch prediction
+    assign predicted_branch = predict_branch_taken & ~pc_set_i;
 
     always_comb begin
       predicted_branch_live_d = predicted_branch_live_q;
@@ -685,9 +955,6 @@ module ibex_if_stage import ibex_pkg::*; #(
     // following cycle core signal that that branch has mispredicted).
     `ASSERT(MispredictSingleCycle,
       nt_branch_mispredict_i & ~(fetch_valid & fetch_ready) |=> ~nt_branch_mispredict_i)
-    // Note that we should never see a mispredict and an incoming branch on the same cycle.
-    // The mispredict also cancels any predicted branch so overall branch_req must be low.
-    `ASSERT(NoMispredBranch, nt_branch_mispredict_i |-> ~branch_req)
 `endif
 
   end else begin : g_no_branch_predictor_asserts

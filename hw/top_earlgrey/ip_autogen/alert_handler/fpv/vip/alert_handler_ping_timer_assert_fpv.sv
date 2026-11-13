@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,7 +7,7 @@
 
 `include "prim_assert.sv"
 
-module alert_handler_ping_timer_assert_fpv import alert_pkg::*; (
+module alert_handler_ping_timer_assert_fpv import alert_handler_pkg::*; (
   input                   clk_i,
   input                   rst_ni,
   input                   edn_req_o,

@@ -1,6 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+//
+// -------- W A R N I N G: A U T O - G E N E R A T E D  C O D E !! -------- //
+// PLEASE DO NOT HAND-EDIT THIS FILE. IT HAS BEEN AUTO-GENERATED (by closed source generator).
+//
 //############################################################################
 // *Name: dev_entropy
 // *Module Description:  Device Entropy
@@ -13,7 +17,7 @@ module dev_entropy #(
   input rst_ni,                             // Entropy Reset
   input clk_dev_i,                          // Device Clock
   input rst_dev_ni,                         // Device Reset
-  input dev_en,                             // Device Enable
+  input dev_en_i,                           // Device Enable
   input [EntropyRateWidth-1:0] dev_rate_i,  // Entropy Rate
   input dev_ack_i,                          // Write Valid (EDN_ACK)
   input [32-1:0] dev_data_i,                // Write Data (EDN_BUS)
@@ -34,7 +38,7 @@ prim_flop_2sync #(
 ) u_dev_en_dev_sync (
   .clk_i ( clk_dev_i ),
   .rst_ni ( rst_dev_ni ),
-  .d_i ( dev_en ),
+  .d_i ( dev_en_i ),
   .q_o ( dev_en_dev )
 );
 
@@ -44,20 +48,19 @@ prim_flop_2sync #(
 ///////////////////////////////////////
 logic fast_start, rate_pulse, rready;
 logic [7-1:0] fast_cnt;
-logic [(1<<EntropyRateWidth)-1:0] erate_cnt;
-logic [32-1:0] dev_rate;
+logic [(1<<EntropyRateWidth)-1:0] erate_cnt, dev_rate;
 
 // Sync dev_rate_i to Device clock
 logic [EntropyRateWidth-1:0] dev_rate_sync;
 
-prim_flop_2sync #(
+prim_multibit_sync #(
   .Width ( EntropyRateWidth ),
   .ResetValue ( {EntropyRateWidth{1'b0}} )
 ) u_erate_sync (
   .clk_i ( clk_dev_i ) ,
   .rst_ni ( rst_dev_ni ),
-  .d_i ( dev_rate_i[EntropyRateWidth-1:0] ),
-  .q_o ( dev_rate_sync[EntropyRateWidth-1:0] )
+  .data_i ( dev_rate_i[EntropyRateWidth-1:0] ),
+  .data_o ( dev_rate_sync[EntropyRateWidth-1:0] )
 );
 
 // Fastest rate to init the LFSR
@@ -72,13 +75,13 @@ always_ff @( posedge clk_dev_i, negedge rst_dev_ni ) begin
   end
 end
 
-assign dev_rate = fast_start ? '0 : ((1 << dev_rate_sync) - 1);
+assign dev_rate = fast_start ? '0 : ((1<<EntropyRateWidth)'(1'b1) << dev_rate_sync) - 1;
 
 always_ff @( posedge clk_dev_i, negedge rst_dev_ni ) begin
   if ( !rst_dev_ni ) begin
     erate_cnt <= '0;
   end else if ( rate_pulse ) begin
-    erate_cnt <= dev_rate[(1<<EntropyRateWidth)-1:0];
+    erate_cnt <= dev_rate;
   end else if ( erate_cnt != '0 ) begin
     erate_cnt <= erate_cnt - 1'b1;
   end
@@ -108,7 +111,7 @@ logic wready_dev, wready_es;
 
 prim_flop_2sync #(
   .Width ( 1 ),
-  .ResetValue ( 0 )
+  .ResetValue ( 1'b0 )
 ) u_wvalid_es_sync (
   .clk_i,
   .rst_ni,
@@ -148,26 +151,28 @@ assign dev_wready_o = !wdata_val;
 // Device Clock
 ///////////////////////////////////////
 // Reset de-assert of rst_ni to Device clock
-logic rst_es_dev_nd, rst_es_dev_n;
+logic rst_es_dev_in_n, rst_es_dev_da_n, rst_es_dev_n;
+
+assign rst_es_dev_in_n = rst_ni && rst_dev_ni;
 
 prim_flop_2sync #(
   .Width ( 1 ),
-  .ResetValue ( 0 )
+  .ResetValue ( 1'b0 )
 ) u_rst_es_n_da (
   .clk_i ( clk_dev_i ),
-  .rst_ni ( rst_ni && rst_dev_ni ),
+  .rst_ni ( rst_es_dev_in_n ),
   .d_i ( 1'b1 ),
-  .q_o ( rst_es_dev_nd )
+  .q_o ( rst_es_dev_da_n )
 );
 
-assign rst_es_dev_n = rst_es_dev_nd;
+assign rst_es_dev_n = rst_es_dev_da_n;
 
 // Sync wready_es to Device clock
 logic wready, wready_es_dev;
 
 prim_flop_2sync #(
   .Width ( 1 ),
-  .ResetValue ( 0 )
+  .ResetValue ( 1'b0 )
 ) u_wready_es_dev_sync (
   .clk_i ( clk_dev_i ),
   .rst_ni ( rst_es_dev_n ),
@@ -195,7 +200,7 @@ logic wdata_val_dev;
 
 prim_flop_2sync #(
   .Width ( 1 ),
-  .ResetValue ( 0 )
+  .ResetValue ( 1'b0 )
 ) u_wvalid_dev_sync (
   .clk_i ( clk_dev_i ),
   .rst_ni ( rst_es_dev_n ),
@@ -250,8 +255,6 @@ assign dev_data_o = rdata && rate_pulse;
 // Unused Signals
 ///////////////////////
 logic unused_sigs;
-assign unused_sigs = ^{ depth[6-1:0],
-                        dev_rate[31:16]
-                      };
+assign unused_sigs = ^{ depth[6-1:0] };
 
 endmodule : dev_entropy

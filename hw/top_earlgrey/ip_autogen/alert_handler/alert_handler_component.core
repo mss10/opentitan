@@ -1,8 +1,8 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: "lowrisc:ip:alert_handler_component:0.1"
+name: lowrisc:earlgrey_ip:alert_handler_component:0.1
 description: "Alert Handler component without the CSRs"
 
 filesets:
@@ -12,12 +12,13 @@ filesets:
       - lowrisc:prim:all
       - lowrisc:prim:esc
       - lowrisc:prim:double_lfsr
+      - lowrisc:prim:count
       - lowrisc:prim:edn_req
       - lowrisc:prim:buf
       - lowrisc:prim:mubi
-      - lowrisc:ip_interfaces:alert_handler_reg
+      - lowrisc:prim:sparse_fsm
+      - lowrisc:earlgrey_ip:alert_handler_reg
     files:
-      - rtl/alert_pkg.sv
       - rtl/alert_handler_reg_wrap.sv
       - rtl/alert_handler_lpg_ctrl.sv
       - rtl/alert_handler_class.sv

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -20,7 +20,9 @@ module sha3_fpv
 
   // Entropy interface
   input                     rand_valid_i,
+  input                     rand_early_i,
   input        [StateW-1:0] rand_data_i,
+  input                     rand_aux_i,
   output logic              rand_consumed_o,
 
   // N, S: Used in cSHAKE mode only
@@ -49,8 +51,7 @@ module sha3_fpv
 );
 
   sha3 #(
-    .EnMasking(EnMasking),
-    .ReuseShare (0)
+    .EnMasking(EnMasking)
   ) u_sha3 (
     .*
   );

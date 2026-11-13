@@ -1,15 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //############################################################################
 // *Name: vio_pgd
 // *Module Description:  VIO Power Good
 //############################################################################
-`ifdef SYNTHESIS
-`ifndef PRIM_DEFAULT_IMPL
-`define PRIM_DEFAULT_IMPL prim_pkg::ImplGeneric
-`endif
-`endif
 
 module vio_pgd (
   output logic vio_pok_o
@@ -22,10 +17,8 @@ assign gen_supp_a = 1'b1;
 `ifndef SYNTHESIS
 // Behavioral Model
 ////////////////////////////////////////
-import ast_bhv_pkg::* ;
-
 // The initial is needed to clear the X of the delays at the start
-// Also to force a power-up effect at the bgining.
+// Also to force a power-up effect at the beginning.
 logic init_start;
 
 initial begin
@@ -33,21 +26,21 @@ initial begin
   init_start = 1'b0;
 end
 
-always @( * ) begin
+always (* xprop_off *) @( * ) begin
   if ( init_start ) begin
     vio_pok_o <= 1'b0;
-  end else if ( !init_start && gen_supp_a ) begin
-    vio_pok_o <= #(VIO_POK_RDLY) gen_supp_a;
-  end else if ( !init_start && !gen_supp_a ) begin
-    vio_pok_o <= #(VIO_POK_FDLY) gen_supp_a;
+  end
+  if ( !init_start && gen_supp_a ) begin
+    vio_pok_o <= #(ast_bhv_pkg::VIO_POK_RDLY) gen_supp_a;
+  end
+  if ( !init_start && !gen_supp_a ) begin
+    vio_pok_o <= #(ast_bhv_pkg::VIO_POK_FDLY) gen_supp_a;
   end
 end
 `else
 // SYNTHESIS/VERILATOR/LINTER/FPGA
 //////////////////////////////////////
-localparam prim_pkg::impl_e Impl = `PRIM_DEFAULT_IMPL;
-
-if (Impl == prim_pkg::ImplXilinx) begin : gen_xilinx
+if (prim_pkg::PrimTechName == "Xilinx") begin : gen_xilinx
   // FPGA Specific (place holder)
   ///////////////////////////////////////
   assign vio_pok_o = gen_supp_a;

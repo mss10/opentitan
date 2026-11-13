@@ -1,9 +1,9 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // This module performs a the multiplication of two operands in Galois field GF(2^Width) modulo the
-// provided irreducible polynomial using a parallel Mastrovito multipler [3]. To cut long paths
+// provided irreducible polynomial using a parallel Mastrovito multiplier [3]. To cut long paths
 // potentially occurring for large data widths, the implementation provides a parameter
 // StagesPerCycle to decompose the multiplication into Width/StagesPerCycle iterative steps
 // (Digit-Serial/Parallel Multiplier [4]).
@@ -33,19 +33,21 @@ module prim_gf_mult #(
   // The field-generating, irreducible polynomial of degree Width.
   // Can for example be a Conway polynomial, see
   // http://www.math.rwth-aachen.de/~Frank.Luebeck/data/ConwayPol/CP2.html
-  // For Width = 33, the Conway polynomial hast bits 32, 15, 9, 7, 4, 3, 0 set to one.
-  parameter logic[Width-1:0] IPoly = 1'b1 << 15 |
-                                     1'b1 << 9  |
-                                     1'b1 << 7  |
-                                     1'b1 << 4  |
-                                     1'b1 << 3  |
-                                     1'b1 << 0
+  // For Width = 33, the Conway polynomial has bits 32, 15, 9, 7, 4, 3, 0 set to one.
+  parameter logic[Width-1:0] IPoly = Width'(1'b1) << 15 |
+                                     Width'(1'b1) << 9  |
+                                     Width'(1'b1) << 7  |
+                                     Width'(1'b1) << 4  |
+                                     Width'(1'b1) << 3  |
+                                     Width'(1'b1) << 0,
+  parameter bit OutputZeroUntilAck = 1'b0 // By default, Operand A is forwarded to the output.
 ) (
   input clk_i,
   input rst_ni,
   input req_i,
   input [Width-1:0] operand_a_i,
   input [Width-1:0] operand_b_i,
+  output logic ack_pre_o,
   output logic ack_o,
   output logic [Width-1:0] prod_o
 );
@@ -78,6 +80,9 @@ module prim_gf_mult #(
   // intermediate prod held between loops
   logic [Width-1:0] prod_q, prod_d;
 
+  // intermediate output until the result becomes ready
+  logic [Width-1:0] out_int;
+
   // select current slice
   assign reformat_data = operand_b_i;
   assign op_i_slice = reformat_data[cnt];
@@ -93,8 +98,11 @@ module prim_gf_mult #(
 
   end else begin : gen_decomposed
 
+    // the next cycle is going to be the last one
+    assign ack_pre_o = int'(cnt) == (Loops - 2);
+
     // multiply is done
-    assign ack_o = cnt == (Loops - 1);
+    assign ack_o = int'(cnt) == (Loops - 1);
 
     // advance the stage count and also advance the bit position count
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -102,7 +110,7 @@ module prim_gf_mult #(
         cnt <= '0;
       end else if (req_i && ack_o) begin
         cnt <= '0;
-      end else if (req_i && cnt < (Loops - 1)) begin
+      end else if (req_i && int'(cnt) < (Loops - 1)) begin
         cnt <= cnt + 1'b1;
       end
     end
@@ -126,7 +134,12 @@ module prim_gf_mult #(
   assign prod_d = prod_q ^ gf_mult(matrix, op_i_slice);
 
   // The output is not toggled until it is ready
-  assign prod_o = ack_o ? prod_d : operand_a_i;
+  if (OutputZeroUntilAck) begin : gen_out_int_zero
+    assign out_int = '0;
+  end else begin : gen_out_int_op_a
+    assign out_int = operand_a_i;
+  end
+  assign prod_o = ack_o ? prod_d : out_int;
 
 
   // GF(2^Width) * x
@@ -155,14 +168,14 @@ module prim_gf_mult #(
 
   // Galois multiply step
   function automatic logic [Width-1:0] gf_mult(
-    logic [StagesPerCycle-1:0][Width-1:0] matrix,
+    logic [StagesPerCycle-1:0][Width-1:0] matrix_,
     logic [StagesPerCycle-1:0] operand
   );
     logic [Width-1:0] mult_out;
     logic [Width-1:0] add_vector;
     mult_out = '0;
     for (int i = 0; i < StagesPerCycle; i++) begin
-      add_vector = operand[i] ? matrix[i] : '0;
+      add_vector = operand[i] ? matrix_[i] : '0;
       mult_out = mult_out ^ add_vector;
     end
     return mult_out;

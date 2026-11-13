@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -35,20 +35,16 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
   endtask
 
   virtual task process_tl_access(tl_seq_item item, tl_channels_e channel, string ral_name);
-    uvm_reg csr;
     string  csr_name;
     bit     do_read_check   = 1'b1;
     bit     write           = item.is_write();
-    uvm_reg_addr_t csr_addr = ral.get_word_aligned_addr(item.a_addr);
-
-    // if access was to a valid csr, get the csr handle
-    if (csr_addr inside {cfg.ral_models[ral_name].csr_addrs}) begin
-      csr = ral.default_map.get_reg_by_offset(csr_addr);
-      `DV_CHECK_NE_FATAL(csr, null)
-      csr_name = csr.get_name();
-    end else begin
+    uvm_reg_addr_t csr_addr = cfg.ral_models[ral_name].get_word_aligned_addr(item.a_addr);
+    uvm_reg csr = cfg.ral_models[ral_name].get_default_map().get_reg_by_offset(csr_addr);
+    if (csr == null) begin
       `uvm_fatal(`gfn, $sformatf("Access unexpected addr 0x%0h", csr_addr))
     end
+
+    csr_name = csr.get_name();
 
     if (!write && channel == AddrChannel) begin
       if (!uvm_re_match("intr_state*", csr_name)) begin
@@ -113,17 +109,11 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
                 if (en_timers[i][j] == 0) begin
                   // Reset the interrupt when mtimecmp is updated and timer is not active
                   intr_status_exp[i][j] = 0;
-                  if (cfg.en_cov) begin
-                    cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                        $sformatf("%0d", timer_idx)}].sample(1'b0);
-                  end
+                  if (cfg.en_cov) cov.sample_intr_pin(timer_idx, 0);
                 end else begin
                   // intr stays sticky if timer is active
                   ctimecmp_update_on_fly = 1;
-                  if (cfg.en_cov) begin
-                    cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                        $sformatf("%0d", timer_idx)}].sample(intr_status_exp[i][j]);
-                  end
+                  if (cfg.en_cov) cov.sample_intr_pin(timer_idx, intr_status_exp[i][j]);
                 end
                 break;
               end
@@ -140,17 +130,11 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
                 if (en_timers[i][j] == 0) begin
                   // Reset the interrupt when mtimecmp is updated and timer is not active
                   intr_status_exp[i][j] = 0;
-                  if (cfg.en_cov) begin
-                    cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                        $sformatf("%0d", timer_idx)}].sample(1'b0);
-                  end
+                  if (cfg.en_cov) cov.sample_intr_pin(timer_idx, 0);
                 end else begin
                   // intr stays sticky if timer is active
                   ctimecmp_update_on_fly = 1;
-                  if (cfg.en_cov) begin
-                    cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                        $sformatf("%0d", timer_idx)}].sample(intr_status_exp[i][j]);
-                  end
+                  if (cfg.en_cov) cov.sample_intr_pin(timer_idx, intr_status_exp[i][j]);
                 end
                 break;
               end
@@ -175,15 +159,8 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
                 if (item.a_data[j] == 1) begin
                   if (en_timers[i][j] == 0) begin
                     intr_status_exp[i][j] = 0;
-                    if (cfg.en_cov) begin
-                      cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                          $sformatf("%0d", timer_idx)}].sample(1'b0);
-                    end
                   end
-                  else if (cfg.en_cov) begin // sticky interrupt
-                    cov.sticky_intr_cov[{"rv_timer_sticky_intr_pin",
-                                        $sformatf("%0d", timer_idx)}].sample(1'b1);
-                  end
+                  if (cfg.en_cov) cov.sample_intr_pin(timer_idx, en_timers[i][j]);
                 end
               end
               break;
@@ -216,13 +193,12 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
       // Check all interrupts in DataChannel of every Read/Write except when ctimecmp updated
       // during timer active. This scenario is checked in base sequence by reading the intr_state.
       // Ignored checking here because sticky intr_pin update has one cycle delay.
-      // TODO #1464: temp constraint, if support external reg, this can be removed
       if (!ctimecmp_update_on_fly) check_interrupt_pin();
       ctimecmp_update_on_fly = 0;
 
       // On reads, if do_read_check, is set, then check mirrored_value against item.d_data
       if (!write) begin
-        // exclude read check for timer_val* reg if read happended when timer is enabled
+        // exclude read check for timer_val* reg if read happened when timer is enabled
         if (!uvm_re_match("timer_v_*", csr_name)) begin
           for (int i = 0; i < NUM_HARTS; i++) begin
             if (!uvm_re_match($sformatf("timer_v_*%0d", i), csr_name)) begin
@@ -305,29 +281,42 @@ class rv_timer_scoreboard extends cip_base_scoreboard #(.CFG_T (rv_timer_env_cfg
                 end
                 // enabling one clock cycle of ignore period
                 ignore_period[a_i][a_j] = 1'b1;
-                `uvm_info(`gfn, $sformatf("Timer expired check for interrupt"), UVM_MEDIUM)
-                // Update exp val and predict it in read address_channel
-                intr_status_exp[a_i][a_j] = 1'b1;
-                check_interrupt_pin();
-                if (cfg.en_cov) begin
-                  int timer_idx = a_i * NUM_TIMERS + a_j;
-                  //Sample cfg coverage for each timer
-                  cov.cfg_values_cov_obj[timer_idx].timer_cfg_cg.sample(step[a_i],
-                      prescale[a_i], timer_val[a_i], compare_val[a_i][a_j]);
-                  //Sample toggle coverage for each prescale bit
-                  for (int i = 0; i < 12; i++) begin
-                    cov.rv_timer_prescale_values_cov_obj[a_i][i].sample(prescale[a_i][i]);
+
+                // If the step is set to 0, it means the counter is not incremented since the
+                // counter evaluates as: count = count + step.
+                // Also, if the count is not greater than the comparison value, skip the iteration
+                // and wait until the step and/or timecmp/mtime are re-configured
+                if ( !(step[a_i] == 0 && (compare_val[a_i][a_j] - timer_val[a_i]) > 0)) begin
+                  `uvm_info(`gfn, $sformatf("Timer expired check for interrupt"), UVM_MEDIUM)
+                  // Update exp val and predict it in read address_channel
+                  intr_status_exp[a_i][a_j] = 1'b1;
+                  `uvm_info(`gfn,
+                            $sformatf("check_interrupt_pin#1 - intr_status_exp = %p",
+                                      intr_status_exp),
+                            UVM_MEDIUM)
+                  check_interrupt_pin();
+                  if (cfg.en_cov) begin
+                    int timer_idx = a_i * NUM_TIMERS + a_j;
+                    //Sample cfg coverage for each timer
+                    cov.cfg_values_cov_obj[timer_idx].timer_cfg_cg.sample(step[a_i],
+                                                                          prescale[a_i],
+                                                                          timer_val[a_i],
+                                                                          compare_val[a_i][a_j]);
+                    //Sample toggle coverage for each prescale bit
+                    for (int i = 0; i < 12; i++) begin
+                      cov.rv_timer_prescale_values_cov_obj[a_i][i].sample(prescale[a_i][i]);
+                    end
                   end
-                end
-                @cfg.clk_rst_vif.cb;
-                ignore_period[a_i][a_j] = 1'b0;
-              end
+                  @cfg.clk_rst_vif.cb;
+                  ignore_period[a_i][a_j] = 1'b0;
+                  end // if ( !(step[a_i] == 0 && (compare_val[a_i][a_j] - timer_val[a_i]) > 0))
+              end // if (en_timers[a_i][a_j] & !en_timers_prev[a_i][a_j])
               begin
                 wait((en_timers[a_i][a_j] == 0) | (under_reset == 1));
               end
             join_any
             en_timers_prev[a_i][a_j] = 1'b0;
-            // kill forked threads if timer disabled or interrupt occured or under reset
+            // kill forked threads if timer disabled or interrupt occurred or under reset
             disable fork;
           end
         join_none

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,4 +11,4 @@
 <%namespace file="uvm_reg_base.sv.tpl" import="*"/>\
 ##
 ##
-${make_ral_pkg(dv_base_prefix, block.regwidth, reg_block_path, rb, esc_if_name)}
+${make_ral_pkg(dv_base_names, block.regwidth, reg_block_path, rb, esc_if_name)}

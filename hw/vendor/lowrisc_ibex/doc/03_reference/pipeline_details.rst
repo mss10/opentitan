@@ -26,7 +26,7 @@ See Multi- and Single-Cycle Instructions below for the details.
 Third Pipeline Stage
 --------------------
 Ibex can be configured to have a third pipeline stage (Writeback) which has major effects on performance and instruction behaviour.
-This feature is *EXPERIMENTAL* and the details of its impact are not yet documented here.
+The details of its impact are not yet documented here.
 All of the information presented below applies only to the two stage pipeline provided in the default configurations.
 
 Multi- and Single-Cycle Instructions
@@ -43,7 +43,12 @@ Read the description for more information.
 |                       |                                      | RISCV-V RV32I Base Integer Instruction Set.                 |
 +-----------------------+--------------------------------------+-------------------------------------------------------------+
 | CSR Access            | 0                                    | CSR Access Instruction are defined in 'Zicsr' of the        |
-|                       |                                      | RISC-V specification.                                       |
+|                       |                                      | RISC-V specification. Note that most CSR *writes* flush the |
+|                       |                                      | pipeline, so the instruction immediately following a CSR    |
+|                       |                                      | write incurs an additional fetch-latency. This is mainly to |
+|                       |                                      | ensure ePMP updates are taken into account for the next     |
+|                       |                                      | instruction fetch check. Writes to ``mscratch`` and         |
+|                       |                                      | ``mepc`` are exempt and do not flush the pipeline.          |
 +-----------------------+--------------------------------------+-------------------------------------------------------------+
 | Load/Store            | 1 - N                                | Both loads and stores stall for at least one cycle to await |
 |                       |                                      | a response.  For loads this response is the load data       |
@@ -93,3 +98,28 @@ Read the description for more information.
 |                       |                                      | jump (which does the required flushing) so it has the same  |
 |                       |                                      | stall characteristics (see above).                          |
 +-----------------------+--------------------------------------+-------------------------------------------------------------+
+| Zcmp Push/Pop         | 2 - N                                | The cm.push/pop instructions as defined in 'Zcmp' of the    |
+|                       |                                      | RISC-V specification. Internally, they expand to multiple   |
+|                       |                                      | register load/store operations combined with stack pointer  |
+|                       |                                      | adjustments, so their latency corresponds to the total      |
+|                       |                                      | number of instructions issued and the memory latency.       |
++-----------------------+--------------------------------------+-------------------------------------------------------------+
+| Zcmp Move             | 2                                    | The `cm.mvsa01` and `cm.mva01s` instruction as defined in   |
+|                       |                                      | 'Zcmp' of the RISC-V specification. Internally, they are    |
+|                       |                                      | implemented as two `addi rd, rs1, 0` instructions.          |
++-----------------------+--------------------------------------+-------------------------------------------------------------+
+
+.. note::
+
+   **Zcmp interrupt and exception behaviour**
+
+   * **Interrupt masking:** Interrupts are suppressed for the duration of a Zcmp pop commit sequence and for the Zcmp move operations.
+     The sequence therefore appears atomic to the interrupt controller.
+     That is, from the stack update to the return jump of the ``cm.pop*`` instructions and the entire ``cm.mv*`` instructions.
+
+   * **Debug-mode entry:** Debug-mode entry is blocked during the entire Zcmp instruction expansion sequence.
+
+   * **minstret counting:** An entire Zcmp push/pop sequence (regardless of how many register load/store micro-operations it expands to) is counted as a single retired instruction in ``minstret``.
+
+   * **Exception/interrupt during expansion:** If an exception or interrupt is signalled before the commit sequence has started, the Zcmp state machine is flushed and the partial sequence is abandoned.
+     Restarting is safe because the Zcmp spec requires idempotent memory for push/pop, and ``sp`` is adjusted last, so partial micro-ops can be replayed without side effects.

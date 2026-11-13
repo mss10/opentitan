@@ -1,87 +1,168 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-class chip_env_cfg extends cip_base_env_cfg #(.RAL_T(chip_reg_block));
+class chip_env_cfg #(type RAL_T = chip_ral_pkg::chip_reg_block) extends cip_base_env_cfg #(
+    .RAL_T(RAL_T)
+  );
 
   // Testbench settings
-  bit                 stub_cpu;
-  bit                 en_uart_logger;
   uart_agent_pkg::baud_rate_e uart_baud_rate = uart_agent_pkg::BaudRate1Mbps;
-  bit                 use_gpio_for_sw_test_status;
-  bit                 initialize_ram;
 
   // Write logs from sw test to separate log file as well, in addition to the simulator log file.
   bit                 write_sw_logs_to_file = 1'b1;
 
-  // use spi or backdoor to load bootstrap
+  // If true, load bootstrap using SPI on the next boot. If false, load it using a backdoor.
   bit                 use_spi_load_bootstrap = 0;
 
+  // skip ROM backdoor loading (when using ROM macro block)
+  bit                 skip_rom_bkdr_load = 0;
+
   // chip top interfaces
-  gpio_vif            gpio_vif;
-  virtual pins_if#(2) tap_straps_vif;
-  virtual pins_if#(2) dft_straps_vif;
-  virtual pins_if#(3) sw_straps_vif;
-  virtual pins_if#(1) rst_n_mon_vif;
+  virtual chip_if       chip_vif;
+
+  // Indicates which clock source to use for chip simulations.
+  chip_clock_source_e   chip_clock_source;
 
   // Memory backdoor util instances for all memory instances in the chip.
   mem_bkdr_util mem_bkdr_util_h[chip_mem_e];
 
-  // sw related
-  // Directory from where to pick up the SW test images -default to PWD {run_dir}.
-  string              sw_build_bin_dir = ".";
-
-  // In OpenTitan, the same SW test image can be built for DV, Verilator and FPGA. SW build for
-  // other platforms can be run on DV as well. We allow that by specifying the SW build device.
-  string              sw_build_device = "sim_dv";
+  // Creator SW config region in OTP that holds the AST config data. Randomized for open source.
+  //
+  // These are written via backdoor to the OTP region that starts at
+  // otp_ctrl_reg_pkg::CreatorSwCfgAstCfgOffset. SW based tests (via test ROM or the production
+  // ROM) will read out from this OTP region and write blindly to AST at the start. Non-SW based
+  // tests will do the same, prior to the test starting, see
+  // chip_stub_cpu_base_vseq::dut_init().
+  //
+  // In closed source, tests can modify this data directly in the extended sequence's dut_init(),
+  // before invoking super.dut_init(), or any other suitable place.
+  rand uint creator_sw_cfg_ast_cfg_data[ast_pkg::AstRegsNum];
 
   // Types of SW images used in the test.
   //
-  // Set via plusarg. This is the path (relative to ~sw_build_bin_dir~) upto the basename of the SW
-  // image. If the SW image is not pre-built (generated with meson), then the ~sw_build_device~ is
-  // suffixed to the basename to pick the correct image. The following files (extensions) with this
-  // basename are expected to exist there:
+  // Set via plusarg. This is the basename of the SW image. If the SW image is not pre-built
+  // (e.g., generated with Bazel), then the ~sw_build_device~ is suffixed to the basename to
+  // pick the correct image. The following files (extensions) with this basename are expected
+  // to exist there:
   // - .elf:          embedded executable
-  // - .32.vmem:      mem image with 32-bit word size (for boot_rom)
+  // - .32.vmem:      mem image with 32-bit word size (for boot ROM)
   // - .64.vmem:      mem image with 64-bit word size (for sw_test / flash load)
-  // - .frames.vmem:  mem image converted with spiflash frames (for tests with boostrap enabled)
   // - .rodata.txt:   dump of RO sections of the SW
   // - .logs.txt:     dump of SW logs
   //
-  // The ~resolve_sw_image_paths()~ function does the job of prefixing this path with
-  // ~sw_build_bin_dir and suffixing with ~sw_build_device~.
-  string              sw_images[sw_type_e];
-  string              sw_image_flags[sw_type_e][$];
+  // The ~resolve_sw_image_paths()~ function does the job of suffixing this path with
+  // ~sw_build_device~.
+  string sw_images[sw_type_e];
+  string sw_image_flags[sw_type_e][$];
 
-  uint                sw_test_timeout_ns = 5_000_000; // 5ms
-  sw_logger_vif       sw_logger_vif;
-  sw_test_status_vif  sw_test_status_vif;
+  // Maintain a list of generated OTP images.
+  otp_type_e use_otp_image = OtpTypeLcStRma;
+  string otp_images[otp_type_e];
+
+  uint               sw_test_timeout_ns = 12_000_000; // 12ms
+  // delay until the pull is propagated, only available in closed-source
+  uint               pad_pull_delay = 0;
+  logic              pad_in_dis_val = 1'bz;
+  sw_logger_vif      sw_logger_vif;
+  sw_test_status_vif sw_test_status_vif;
+  ast_supply_vif     ast_supply_vif;
+  ast_ext_clk_vif    ast_ext_clk_vif;
+  usb20_vif          usb20_vif;
+
+  // Number of Virtual Targets that each I3C instance implements, out of the `I3cMaxTargets` that
+  // the CSRs describe. `chip_base_test` fills these from the elaborated top-level parameters
+  // before the RAL is built, because they may differ between the instances.
+  uint i3c0_num_targets;
+  uint i3c1_num_targets;
+
+  // Number of RAM tiles for each RAM instance.
+  uint num_ram_main_tiles;
+  uint num_ram_ret_tiles;
+  uint num_otbn_dmem_tiles;
 
   // ext component cfgs
   rand uart_agent_cfg       m_uart_agent_cfgs[NUM_UARTS];
+  rand spi_agent_cfg        m_spi_device_agent_cfgs[NUM_SPI_HOSTS];
   rand jtag_riscv_agent_cfg m_jtag_riscv_agent_cfg;
-  rand spi_agent_cfg        m_spi_agent_cfg;
+  rand jtag_agent_cfg       m_jtag_agent_cfg;
+  rand jtag_dtm_reg_block   m_jtag_dtm_ral;
+  rand spi_agent_cfg        m_spi_host_agent_cfg;
+  rand i2c_agent_cfg        m_i2c_agent_cfgs[NUM_I2CS];
 
-  `uvm_object_utils_begin(chip_env_cfg)
-    `uvm_field_int   (stub_cpu,               UVM_DEFAULT)
-    `uvm_field_object(m_jtag_riscv_agent_cfg, UVM_DEFAULT)
-    `uvm_field_object(m_spi_agent_cfg,        UVM_DEFAULT)
-  `uvm_object_utils_end
+  // JTAG DMI register model
+  rand jtag_dmi_reg_block jtag_dmi_ral;
+  // A constant that can be referenced from anywhere.
+  string rv_dm_mem_ral_name = "rv_dm_debug_mem_reg_block";
+  parameter uint RV_DM_JTAG_IDCODE = `BUILD_SEED;
+  // Design uses 5 bits for IR.
+  parameter uint JTAG_IR_LEN = 5;
 
-  // TODO: Fixing core clk freq to 50MHz for now.
-  // Need to find a way to pass this to the SW test.
+  // The JTAG RV debugger model.
+  jtag_rv_debugger debugger;
+
+  // Run small page rma
+  bit   en_small_rma = 0;
+
+  // Add otp_ctrl test status value
+  logic [TL_DW-1:0] otp_test_status = 0;
+
+  // Add flash write latency
+  // to compensate vendor flash model
+  // use run_opts: "+flash_write_latency_in_us=<value>"
+  // it will be updated in chip_base_test::build
+  uint flash_write_latency_in_us = 0;
+
+  // Add early cpu init
+  // early_cpu_init has been introduced to address the issue
+  // that cpu_init is called during the boot time when pre_start task takes too long
+  // to finish.
+  // When this knob is set, call cpu_init task during reset period, chip_base_vseq::dut_init,
+  // and skip cpu_init in chip_sw_base_vseq::body
+  bit early_cpu_init = 0;
+
+  // An env_cfg for a passive bound-in rom_ctrl environment
+  rom_ctrl_env_pkg::rom_ctrl_env_cfg m_rom_ctrl_env_cfg;
+
+  // NOTE: The clk_freq_mhz variable created in the base class was meant to be used by clk_rst_vif
+  // interface that is passed by default by the testbench (retrieved by dv_base_env class). It was
+  // meant for a CIP-compliant testbench to drive the clock and reset to the DUT. The chip level
+  // testbench reuses the CIP framework, but is not exactly CIP-compliant. It uses chip_vif.por_n_if
+  // and chip_vif.pora_n_if to drive the reset and chip_vif.ext_clk_if to drive the external clock,
+  // only if external clock source is required for the test. The clk_rst_vif is a passive interface
+  // which monitors them.
   constraint clk_freq_mhz_c {
-    clk_freq_mhz == 50;
+    clk_freq_mhz inside {ChipClockSourceExternal48Mhz, ChipClockSourceExternal96Mhz};
+    foreach (clk_freqs_mhz[i]) clk_freqs_mhz[i] == clk_freq_mhz;
   }
 
-  `uvm_object_new
+  function new (string name = "");
+    super.new(name);
+    m_rom_ctrl_env_cfg = rom_ctrl_env_pkg::rom_ctrl_env_cfg::type_id::create("m_rom_ctrl_env_cfg");
+    m_rom_ctrl_env_cfg.set_is_active(1'b0);
+  endfunction
 
-  virtual function void initialize(bit [TL_AW-1:0] csr_base_addr = '1);
+  `uvm_object_param_utils_begin(chip_env_cfg#(RAL_T))
+    `uvm_field_object(m_jtag_riscv_agent_cfg, UVM_DEFAULT)
+    `uvm_field_object(m_spi_host_agent_cfg,   UVM_DEFAULT)
+    `uvm_field_object(jtag_dmi_ral,           UVM_DEFAULT)
+    `uvm_field_object(debugger,               UVM_DEFAULT)
+  `uvm_object_utils_end
 
-    has_devmode = 0;
-    list_of_alerts = chip_env_pkg::LIST_OF_ALERTS;
 
-    super.initialize(csr_base_addr);
+  virtual function void initialize(bit inherit_ral_models = 1'b0);
+    list_of_alerts = chip_common_pkg::LIST_OF_ALERTS;
+    is_chip = 1;
+
+    // No need to cover all kinds of integrity errors as they are tested in block-level.
+    en_tl_intg_err_cov = 0;
+
+    // alert_agent does not support ping timeout check in chip-level.
+    // User can read `loc_alert_cause` to check ping timeout.
+    en_scb_ping_chk = 0;
+
+    super.initialize(inherit_ral_models);
+    `uvm_info(`gfn, $sformatf("ral_model_names: %0p", ral_model_names), UVM_LOW)
 
     // Set the a_source width limitation for the TL agent hooked up to the CPU cored port.
     // TODO: use a parameter (or some better way)?
@@ -90,40 +171,279 @@ class chip_env_cfg extends cip_base_env_cfg #(.RAL_T(chip_reg_block));
     // create uart agent config obj
     foreach (m_uart_agent_cfgs[i]) begin
       m_uart_agent_cfgs[i] = uart_agent_cfg::type_id::create($sformatf("m_uart_agent_cfg%0d", i));
+      // Do not create uart agent fcov in chip level test.
+      m_uart_agent_cfgs[i].en_cov = 0;
+    end
+
+    // create spi device agent config obj
+    foreach (m_spi_device_agent_cfgs[i]) begin
+      m_spi_device_agent_cfgs[i] =
+        spi_agent_cfg::type_id::create($sformatf("m_spi_device_agent_cfg%0d", i));
+      // all the spi_agents talking to the host interface should be configured into
+      // device mode
+      m_spi_device_agent_cfgs[i].if_mode = dv_utils_pkg::Device;
+    end
+
+    // create i2c agent config obj
+    foreach (m_i2c_agent_cfgs[i]) begin
+      m_i2c_agent_cfgs[i] = i2c_agent_cfg::type_id::create($sformatf("m_i2c_agent_cfg%0d", i));
     end
 
     // create jtag agent config obj
     m_jtag_riscv_agent_cfg = jtag_riscv_agent_cfg::type_id::create("m_jtag_riscv_agent_cfg");
 
     // create spi agent config obj
-    m_spi_agent_cfg = spi_agent_cfg::type_id::create("m_spi_agent_cfg");
+    m_spi_host_agent_cfg = spi_agent_cfg::type_id::create("m_spi_host_agent_cfg");
 
-    // By default, assume SW images in PWD with these generic names.
-    sw_images[SwTypeRom] = "./rom";
-    sw_images[SwTypeTest] = "./sw";
-    sw_images[SwTypeOtbn] = "./otbn";
-    sw_images[SwTypeOtp] = "./otp";
+    // By default, assume these OTP image paths.
+    // A customized OTP image may be specified loaded via the `sw_images` plusarg.
+    otp_images[OtpTypeLcStRaw] = "otp_ctrl_img_raw.vmem";
+    otp_images[OtpTypeLcStDev] = "otp_ctrl_img_dev.vmem";
+    otp_images[OtpTypeLcStProd] = "otp_ctrl_img_prod.vmem";
+    otp_images[OtpTypeLcStRma] = "otp_ctrl_img_rma.vmem";
+    otp_images[OtpTypeLcStTestUnlocked0] = "otp_ctrl_img_test_unlocked0.vmem";
+    otp_images[OtpTypeLcStTestUnlocked1] = "otp_ctrl_img_test_unlocked1.vmem";
+    otp_images[OtpTypeLcStTestUnlocked2] = "otp_ctrl_img_test_unlocked2.vmem";
+    otp_images[OtpTypeLcStTestLocked0] = "otp_ctrl_img_test_locked0.vmem";
+    otp_images[OtpTypeLcStTestLocked1] = "otp_ctrl_img_test_locked1.vmem";
+    otp_images[OtpTypeCustom] = "";
+
+    `DV_CHECK_LE_FATAL(num_ram_main_tiles, 16)
+    `DV_CHECK_LE_FATAL(num_ram_ret_tiles, 16)
+    `DV_CHECK_LE_FATAL(num_otbn_dmem_tiles, 16)
+
+    // Create the JTAG RV debugger instance.
+    debugger = jtag_rv_debugger::type_id::create("debugger");
+    debugger.num_harts = rv_dm_reg_pkg::NrHarts;
+    debugger.num_triggers = 4;  // TODO: wire this from `top_earlgrey_pkg`.
+
+    // This TL agent is used in stub_cpu mode and connected with ibex data port.
+    // It can have up to 3 outstanding items, because req/rsp fifo can each hold 1 and
+    // there can also be a pending response in the peripheral.
+    // However, the actual ibex data port can only support 1 outstanding item.
+    m_tl_agent_cfg.max_outstanding_req = 3;
+
+    // Set the number of RAM tiles (1 each).
+    num_ram_main_tiles = 1;
+    num_ram_ret_tiles = 1;
+    num_otbn_dmem_tiles = 1;
+
+    // Copy handles to rom_ctrl's register blocks into its block-level environment config
+    m_rom_ctrl_env_cfg.ral_models["rom_ctrl_regs_reg_block"] = ral.rom_ctrl_regs;
+    m_rom_ctrl_env_cfg.ral_models["rom_ctrl_rom_reg_block"] = ral.rom_ctrl_rom;
+
+    // Set up the config for the bound-in rom_ctrl environment, passing inherit_ral_models=1 so that
+    // it uses the register blocks whose handles we just copied.
+    m_rom_ctrl_env_cfg.initialize(1'b1);
   endfunction
 
-  // ral flow is limited in terms of setting correct field access policies and reset values
-  // We apply those fixes here - please note these fixes need to be reflected in the scoreboard
-  protected virtual function void apply_ral_fixes();
+  // Configure the environment to run a DMI agent over a JTAG connection.
+  //
+  // To enable DMI over JTAG, the testbench or test must call this function before the chip
+  // environment's build_phase.
+  function void set_use_jtag_dmi();
+    if (m_jtag_riscv_agent_cfg.use_jtag_dmi) return;
+
+    m_jtag_riscv_agent_cfg.use_jtag_dmi = 1;
+
+    // Both, the regs only supports 1 outstanding.
+    m_tl_agent_cfgs[RAL_T::type_name].max_outstanding_req = 1;
+
+    m_jtag_agent_cfg = jtag_agent_cfg::type_id::create("m_jtag_agent_cfg");
+    m_jtag_agent_cfg.if_mode = dv_utils_pkg::Host;
+    m_jtag_agent_cfg.is_active = 1'b1;
+    m_jtag_agent_cfg.ir_len = JTAG_IR_LEN;
+
+    // Create a JTAG DTM RAL and give it the right IDCODE register value.
+    m_jtag_dtm_ral = create_jtag_dtm_reg_block("m_jtag_dtm_ral");
+    m_jtag_dtm_ral.idcode.set_reset(RV_DM_JTAG_IDCODE);
+
+    m_jtag_riscv_agent_cfg.m_jtag_agent_cfg = m_jtag_agent_cfg;
+
+    // Create the DMI register block. Because use_jtag_dmi was false at the start of the function,
+    // we know it is currently null.
+    if (jtag_dmi_ral != null) `uvm_fatal(`gfn, "jtag_dmi_ral unexpectedly set")
+
+    jtag_dmi_ral = create_jtag_dmi_reg_block("jtag_dmi_ral",
+                                             m_jtag_agent_cfg,
+                                             m_jtag_dtm_ral.dmi,
+                                             m_jtag_dtm_ral.dtmcs);
+
+    // Fix the reset values of these fields based on our design.
+    `uvm_info(`gfn, "Fixing reset values in jtag_dmi_ral", UVM_LOW)
+    jtag_dmi_ral.hartinfo.dataaddr.set_reset(dm::DataAddr);
+    jtag_dmi_ral.hartinfo.datasize.set_reset(dm::DataCount);
+    jtag_dmi_ral.hartinfo.dataaccess.set_reset(1);  // TODO: verify this!
+    jtag_dmi_ral.hartinfo.nscratch.set_reset(2);  // TODO: verify this!
+    jtag_dmi_ral.abstractcs.datacount.set_reset(dm::DataCount);
+    jtag_dmi_ral.abstractcs.progbufsize.set_reset(dm::ProgBufSize);
+    jtag_dmi_ral.dmstatus.authenticated.set_reset(1);  // No authentication performed.
+    jtag_dmi_ral.sbcs.sbaccess32.set_reset(1);
+    jtag_dmi_ral.sbcs.sbaccess16.set_reset(1);
+    jtag_dmi_ral.sbcs.sbaccess8.set_reset(1);
+    jtag_dmi_ral.sbcs.sbasize.set_reset(32);
+    apply_jtag_dmi_ral_csr_excl();
+
+    // Finally, tell the debugger (which should already exist) about the JTAG agent config and
+    // the register block we just created.
+    debugger.set_cfg(m_jtag_agent_cfg);
+    debugger.set_ral(jtag_dmi_ral);
+  endfunction
+
+  // Disable functional coverage of comportable IP-specific specialized registers.
+  // Chip level testbench does not sample these coverpoints.
+  protected virtual function void pre_build_ral_settings(dv_base_reg_block ral);
+    RAL_T chip_ral;
+    super.pre_build_ral_settings(ral);
+    ral.set_en_dv_reg_cov(0);
+    // sram_ctrl_meta.ram is not on the main XBAR - it is only reachable via
+    // the cheriot_mem_sys.revbm port, which is already mapped at the same address.
+    // Registering both causes a UVM_WARNING (overlap) that fails the test.
+    if ($cast(chip_ral, ral)) chip_ral.create_sram_ctrl_meta_ram = 1'b0;
+  endfunction
+
+  // Apply RAL fixes before it is locked.
+  protected virtual function void post_build_ral_settings(dv_base_reg_block ral);
+    RAL_T chip_ral;
+    uvm_reg regs[$];
+    super.post_build_ral_settings(ral);
+    if (!$cast(chip_ral, ral)) return;
     // Out of reset, the link is in disconnected state.
-    ral.usbdev.intr_state.disconnected.set_reset(1'b1);
+    chip_ral.usbdev.intr_state.disconnected.set_reset(1'b1);
+
+    chip_ral.rv_dm_mem.get_registers(regs);
+    foreach (regs[i]) begin
+      regs[i].clear_hdl_path("ALL");
+    end
+
+    // Accesses to rv_dm's debug memory window land on a single TL device port, which passes both
+    // the CSRs and the debug ROM straight to dm_top without distinguishing a read from a fetch.
+    // There is thus nothing that stops a fetch from the CSRs in that window. This matches what
+    // rv_dm_env_cfg does for the block-level environment.
+    chip_ral.rv_dm_mem.set_allows_csr_fetch(1'b1);
+
+    // Each I3C instance may implement fewer Virtual Targets than the CSRs describe.
+    set_i3c_absent_targ_resets(chip_ral.i3c0, i3c0_num_targets);
+    set_i3c_absent_targ_resets(chip_ral.i3c1, i3c1_num_targets);
   endfunction
+
+  // Align the RAL with the Virtual Targets that an I3C instance does not implement.
+  //
+  // The CSRs describe the Tx buffer and Tx descriptor queue state and free levels of all
+  // `I3cMaxTargets` Virtual Targets, and their reset values derive from the default apportioning
+  // of the message buffer. `i3c_buffer` initializes every pointer to that value, so the state of
+  // the Virtual Targets that the instance does implement can be checked after reset. For the
+  // remaining Virtual Targets, `i3c_core` ties the register view of that state off
+  // (`gen_no_targ_tx`), so they read as zero instead. Adjust their reset values here rather than
+  // excluding the registers, which keeps them checked; an hjson tag could not do this, because it
+  // applies to every instance of a multireg.
+  protected virtual function void set_i3c_absent_targ_resets(dv_base_reg_block i3c_ral,
+                                                             uint              num_targets);
+    string state_regs[$] = {"targ_txbuf_state", "targ_txdesc_state", "targ_tx_queue_status_level"};
+    `DV_CHECK_LE_FATAL(num_targets, I3cMaxTargets, i3c_ral.get_full_name())
+    foreach (state_regs[i]) begin
+      for (uint t = num_targets; t < I3cMaxTargets; t++) begin
+        string        reg_name = $sformatf("%0s_%0d", state_regs[i], t);
+        uvm_reg       rg       = i3c_ral.get_reg_by_name(reg_name);
+        uvm_reg_field flds[$];
+        `DV_CHECK_FATAL(rg != null, $sformatf("%0s has no register %0s", i3c_ral.get_full_name(),
+                                              reg_name))
+        rg.get_fields(flds);
+        foreach (flds[f]) flds[f].set_reset(0);
+      end
+    end
+  endfunction
+
+  // Apply RAL exclusions externally since the RAL itself is considered generic. The IP it is used
+  // in constrains the RAL with its implementation details.
+  virtual function void apply_jtag_dmi_ral_csr_excl();
+    csr_excl_item csr_excl = jtag_dmi_ral.get_excl_item();
+
+    // We leave the DM 'activated' for CSR tests to reduce noise. We exclude this from further
+    // writes to avoid side-effects.
+    csr_excl.add_excl(jtag_dmi_ral.dmcontrol.get_full_name(), CsrExclWrite, CsrNonInitTests);
+
+    // This field is tied off to 0 due to no hart array mask being implemented.
+    // TODO: Change these to access policy.
+    csr_excl.add_excl(jtag_dmi_ral.dmcontrol.hasel.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.dmcontrol.hartreset.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+
+    // Selecting a different hart in the middle of random read/writes impact other registers.
+    csr_excl.add_excl(jtag_dmi_ral.dmcontrol.hartsello.get_full_name(),
+        CsrExclWrite, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.dmcontrol.hartselhi.get_full_name(),
+        CsrExclWrite, CsrNonInitTests);
+
+    // Writes to other CSRs may affect dmstatus, even the HW reset test.
+    csr_excl.add_excl(jtag_dmi_ral.dmstatus.get_full_name(), CsrExclCheck, CsrAllTests);
+
+    // We have only upto dm::DataCount number of these registers available.
+    foreach (jtag_dmi_ral.abstractdata[i]) begin
+      if (i >= dm::DataCount) begin
+        csr_excl.add_excl(jtag_dmi_ral.abstractdata[i].get_full_name(),
+            CsrExclWriteCheck, CsrNonInitTests);
+      end
+    end
+
+    // We have only upto dm::ProgBufSize number of these registers available.
+    foreach (jtag_dmi_ral.progbuf[i]) begin
+      if (i >= dm::ProgBufSize) begin
+        csr_excl.add_excl(jtag_dmi_ral.progbuf[i].get_full_name(),
+            CsrExclWriteCheck, CsrNonInitTests);
+      end
+    end
+
+    // These prevent an SBA access from being triggered, which have other side effects.
+    csr_excl.add_excl(jtag_dmi_ral.sbcs.sbreadondata.get_full_name(),
+        CsrExclWrite, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbcs.sbreadonaddr.get_full_name(),
+        CsrExclWrite, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbdata0.get_full_name(),
+        CsrExclWrite, CsrNonInitTests);
+
+    // TODO: This should be an access policy change.
+    csr_excl.add_excl(jtag_dmi_ral.sbcs.sbaccess.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+
+    // These SBA registers are not implemented, or unsupported due to 32-bit system.
+    csr_excl.add_excl(jtag_dmi_ral.sbaddress1.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbaddress2.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbaddress3.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbdata2.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+    csr_excl.add_excl(jtag_dmi_ral.sbdata3.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+
+    // Abstractcs cmderr bits are updated by RTL.
+    csr_excl.add_excl(jtag_dmi_ral.abstractcs.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+
+    // Not all bits of abstractauto are set - and its also impacted by writes to other CSRs.
+    csr_excl.add_excl(jtag_dmi_ral.abstractauto.get_full_name(),
+        CsrExclWriteCheck, CsrNonInitTests);
+  endfunction
+
 
   // Parse a space-separated list of sw_images supplied as a string.
   //
-  // The typical usecase is the list of SW images used by the test supplied as a plusarg. Each
-  // SW image can have additional metadata specified using ":" as delimiters. Examples:
-  // +sw_images="path/to/sw/test1:1 path/to/sw/test2:0"
-  // +sw_images="foo/bar:0:flag1 bar/baz:1:flag1:flag2 quux/foo:2:flag3".
+  // The typical usecase is the list of SW images used by the test supplied as a plusarg. The
+  // SW images are defined by their filename. Each SW image can have additional metadata
+  // specified using ":" as delimiters. Examples:
+  // +sw_images="test_binary_1:1 test_binary_2:0"
+  // +sw_images="foo:0:flag1 bar:1:flag1:flag2".
   //
   // The index (optional) is mapped to the type of SW image (enumerated in sw_type_e). If index is
-  // not specified, then `SwTypeTest` is assumed. Flags (optional) are arbitrary strings attached to
-  // the SW image. They can be used to treat the SW image in a specific way. The flag "prebuilt" for
-  // example, is used to set the SW image path correctly.
-  virtual function void parse_sw_images_string(string sw_images_string);
+  // not specified, then `SwTypeTestSlotA` is assumed. Flags (optional) are arbitrary strings
+  // attached to the SW image. They can be used to treat the SW image in a specific way. The flag
+  // "signed" for example, is used to set the SW image extension correctly. The flag "test_in_rom"
+  // is used to indicate a test runs directly out of ROM instead of flash.
+  virtual function void parse_sw_images_string(string sw_build_device,
+                                               string sw_images_string);
     string sw_images_split[$];
 
     // Split sw_images with space.
@@ -139,29 +459,115 @@ class chip_env_cfg extends cip_base_env_cfg #(.RAL_T(chip_reg_block));
       `DV_CHECK_GT_FATAL(sw_image_fields.size(), 0)
 
       if (sw_image_fields.size() == 1) begin
-        sw_images[SwTypeTest] = sw_image_fields[0];
+        sw_images[SwTypeTestSlotA] = sw_image_fields[0];
         continue;
       end
 
-      // There are at least 2 fields - first is the path, second is the index (SW type).
+      // There are at least 2 fields - first is the filename, second is the index (SW type).
       sw_type = sw_type_e'(sw_image_fields[1].atoi());
       sw_images[sw_type] = sw_image_fields[0];
       if (sw_image_fields.size() > 2) begin
         sw_image_flags[sw_type] = sw_image_fields[2:$];
       end
     end
-    resolve_sw_image_paths();
+    resolve_sw_image_paths(sw_build_device);
   endfunction
 
   // Finalize the SW image paths, once all SW image settings are done.
-  virtual function void resolve_sw_image_paths();
+  virtual function void resolve_sw_image_paths(string sw_build_device);
     foreach (sw_images[i]) begin
       if ("prebuilt" inside {sw_image_flags[i]}) begin
-        sw_images[i] = $sformatf("%0s/%0s", sw_build_bin_dir, sw_images[i]);
+        sw_images[i] = $sformatf("%0s", sw_images[i]);
       end else begin
-        sw_images[i] = $sformatf("%0s/%0s_%0s", sw_build_bin_dir, sw_images[i], sw_build_device);
+        if (i == SwTypeRom) begin
+          // If Rom type AND test_in_rom, append suffix to the image name.
+          if ("test_in_rom" inside {sw_image_flags[i]} &&
+              !("new_rules" inside {sw_image_flags[i]})) begin
+            sw_images[i] = $sformatf("%0s_rom_prog_%0s", sw_images[i], sw_build_device);
+          // If Rom type but not test_in_rom, no need to tweak name further.
+          end else begin
+            sw_images[i] = $sformatf("%0s_%0s", sw_images[i], sw_build_device);
+          end
+        end else if (i inside {SwTypeTestSlotA, SwTypeTestSlotB}) begin
+          // If the tag `silicon_creator` is inside the list of flags, we want
+          // to use a flash image built for the `silicon_creator` device. This
+          // is used for GLS tests that integrate the ROM macro, which is built
+          // for the `silicon_creator` device, not the `sim_dv` device.
+          if ("silicon_creator" inside {sw_image_flags[i]}) begin
+            sw_images[i] = $sformatf("%0s_silicon_creator", sw_images[i]);
+          // If test type is `opentitan_test` and the flash image was generated
+          // by the `opentitan_test` Bazel macro itself, or it was generated
+          // by the `opentitan_flash_binary` or `opentitan_binary` Bazel macros,
+          // then we only need to append the device suffix.
+          end else if ("ot_flash_binary" inside {sw_image_flags[i]} ||
+              "new_rules" inside {sw_image_flags[i]}) begin
+            sw_images[i] = $sformatf("%0s_%0s", sw_images[i], sw_build_device);
+          // If test type is `opentitan_functest` (the legacy OpenTitan Bazel
+          // test macro), and said macro generated the flash image, then we
+          // need to tweak the name, as the flash binary target has the `_prog`
+          // suffix attached (to differentiate between the `sh_test` target
+          // also generated by the same Bazel `opentitan_functest` macro).
+          end else begin
+            sw_images[i] = $sformatf("%0s_prog_%0s", sw_images[i], sw_build_device);
+          end
+          // A flash image could be signed, and if it is, Bazel will attach a
+          // suffix to the image name.
+          if ("signed" inside {sw_image_flags[i]}) begin
+            // Options match SILICON_CREATOR_KEYS / ECDSA_ONLY_KEY_STRUCTS in
+            // `rules/opentitan/keyutils.bzl`.
+            if ("dev_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.dev_key_0.signed", sw_images[i]);
+            end else if ("prod_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.prod_key_0.signed", sw_images[i]);
+            end else if ("test_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.test_key_0.signed", sw_images[i]);
+            end else if ("fake_rsa_dev_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.fake_rsa_dev_key_0.signed", sw_images[i]);
+            end else if ("fake_rsa_prod_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.fake_rsa_prod_key_0.signed", sw_images[i]);
+            end else if ("fake_rsa_test_key_0" inside {sw_image_flags[i]}) begin
+              sw_images[i] = $sformatf("%0s.fake_rsa_test_key_0.signed", sw_images[i]);
+            end else begin
+              // We default to no key name if none is provided in the SW image tags.
+              sw_images[i] = $sformatf("%0s.signed", sw_images[i]);
+            end
+          end
+        end else if (i == SwTypeOtp) begin
+          // otp_image()'s RRAM-native output (see rules/otp.bzl's `rram_otp` output group,
+          // fetched by build_sw_collateral_for_sim.py) - rram_ctrl_otp_bkdr_util only
+          // understands that layout, not the native ".24.vmem".
+          otp_images[OtpTypeCustom] = $sformatf("%0s.128.vmem", sw_images[i]);
+        end else if (i == SwTypeDebug) begin
+          sw_images[i] = $sformatf("%0s_%0s", sw_images[i], sw_build_device);
+        end
       end
     end
   endfunction
 
+  // Returns the chip memory instance to which the address belongs.
+  virtual function bit get_mem_from_addr(input uint addr, output chip_mem_e mem);
+    chip_mem_e mem_iter = mem_iter.first();
+    do begin
+      if (mem_bkdr_util_h[mem_iter] != null) begin
+        if (mem_bkdr_util_h[mem_iter].is_valid_addr(addr)) begin
+          mem = mem_iter;
+          return 1;
+        end
+      end
+      mem_iter = mem_iter.next();
+    end while (mem_iter != mem_iter.first());
+    return 0;
+  endfunction
+
+  virtual function int is_mio_open_drain(int pin_num);
+    return 0;
+  endfunction
+
+  virtual function int is_dio_open_drain(int pin_num);
+    return 0;
+  endfunction
+
+  virtual function void update_otp_test_status();
+    otp_test_status = 0;
+  endfunction
 endclass

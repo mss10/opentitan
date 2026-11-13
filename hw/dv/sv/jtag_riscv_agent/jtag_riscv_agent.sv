@@ -1,14 +1,14 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 class jtag_riscv_agent extends dv_base_agent #(
-      .CFG_T       (jtag_riscv_agent_cfg),
-      .SEQUENCER_T (jtag_riscv_sequencer),
-      .DRIVER_T    (jtag_riscv_driver),
-      .MONITOR_T   (jtag_riscv_monitor),
-      .COV_T       (jtag_riscv_agent_cov)
-  );
+  .CFG_T      (jtag_riscv_agent_cfg),
+  .SEQUENCER_T(jtag_riscv_sequencer),
+  .DRIVER_T   (jtag_riscv_driver),
+  .MONITOR_T  (jtag_riscv_monitor),
+  .COV_T      (jtag_riscv_agent_cov)
+);
 
   `uvm_component_utils(jtag_riscv_agent)
   `uvm_component_new
@@ -20,10 +20,16 @@ class jtag_riscv_agent extends dv_base_agent #(
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
 
-    cfg.m_jtag_agent_cfg = jtag_agent_cfg::type_id::create("m_jtag_agent_cfg");
-    `DV_CHECK_RANDOMIZE_FATAL(cfg.m_jtag_agent_cfg)
-
+    // In dmi mode, jtag_agent_cfg has to be created at
+    // *_env_cfg.initialize().
+    // So mask these two lines when jtag_dmi is enabled and
+    // get cfg from *_env_cfg.initialize()
+    if (cfg.use_jtag_dmi == 0) begin
+      cfg.m_jtag_agent_cfg = jtag_agent_cfg::type_id::create("m_jtag_agent_cfg");
+      `DV_CHECK_RANDOMIZE_FATAL(cfg.m_jtag_agent_cfg)
+    end
     m_jtag_agent = jtag_agent::type_id::create("m_jtag_agent", this);
+
     uvm_config_db#(jtag_agent_cfg)::set(this, "m_jtag_agent", "cfg", cfg.m_jtag_agent_cfg);
     cfg.m_jtag_agent_cfg.en_cov = cfg.en_cov;
   endfunction
@@ -31,6 +37,21 @@ class jtag_riscv_agent extends dv_base_agent #(
   function void connect_phase(uvm_phase phase);
     super.connect_phase(phase);
     sequencer.jtag_sequencer_h = m_jtag_agent.sequencer;
+    cfg.jtag_sequencer_h       = m_jtag_agent.sequencer;
+    if (cfg.use_jtag_dmi == 0) begin
+      m_jtag_agent.monitor.analysis_port.connect(monitor.jtag_item_fifo.analysis_export);
+    end
+  endfunction
+
+  // Pass a handle to a uvm_reg_map that represents the DTM registers. This gets passed to the
+  // jtag_agent (which uses the reg map to predict register values in order to avoid perturbing
+  // register values on reads)
+  function void set_dtm_reg_map(uvm_reg_map reg_map);
+    if (m_jtag_agent == null)
+      `uvm_fatal(get_full_name(),
+                 "Cannot set reg map without a jtag_agent. This must be after build_phase.")
+
+    m_jtag_agent.set_reg_map(reg_map);
   endfunction
 
 endclass

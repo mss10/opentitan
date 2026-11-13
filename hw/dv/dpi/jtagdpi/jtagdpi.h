@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -22,7 +22,8 @@ struct jtagdpi_ctx;
  * @param listen_port Port to listen on
  * @return an initialized struct jtagdpi_ctx context object
  */
-void *jtagdpi_create(const char *display_name, int listen_port);
+void *jtagdpi_create(const char *display_name, int listen_port,
+                     int assert_srst);
 
 /**
  * Destructor: Close all connections and free all resources

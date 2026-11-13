@@ -1,6 +1,8 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+
+#include "log_trace_listener.h"
 
 #include <cassert>
 #include <iomanip>
@@ -8,8 +10,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-
-#include "log_trace_listener.h"
 
 LogTraceListener::LogTraceListener(const std::string &log_filename)
     : trace_log(log_filename, std::fstream::out) {

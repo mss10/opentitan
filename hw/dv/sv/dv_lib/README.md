@@ -1,6 +1,4 @@
----
-title: "DV Library Classes"
----
+# DV Library Classes
 
 # DV library classes
 
@@ -18,7 +16,7 @@ The DV library classes fall into 3 categories - UVM RAL (register abstraction
 layer), UVM agent, and UVM environment extensions.
 
 ### UVM RAL extensions
-The RAL model generated using the [reggen]({{< relref "util/reggen/README.md" >}}) tool
+The RAL model generated using the [reggen](../../../../util/reggen/doc/setup_and_use.md) tool
 extend from these classes. These themselves extend from the corresponding RAL
 classes provided in UVM.
 
@@ -32,9 +30,8 @@ IP CSR specification.
 This class provides the following functions to support verification:
 * `gen_n_used_bits()`: This function returns the actual number of bits used in
   the CSR (sum of all available field widths).
-* `get_msb_pos()`: This function returns the MSB bit position of all available
-  fields. CSR either ends at this bit (`BUS_DW` - 1) or has reserved / invalid
-  bits beyond this bit.
+* `get_msb_pos()`: This function returns the MSB bit position of all available fields.
+  The CSR either ends at this bit or has reserved / invalid bits beyond this bit.
 
 #### `dv_base_reg_block`
 * ` build(uvm_reg_addr_t base_addr)`: This function is implemented as a pseudo
@@ -53,4 +50,3 @@ TODO
 
 ### UVM Environment extensions
 TODO
-

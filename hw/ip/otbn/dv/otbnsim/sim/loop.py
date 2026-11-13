@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -152,6 +152,7 @@ class LoopStack:
 
         if self._pop_stack_on_commit:
             self.stack.pop()
+            self._pop_stack_on_commit = False
 
         self.trace = []
 

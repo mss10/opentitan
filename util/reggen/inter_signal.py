@@ -1,24 +1,25 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
-from .lib import (check_keys, check_name,
-                  check_str, check_optional_str, check_int)
+from reggen.lib import (PART_PRIMARY, check_int, check_keys, check_name, check_optional_str,
+                        check_partition, check_str)
+from reggen.params import ReggenParams, Parameter
 
 
 class InterSignal:
-    def __init__(self,
-                 name: str,
-                 desc: Optional[str],
-                 struct: str,
-                 package: Optional[str],
-                 signal_type: str,
-                 act: str,
-                 width: int,
-                 default: Optional[str]):
-        assert 0 < width
+
+    def __init__(self, name: str, desc: Optional[str], struct: str,
+                 package: Optional[str], signal_type: str, act: str,
+                 width: Union[int, Parameter], default: Optional[str],
+                 partition: str = PART_PRIMARY):
+        if isinstance(width, Parameter):
+            if isinstance(width.default, int):
+                assert 0 < width.default
+        else:
+            assert 0 < width
         self.name = name
         self.desc = desc
         self.struct = struct
@@ -27,12 +28,13 @@ class InterSignal:
         self.act = act
         self.width = width
         self.default = default
+        self.partition = partition
 
     @staticmethod
-    def from_raw(what: str, raw: object) -> 'InterSignal':
-        rd = check_keys(raw, what,
-                        ['name', 'struct', 'type', 'act'],
-                        ['desc', 'package', 'width', 'default'])
+    def from_raw(params: ReggenParams, what: str,
+                 raw: object) -> 'InterSignal':
+        rd = check_keys(raw, what, ['name', 'struct', 'type', 'act'],
+                        ['desc', 'package', 'width', 'default', 'partition'])
 
         name = check_name(rd['name'], 'name field of ' + what)
 
@@ -52,15 +54,29 @@ class InterSignal:
 
         signal_type = check_name(rd['type'], 'type field of ' + what)
         act = check_name(rd['act'], 'act field of ' + what)
-        width = check_int(rd.get('width', 1), 'width field of ' + what)
-        if width <= 0:
-            raise ValueError('width field of {} is not positive.'.format(what))
 
         default = check_optional_str(rd.get('default'),
                                      'default field of ' + what)
+        partition = check_partition(rd.get('partition', PART_PRIMARY),
+                                    'partition field of ' + what)
+        width: Union[int, Parameter] = 1
+        width_p = params.get(rd.get('width'), 1)
+        if isinstance(width_p, Parameter):
+            width_p.default = check_int(width_p.default,
+                                        'width field of ' + what)
+            if width_p.default <= 0:
+                raise ValueError(f'width field of {what} is not positive.')
+            # Parameter must be exposed to create a top-level (local) param
+            if not width_p.expose:
+                raise ValueError(f'width field of {what} is not exposed.')
+            width = width_p
+        else:
+            width = check_int(rd.get('width', 1), 'width field of ' + what)
+            if width <= 0:
+                raise ValueError(f'width field of {what} is not positive.')
 
-        return InterSignal(name, desc, struct, package,
-                           signal_type, act, width, default)
+        return InterSignal(name, desc, struct, package, signal_type, act,
+                           width, default, partition)
 
     def _asdict(self) -> Dict[str, object]:
         ret = {'name': self.name}  # type: Dict[str, object]
@@ -74,6 +90,12 @@ class InterSignal:
         ret['width'] = self.width
         if self.default is not None:
             ret['default'] = self.default
+        # Only emit the partition information for items belonging to the secondary partition.
+        # Note, this item cannot differentiate if it belongs to a split IP or not. Therefore,
+        # we don't emit the partition information for items of the primary partition to avoid
+        # polluting the output for a non-split IP.
+        if self.partition != PART_PRIMARY:
+            ret['partition'] = self.partition
 
         return ret
 

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,7 +7,11 @@
 
 `include "prim_assert.sv"
 
-module prim_esc_rxtx_assert_fpv (
+module prim_esc_rxtx_assert_fpv
+#(
+  // Specialise this as part of the binding to shrink the state space that we expect in the counter.
+  parameter int TimeoutCntDw = 32
+) (
   input        clk_i,
   input        rst_ni,
   // for sigint error injection only
@@ -93,17 +97,17 @@ module prim_esc_rxtx_assert_fpv (
   `ASSERT(EscRespCheck_A,
       ##1 esc_req_i
       |->
-      ##[0:1] prim_esc_rxtx_fpv.esc_rx_out.resp_p
-      ##1 !prim_esc_rxtx_fpv.esc_rx_out.resp_p,
+      ##[0:1] prim_esc_rxtx_tb.esc_rx_out.resp_p
+      ##1 !prim_esc_rxtx_tb.esc_rx_out.resp_p,
       clk_i,
       !rst_ni ||
       error_present)
 
-  // check correct transmission of escalation within 0-1 cycles
+  // check correct transmission of escalation within 1-2 cycles
   `ASSERT(EscCheck_A,
       ##1 esc_req_i
       |->
-      ##[0:1] esc_req_o,
+      ##[1:2] esc_req_o,
       clk_i,
       !rst_ni ||
       error_present)
@@ -122,21 +126,26 @@ module prim_esc_rxtx_assert_fpv (
 
   // basic liveness of sender FSM
   `ASSERT(FsmLivenessSender_A,
-      (prim_esc_rxtx_fpv.u_prim_esc_sender.state_q !=
-      prim_esc_rxtx_fpv.u_prim_esc_sender.Idle)
+      (prim_esc_rxtx_tb.u_prim_esc_sender.state_q !=
+      prim_esc_rxtx_tb.u_prim_esc_sender.Idle)
       |->
-      strong(##[1:$] (prim_esc_rxtx_fpv.u_prim_esc_sender.state_q
-      == prim_esc_rxtx_fpv.u_prim_esc_sender.Idle)))
+      strong(##[1:$] (prim_esc_rxtx_tb.u_prim_esc_sender.state_q
+      == prim_esc_rxtx_tb.u_prim_esc_sender.Idle)))
   // basic liveness of sender FSM (can only be guaranteed if no error is present)
   `ASSERT(FsmLivenessReceiver_A,
-      (prim_esc_rxtx_fpv.u_prim_esc_receiver.state_q !=
-      prim_esc_rxtx_fpv.u_prim_esc_receiver.Idle)
+      (prim_esc_rxtx_tb.u_prim_esc_receiver.state_q !=
+      prim_esc_rxtx_tb.u_prim_esc_receiver.Idle)
       |->
-      strong(##[1:$] (prim_esc_rxtx_fpv.u_prim_esc_receiver.state_q
-      == prim_esc_rxtx_fpv.u_prim_esc_receiver.Idle)),
+      strong(##[1:$] (prim_esc_rxtx_tb.u_prim_esc_receiver.state_q
+      == prim_esc_rxtx_tb.u_prim_esc_receiver.Idle)),
       clk_i,
-      rst_ni ||
+      !rst_ni ||
       error_present)
+
+  // The assertions below use TimeoutCntDw to bound some sequence lengths. Add an assertion to check
+  // it matches the parameter in the design.
+  `ASSERT(TimeoutCntDwConsistent_A,
+          TimeoutCntDw == prim_esc_rxtx_tb.u_prim_esc_receiver.TimeoutCntDw)
 
   // check that auto escalation timeout does not trigger prematurely.
   // this requires that no errors have been present so far.
@@ -144,9 +153,9 @@ module prim_esc_rxtx_assert_fpv (
       ping_req_i &&
       ping_ok_o &&
       !esc_req_o ##1
-      !ping_req_i [*0 : 2**prim_esc_rxtx_fpv.u_prim_esc_receiver.TimeoutCntDw - 4]
+      !ping_req_i [*0 : 2**TimeoutCntDw - 4]
       |->
-      !esc_req_o,
+      ##1 !esc_req_o,
       clk_i,
       !rst_ni ||
       error_d ||
@@ -158,9 +167,9 @@ module prim_esc_rxtx_assert_fpv (
       ping_req_i &&
       ping_ok_o &&
       !esc_req_o ##1
-      !ping_req_i [* 2**prim_esc_rxtx_fpv.u_prim_esc_receiver.TimeoutCntDw - 3 : $]
+      !ping_req_i [* 2**TimeoutCntDw - 3 : $]
       |->
-      esc_req_o,
+      ##1 esc_req_o,
       clk_i,
       !rst_ni ||
       error_d ||

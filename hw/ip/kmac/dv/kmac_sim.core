@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:dv:kmac_sim:0.1"
@@ -13,6 +13,7 @@ filesets:
     depend:
       - lowrisc:dv:kmac_test
       - lowrisc:dv:kmac_sva
+      - lowrisc:dv:kmac_cov
     files:
       - tb.sv
     file_type: systemVerilogSource

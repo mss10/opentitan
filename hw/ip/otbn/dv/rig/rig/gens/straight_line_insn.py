@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -73,7 +73,7 @@ class StraightLineInsn(SnippetGen):
         snippet = ProgSnippet(pc, [prog_insn])
         snippet.insert_into_program(program)
 
-        return (snippet, False, model)
+        return (snippet, model)
 
     def gen_some(self,
                  count: int,
@@ -424,7 +424,8 @@ class StraightLineInsn(SnippetGen):
                                        type(tgt_op.op_type).__name__))
 
         # We have a list of register operands, together with their types. Get a
-        # list of registers with known values for each register type we've seen.
+        # list of registers with known values for each register type we've
+        # seen.
         known_regs_by_type = {rtype: model.regs_with_known_vals(rtype)
                               for rtype in lsu_reg_types}
 

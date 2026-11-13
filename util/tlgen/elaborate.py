@@ -1,17 +1,17 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Elaborate crossbar, creating internal FIFOS and sockets."""
+
 import logging as log
 
-from .item import Node, NodeType
+from .item import Node, AsyncFifo, Host, SocketM1, Socket1N
 from .xbar import Xbar
 
 
 def elaborate(xbar: Xbar) -> bool:
-    """elaborate reads all nodes and edges then
-    construct internal FIFOs, Sockets.
-    """
+    """Read nodes/edges and create internal FIFOs & sockets."""
     # Condition check
     if len(xbar.nodes) <= 1 or len(xbar.edges) == 0:
         log.error(
@@ -31,8 +31,8 @@ def elaborate(xbar: Xbar) -> bool:
     return True
 
 
-def process_node(node, xbar):  # node: Node -> xbar: Xbar -> Xbar
-    """process each node based on algorithm
+def process_node(node: Node, xbar: Xbar) -> Xbar:
+    """Process each node based on the following algorithm.
 
     1. If a node has different clock from main clock and not ASYNC_FIFO:
        a. (New Node) Create ASYNC_FIFO node.
@@ -48,77 +48,73 @@ def process_node(node, xbar):  # node: Node -> xbar: Xbar -> Xbar
        b. Revise every edges to the node to have SOCKET_M1 node as end node.
        c. (New Edge) create a edge from SOCKET_M1 to the node.
        d. Repeat the algorithm with the node.
-    3. If a node has multiple edges having it as a start node and not SOCKET_1N:
+    3. If a node is a host or has multiple edges having it as a start node and
+       not SOCKET_1N:
        a. (New node) Create SOCKET_1N node.
        b. Revise every edges from the node to have SOCKET_1N node as start node.
        c. (New Edge) Create a edge from the node to SOCKET_1N node.
        d. (for loop) Repeat the algorithm with SOCKET_1N's other side node.
     """
-
     # If a node has different clock from main clock and not ASYNC_FIFO:
-    if node.node_type != NodeType.ASYNC_FIFO and node.clocks[0] != xbar.clock:
+    if node.clocks[0] != xbar.clock and not isinstance(node, AsyncFifo):
         # (New Node) Create ASYNC_FIFO node
-        new_node = Node(name="asf_" + str(len(xbar.nodes)),
-                        node_type=NodeType.ASYNC_FIFO,
-                        clock=xbar.clock,
-                        reset=xbar.reset)
+        new_fifo = AsyncFifo(name="asf_" + str(len(xbar.nodes)),
+                             clock=xbar.clock,
+                             reset=xbar.reset)
 
         # if node is HOST, host clock synchronizes into xbar domain
         # if node is DEVICE, xbar synchronizes into device clock domain
-        if node.node_type == NodeType.HOST:
-            new_node.clocks.insert(0, node.clocks[0])
-            new_node.resets.insert(0, node.resets[0])
+        if isinstance(node, Host):
+            new_fifo.clocks.insert(0, node.clocks[0])
+            new_fifo.resets.insert(0, node.resets[0])
         else:
-            new_node.clocks.append(node.clocks[0])
-            new_node.resets.append(node.resets[0])
+            new_fifo.clocks.append(node.clocks[0])
+            new_fifo.resets.append(node.resets[0])
 
-        xbar.insert_node(new_node, node)
+        # Async FIFOs copy the address spaces from the outer node.
+        new_fifo.addr_spaces = node.addr_spaces
 
-        process_node(new_node, xbar)
+        xbar.insert_node(new_fifo, node)
+
+        process_node(new_fifo, xbar)
 
     # If a node has multiple edges having it as a end node and not SOCKET_M1:
-    elif node.node_type != NodeType.SOCKET_M1 and len(node.us) > 1:
+    elif len(node.us) > 1 and not isinstance(node, SocketM1):
         # (New node) Create SOCKET_M1 node
-        new_node = Node(name="sm1_" + str(len(xbar.nodes)),
-                        node_type=NodeType.SOCKET_M1,
-                        clock=xbar.clock,
-                        reset=xbar.reset)
+        new_sm1 = SocketM1(hwidth=len(node.us),
+                           name="sm1_" + str(len(xbar.nodes)),
+                           clock=xbar.clock,
+                           reset=xbar.reset)
+        # The SOCKET_M1 must support all the address spaces of downstream
+        new_sm1.addr_spaces = node.addr_spaces
 
-        # By default, assume connecting to SOCKET_1N upstream and bypass all FIFOs
-        # If upstream requires pipelining, it will be added through process pipeline
-        new_node.hdepth = 0
-        new_node.hpass = 2**len(node.us) - 1
-        new_node.ddepth = 0
-        new_node.dpass = 1
-        xbar.insert_node(new_node, node)
-        process_node(new_node, xbar)
+        xbar.insert_node(new_sm1, node)
+        process_node(new_sm1, xbar)
 
-    # If a node has multiple edges having it as a start node and not SOCKET_1N:
-    elif node.node_type != NodeType.SOCKET_1N and len(node.ds) > 1:
+    # If a node is a host or has multiple edges having it as a start node and
+    # is not a not SOCKET_1N (We want every host to be connected to an S1N
+    # because it enforces the address boundaries of connected devices):
+    elif (isinstance(node, Host) or
+          (len(node.ds) > 1 and not isinstance(node, Socket1N))):
         # (New node) Create SOCKET_1N node
-        new_node = Node(name="s1n_" + str(len(xbar.nodes)),
-                        node_type=NodeType.SOCKET_1N,
-                        clock=xbar.clock,
-                        reset=xbar.reset)
+        new_s1n = Socket1N(dwidth=len(node.ds),
+                           name="s1n_" + str(len(xbar.nodes)),
+                           clock=xbar.clock,
+                           reset=xbar.reset)
+        # The SOCKET_1N only supports the address space from upstream.
+        new_s1n.addr_spaces = node.addr_spaces
 
-        # By default, assume connecting to SOCKET_M1 downstream and bypass all FIFOs
-        # If upstream requires pipelining, it will be added through process pipeline
-        new_node.hdepth = 0
-        new_node.hpass = 1
-        new_node.ddepth = 0
-        new_node.dpass = 2**len(node.ds) - 1
-        xbar.insert_node(new_node, node)
+        xbar.insert_node(new_s1n, node)
 
         # (for loop) Repeat the algorithm with SOCKET_1N's other side node
-        for edge in new_node.ds:
+        for edge in new_s1n.ds:
             process_node(edge.ds, xbar)
 
     return xbar
 
 
-def process_pipeline(xbar):
-    """Check if HOST, DEVICE has settings different from default, then propagate it to end
-    """
+def process_pipeline(xbar: Xbar) -> None:
+    """If HOST/DEVICE has non-default settings, propagate them to end."""
     for host in xbar.hosts:
         # go downstream and change the HReqPass/Depth at the first instance.
         # If it is async, skip.
@@ -130,16 +126,18 @@ def process_pipeline(xbar):
 
         log.info("Processing pipeline for host {}".format(host.name))
 
+        fifo_pass = host.req_fifo_pass or host.rsp_fifo_pass
+
         # FIFO present with no passthrough option
         # FIFO present with passthrough option
         # FIFO not present and full passthrough
         full_fifo = False
         fifo_passthru = False
         full_passthru = True
-        if host.pipeline is True and host.pipeline_byp is False:
+        if host.pipeline is True and fifo_pass is False:
             full_fifo = True
 
-        elif host.pipeline is True and host.pipeline_byp is True:
+        elif host.pipeline is True and fifo_pass is True:
             fifo_passthru = True
 
         elif host.pipeline is False:
@@ -147,42 +145,52 @@ def process_pipeline(xbar):
 
         dnode = host.ds[0].ds
 
-        if dnode.node_type == NodeType.ASYNC_FIFO:
+        if isinstance(dnode, AsyncFifo):
             continue
 
-        if dnode.node_type == NodeType.SOCKET_1N:
+        req_pass = 1 if host.req_fifo_pass else 0
+        rsp_pass = 1 if host.rsp_fifo_pass else 0
+        if isinstance(dnode, Socket1N):
             if full_fifo:
-                dnode.hpass = 0
-                dnode.hdepth = 2
+                dnode.hreq_pass = 0
+                dnode.hrsp_pass = 0
+                dnode.hdepth = 1
             elif fifo_passthru:
-                dnode.hpass = 0
-                dnode.hdepth = 2
+                dnode.hreq_pass = req_pass
+                dnode.hrsp_pass = rsp_pass
+                dnode.hdepth = 1
             elif full_passthru:
-                dnode.hpass = 1
+                dnode.hreq_pass = 1
+                dnode.hrsp_pass = 1
                 dnode.hdepth = 0
 
             log.info(
-                "Finished processing socket1n {}, pass={}, depth={}".format(
-                    dnode.name, dnode.hpass, dnode.hdepth))
+                "Finished processing socket1n {}, req pass={}, rsp pass={}, depth={}".format(
+                    dnode.name, dnode.hreq_pass, dnode.hrsp_pass, dnode.hdepth))
 
-        elif dnode.node_type == NodeType.SOCKET_M1:
+        elif isinstance(dnode, SocketM1):
             idx = dnode.us.index(host.ds[0])
+
+            # first clear out entry
+            dnode.hreq_pass = dnode.hreq_pass & ~(1 << idx)
+            dnode.hreq_pass = dnode.hreq_pass & ~(1 << idx)
             if full_fifo:
                 log.info("fifo present no bypass")
-                dnode.hpass = dnode.hpass & ~(1 << idx)
-                dnode.hdepth = dnode.hdepth | (2 << idx * 4)
+                dnode.hdepth = dnode.hdepth | (1 << idx * 4)
             elif fifo_passthru:
                 log.info("fifo present with bypass")
-                dnode.hpass = dnode.hpass | (1 << idx)
-                dnode.hdepth = dnode.hdepth | (2 << idx * 4)
+                dnode.hreq_pass = dnode.hreq_pass | (req_pass << idx)
+                dnode.hreq_pass = dnode.hrsp_pass | (rsp_pass << idx)
+                dnode.hdepth = dnode.hdepth | (1 << idx * 4)
             elif full_passthru:
                 log.info("fifo not present")
-                dnode.hpass = dnode.hpass | (1 << idx)
+                dnode.hreq_pass = dnode.hreq_pass | (1 << idx)
+                dnode.hreq_pass = dnode.hrsp_pass | (1 << idx)
                 dnode.hdepth = dnode.hdepth & ~(0xF << idx * 4)
 
             log.info(
-                "Finished processing socketm1 {}, pass={}, depth={}".format(
-                    dnode.name, dnode.hpass, dnode.hdepth))
+                "Finished processing socketm1 {}, req pass={}, rsp pass={}, depth={}".format(
+                    dnode.name, dnode.hreq_pass, dnode.hrsp_pass, dnode.hdepth))
 
     for device in xbar.devices:
         # go upstream and set DReq/RspPass at the first instance.
@@ -198,14 +206,14 @@ def process_pipeline(xbar):
         # FIFO present with no passthrough option
         # FIFO present with passthrough option
         # FIFO not present and full passthrough
-
+        fifo_pass = device.req_fifo_pass or device.rsp_fifo_pass
         full_fifo = False
         fifo_passthru = False
         full_passthru = True
-        if device.pipeline is True and device.pipeline_byp is False:
+        if device.pipeline is True and fifo_pass is False:
             full_fifo = True
 
-        elif device.pipeline is True and device.pipeline_byp is True:
+        elif device.pipeline is True and fifo_pass is True:
             fifo_passthru = True
 
         elif device.pipeline is False:
@@ -213,40 +221,47 @@ def process_pipeline(xbar):
 
         unode = device.us[0].us
 
-        if unode.node_type == NodeType.ASYNC_FIFO:
+        if isinstance(unode, AsyncFifo):
             continue
 
-        if unode.node_type == NodeType.SOCKET_1N:
+        req_pass = 1 if device.req_fifo_pass else 0
+        rsp_pass = 1 if device.rsp_fifo_pass else 0
+        if isinstance(unode, Socket1N):
             idx = unode.ds.index(device.us[0])
 
+            # first clear out entry
+            unode.dreq_pass = unode.dreq_pass & ~(1 << idx)
+            unode.drsp_pass = unode.drsp_pass & ~(1 << idx)
             if full_fifo:
-                unode.dpass = unode.dpass & ~(1 << idx)
-                unode.ddepth = unode.ddepth | (2 << idx * 4)
+                unode.ddepth = unode.ddepth | (1 << idx * 4)
             elif fifo_passthru:
-                unode.dpass = unode.dpass | (1 << idx)
-                unode.ddepth = unode.ddepth | (2 << idx * 4)
+                unode.dreq_pass = unode.dreq_pass | (req_pass << idx)
+                unode.drsp_pass = unode.drsp_pass | (rsp_pass << idx)
+                unode.ddepth = unode.ddepth | (1 << idx * 4)
             elif full_passthru:
-                unode.dpass = unode.dpass | (1 << idx)
+                unode.dreq_pass = unode.dreq_pass | (1 << idx)
+                unode.drsp_pass = unode.drsp_pass | (1 << idx)
                 unode.ddepth = unode.ddepth & ~(0xF << idx * 4)
 
-            log.info("Finished processing socket1n {}, pass={:x}, depth={:x}".
-                     format(unode.name, unode.dpass, unode.ddepth))
+            log.info("Finished processing socket1n {}, req pass={:x}, req pass={:x} depth={:x}".
+                     format(unode.name, unode.dreq_pass, unode.drsp_pass, unode.ddepth))
 
-        elif unode.node_type == NodeType.SOCKET_M1:
+        elif isinstance(unode, SocketM1):
             if full_fifo:
                 log.info("Fifo present with no passthrough")
-                unode.dpass = 0
-                unode.ddepth = 2
+                unode.dreq_pass = 0
+                unode.drsp_pass = 0
+                unode.ddepth = 1
             elif fifo_passthru:
                 log.info("Fifo present with passthrough")
-                unode.dpass = 0
-                unode.ddepth = 2
+                unode.dreq_pass = req_pass
+                unode.drsp_pass = rsp_pass
+                unode.ddepth = 1
             elif full_passthru:
                 log.info("No Fifo")
-                unode.dpass = 1
+                unode.dreq_pass = 1
+                unode.drsp_pass = 1
                 unode.ddepth = 0
 
-            log.info("Finished processing socketm1 {}, pass={:x}, depth={:x}".
-                     format(unode.name, unode.dpass, unode.ddepth))
-
-    return xbar
+            log.info("Finished processing socketm1 {}, req pass={:x}, rsp pass={:x}, depth={:x}".
+                     format(unode.name, unode.dreq_pass, unode.drsp_pass, unode.ddepth))

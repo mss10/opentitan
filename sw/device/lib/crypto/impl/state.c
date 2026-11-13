@@ -1,0 +1,140 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+#include "sw/device/lib/crypto/impl/state.h"
+
+#include <string.h>
+
+#include "hw/top/dt/otbn.h"
+#include "sw/device/lib/base/abs_mmio.h"
+#include "sw/device/lib/base/hardened.h"
+#include "sw/device/lib/crypto/drivers/rv_core_ibex.h"
+
+#include "hw/top/otbn_regs.h"  // Generated
+
+static const dt_otbn_t kOtbnDt = kDtOtbn;
+
+static inline uint32_t otbn_base(void) {
+  return dt_otbn_primary_reg_block(kOtbnDt);
+}
+
+status_t store_state(const crypto_state_t *state) {
+  if (state == NULL) {
+    // COVERAGE (SW ERR) Internal callers always provide a non-null state
+    // pointer.
+    return OTCRYPTO_BAD_ARGS;
+  }
+  uint32_t words[OTBN_SCRATCH_MULTIREG_COUNT] = {0};
+  memcpy(words, state, sizeof(words));
+  uint32_t base = otbn_base() + OTBN_SCRATCH_0_REG_OFFSET;
+  for (size_t i = 0; i < OTBN_SCRATCH_MULTIREG_COUNT; ++i) {
+    abs_mmio_write32(base + i * sizeof(uint32_t), words[i]);
+  }
+  return OTCRYPTO_OK;
+}
+
+status_t read_state(crypto_state_t *state) {
+  if (state == NULL) {
+    // COVERAGE (SW ERR) Internal callers always provide a non-null state
+    // pointer.
+    return OTCRYPTO_BAD_ARGS;
+  }
+  uint32_t words[OTBN_SCRATCH_MULTIREG_COUNT];
+  uint32_t base = otbn_base() + OTBN_SCRATCH_0_REG_OFFSET;
+  for (size_t i = 0; i < OTBN_SCRATCH_MULTIREG_COUNT; ++i) {
+    words[i] = abs_mmio_read32(base + i * sizeof(uint32_t));
+  }
+  memcpy(state, words, sizeof(words));
+  if (state->security_level == 0) {
+    return OTCRYPTO_RECOV_ERR;
+  }
+  return OTCRYPTO_OK;
+}
+
+otcrypto_status_t init_state(otcrypto_key_security_level_t security_level) {
+  crypto_state_t internal_state = {
+      .imem_cache = 0,
+      .kat_state = 0,
+      .security_level = (uint16_t)security_level,
+      .self_check_state = kHardenedByteBoolFalse,
+      .locked_state = kHardenedByteBoolFalse,
+      .csrng_instantiated = kHardenedByteBoolFalse,
+      .csrng_is_manual = kHardenedByteBoolFalse,
+#ifdef FIPS_MODE
+      .cmvp_service_indicator = kOtcryptoCmvpNoService,
+      .cmvp_call_depth = 0,
+#endif
+  };
+  return store_state(&internal_state);
+}
+
+#ifdef FIPS_MODE
+
+otcrypto_status_t locked_state_check(void) {
+  crypto_state_t state;
+
+  status_t res = read_state(&state);
+  if (res.value < 0) {
+    return res;
+  }
+
+  // If we are in a locked state (hard or entropy-locked), return a fatal error
+  if (launder32(state.locked_state) != kHardenedByteBoolFalse) {
+    return OTCRYPTO_FATAL_ERR;
+  }
+
+  if (state.self_check_state == kHardenedByteBoolFalse) {
+    return OTCRYPTO_RECOV_ERR;
+  }
+
+  return OTCRYPTO_OK;
+}
+
+otcrypto_status_t stateful_health_check(kat_bits_t kat_bit) {
+  crypto_state_t state;
+
+  status_t res = read_state(&state);
+  if (res.value < 0) {
+    return res;
+  }
+
+  // If we are in a locked state (hard or entropy-locked), the health check
+  // returns a fatal error
+  if (launder32(state.locked_state) != kHardenedByteBoolFalse) {
+    return OTCRYPTO_FATAL_ERR;
+  }
+
+  // The self-integrity check uses SHA-2 and the RNG, so those KATs
+  // must be allowed to execute before the self-integrity check has completed.
+  if (kat_bit != kTestHashSha512Bit && kat_bit != kTestRngBit &&
+      state.self_check_state == kHardenedByteBoolFalse) {
+    return OTCRYPTO_RECOV_ERR;
+  }
+
+  uint32_t mask = (1UL << kat_bit);
+
+  if ((state.kat_state & mask) == 0) {
+    uint8_t saved_indicator = state.cmvp_service_indicator;
+    uint8_t saved_depth = state.cmvp_call_depth;
+    kat_id_t test_id = {.flags = mask};
+    status_t result = run_kats(test_id);
+
+    // If the KAT failed, lock the cryptolib
+    if (result.value != kHardenedBoolTrue) {
+      // COVERAGE (HW ERR) KAT failure only occurs on hardware fault or FI.
+      HARDENED_TRY(read_state(&state));
+      state.locked_state = kHardenedByteBoolTrue;
+      HARDENED_TRY(store_state(&state));
+      return result;
+    }
+    HARDENED_TRY(read_state(&state));
+    state.cmvp_service_indicator = saved_indicator;
+    state.cmvp_call_depth = saved_depth;
+    HARDENED_TRY(store_state(&state));
+  }
+
+  return OTCRYPTO_OK;
+}
+
+#endif  // FIPS_MODE

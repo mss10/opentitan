@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:edn:0.1"
@@ -7,9 +7,13 @@ description: "edn"
 filesets:
   files_rtl:
     depend:
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
       - lowrisc:prim:all
+      - lowrisc:prim:count
+      - lowrisc:prim:edge_detector
+      - lowrisc:prim:mubi
       - lowrisc:prim:assert
+      - lowrisc:prim:sparse_fsm
       - lowrisc:ip:tlul
       - lowrisc:ip:edn_pkg
     files:
@@ -39,6 +43,12 @@ filesets:
     file_type: waiver
 
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
+
 parameters:
   SYNTHESIS:
     datatype: bool
@@ -50,6 +60,7 @@ targets:
     filesets:
       - tool_verilator  ? (files_verilator_waiver)
       - tool_ascentlint ? (files_ascentlint_waiver)
+      - tool_slang      ? (files_slang_waiver)
       - files_rtl
     toplevel: edn
 

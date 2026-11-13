@@ -1,18 +1,18 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-"""Generate SystemVerilog UVM agent extended freom our DV lib
+"""Generate SystemVerilog UVM agent extended from our DV lib
 """
 
 import os
 import logging as log
 
 from mako.template import Template
-from pkg_resources import resource_filename
+import importlib.resources
 from uvmdvgen import VENDOR_DEFAULT
 
 
-def gen_env(name, is_cip, has_ral, has_interrupts, has_alerts, has_edn,
+def gen_env(name, is_cip, has_ral, has_interrupts, has_alerts, num_edn,
             env_agents, root_dir, vendor):
     # yapf: disable
     # flake8: noqa
@@ -69,7 +69,7 @@ def gen_env(name, is_cip, has_ral, has_interrupts, has_alerts, has_edn,
             continue
 
         # read template
-        tpl = Template(filename=resource_filename('uvmdvgen', ftpl))
+        tpl = Template(filename=str(importlib.resources.files('uvmdvgen') / ftpl))
 
         # create rendered file
         with open(file_path, 'w') as fout:
@@ -80,7 +80,7 @@ def gen_env(name, is_cip, has_ral, has_interrupts, has_alerts, has_edn,
                                has_ral=has_ral,
                                has_interrupts=has_interrupts,
                                has_alerts=has_alerts,
-                               has_edn=has_edn,
+                               num_edn=num_edn,
                                env_agents=env_agents,
                                vendor=vendor))
             except Exception as e:

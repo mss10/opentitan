@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -22,7 +22,6 @@
   build_dir:          "{scratch_path}/{build_mode}"
   run_dir_name:       "{index}.{test}"
   run_dir:            "{scratch_path}/{run_dir_name}/out"
-  sw_build_dir:       "{scratch_path}"
   sw_root_dir:        "{proj_root}/sw"
 
   regressions: [
@@ -52,8 +51,7 @@
   // TODO: Verilator has a few useful build switches. Need to figure out how to
   // pass them via FuseSoC.
 
-  build_opts: ["--flag=fileset_{design_level}",
-               "--target=sim",
+  build_opts: ["--target=sim",
                "--build-root={build_dir}",
                "--setup",
                "--build",
@@ -70,9 +68,7 @@
                // "--x-initial unique",
                ]
 
-  run_opts: [// Set random seed.
-             // "+verilator+seed+{seed}",
-             ]
+  run_opts: []
 
   // Supported wave dumping formats (in order of preference).
   supported_wave_formats: ["fst"]
@@ -82,7 +78,6 @@
   ]
 
   // pass and fail patterns
-  build_pass_patterns: []
   build_fail_patterns: [// Verilator compile error.
                         "^%Error.*?:",
                         // FuseSoC build error.

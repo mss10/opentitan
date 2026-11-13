@@ -1,18 +1,26 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 class chip_env extends cip_base_env #(
-    .CFG_T              (chip_env_cfg),
-    .COV_T              (chip_env_cov),
-    .VIRTUAL_SEQUENCER_T(chip_virtual_sequencer),
-    .SCOREBOARD_T       (chip_scoreboard)
-  );
+  .CFG_T              (chip_env_cfg),
+  .COV_T              (chip_env_cov),
+  .VIRTUAL_SEQUENCER_T(chip_virtual_sequencer),
+  .SCOREBOARD_T       (chip_scoreboard)
+);
   `uvm_component_utils(chip_env)
 
-  uart_agent          m_uart_agents[NUM_UARTS];
-  jtag_riscv_agent    m_jtag_riscv_agent;
-  spi_agent           m_spi_agent;
+  uart_agent             m_uart_agents[NUM_UARTS];
+  // spi device agents that receive transactions from dut spi host
+  spi_agent              m_spi_device_agents[NUM_SPI_HOSTS];
+  i2c_agent              m_i2c_agents[NUM_I2CS];
+  jtag_riscv_agent       m_jtag_riscv_agent;
+  jtag_riscv_reg_adapter m_jtag_riscv_reg_adapter;
+  // spi host agent that transmits transactions to dut spi device
+  spi_agent              m_spi_host_agent;
+
+  // A passive environment that monitors the rom_ctrl block
+  rom_ctrl_env_pkg::rom_ctrl_env m_rom_ctrl_env;
 
   `uvm_component_new
 
@@ -20,34 +28,28 @@ class chip_env extends cip_base_env #(
     super.build_phase(phase);
     // configure the cpu d tl agent
     // get the vifs from config db
-    if (!uvm_config_db#(gpio_vif)::get(this, "", "gpio_vif", cfg.gpio_vif)) begin
-      `uvm_fatal(`gfn, "failed to get gpio_vif from uvm_config_db")
+    if (!uvm_config_db#(virtual chip_if)::get(this, "", "chip_vif", cfg.chip_vif)) begin
+      `uvm_fatal(`gfn, "failed to get chip_vif from uvm_config_db")
     end
 
-    if (!uvm_config_db#(virtual pins_if#(2))::get(this, "", "tap_straps_vif",
-        cfg.tap_straps_vif)) begin
-      `uvm_fatal(`gfn, "failed to get tap_straps_vif from uvm_config_db")
-    end
-
-    if (!uvm_config_db#(virtual pins_if#(2))::get(this, "", "dft_straps_vif",
-        cfg.dft_straps_vif)) begin
-      `uvm_fatal(`gfn, "failed to get dft_straps_vif from uvm_config_db")
-    end
-
-    if (!uvm_config_db#(virtual pins_if#(3))::get(this, "", "sw_straps_vif",
-        cfg.sw_straps_vif)) begin
-      `uvm_fatal(`gfn, "failed to get sw_straps_vif from uvm_config_db")
-    end
-
-    if (!uvm_config_db#(virtual pins_if#(1))::get(this, "", "rst_n_mon_vif",
-        cfg.rst_n_mon_vif)) begin
-      `uvm_fatal(`gfn, "failed to get rst_n_mon_vif from uvm_config_db")
-    end
+    // Set tl_agent's is_active bit based on the stub_cpu value.
+    cfg.m_tl_agent_cfg.is_active = cfg.chip_vif.stub_cpu;
 
     for (chip_mem_e mem = mem.first(), int i = 0; i < mem.num(); mem = mem.next(), i++) begin
-      if (!uvm_config_db#(mem_bkdr_util)::get(
-          this, "", $sformatf("mem_bkdr_util[%0s]", mem.name()), cfg.mem_bkdr_util_h[mem])) begin
-        `uvm_fatal(`gfn, $sformatf("failed to get mem_bkdr_util[%0s] from uvm_config_db", mem))
+      string inst = $sformatf("mem_bkdr_util[%0s]", mem.name());
+      bit is_invalid;
+
+      is_invalid = mem inside {[RamMain0:RamMain15]} && (int'(mem - RamMain0) >
+                                                         cfg.num_ram_main_tiles - 1);
+
+      is_invalid |= mem inside {[RamRet0:RamRet15]} && (int'(mem - RamRet0) >
+                                                        cfg.num_ram_ret_tiles - 1);
+
+      is_invalid |= mem inside {[OtbnDmem0:OtbnDmem15]} && (int'(mem - OtbnDmem0) >
+                                                            cfg.num_otbn_dmem_tiles - 1);
+      if (is_invalid) continue;
+      if (!uvm_config_db#(mem_bkdr_util)::get(this, "", inst, cfg.mem_bkdr_util_h[mem])) begin
+        `uvm_fatal(`gfn, {"failed to get ", inst, " from uvm_config_db"})
       end
     end
 
@@ -56,9 +58,31 @@ class chip_env extends cip_base_env #(
       `uvm_fatal(`gfn, "failed to get sw_logger_vif from uvm_config_db")
     end
 
-    if (!uvm_config_db#(virtual sw_test_status_if)::get(this, "", "sw_test_status_vif",
-        cfg.sw_test_status_vif)) begin
+    if (!uvm_config_db#(virtual sw_test_status_if)::get(
+            this, "", "sw_test_status_vif", cfg.sw_test_status_vif
+        )) begin
       `uvm_fatal(`gfn, "failed to get sw_test_status_vif from uvm_config_db")
+    end
+
+    // get the handle to the ast supply interface.
+    if (!uvm_config_db#(virtual ast_supply_if)::get(
+            this, "", "ast_supply_vif", cfg.ast_supply_vif
+        )) begin
+      `uvm_fatal(`gfn, "failed to get ast_supply_vif from uvm_config_db")
+    end
+
+    // get the handle to the ast io_ext_clk interface.
+    if (!uvm_config_db#(ast_ext_clk_vif)::get(
+            this, "", "ast_ext_clk_vif", cfg.ast_ext_clk_vif
+        )) begin
+      `uvm_fatal(`gfn, "failed to get ast_ext_clk_vif from uvm_config_db")
+    end
+
+    // get the handle to the usb20 interface.
+    if (!uvm_config_db#(usb20_vif)::get(
+            this, "", "usb20_vif", cfg.usb20_vif
+        )) begin
+      `uvm_fatal(`gfn, "failed to get usb20_vif from uvm_config_db")
     end
 
     // create components
@@ -68,21 +92,50 @@ class chip_env extends cip_base_env #(
                                           cfg.m_uart_agent_cfgs[i]);
     end
 
+    // Create the passive rom_ctrl_env. This can be given m_cfg.m_rom_ctrl_env_cfg (which has
+    // already been created and initialised by the test object's build_phase) as a cfg object.
+    m_rom_ctrl_env = rom_ctrl_env_pkg::rom_ctrl_env::type_id::create("m_rom_ctrl_env", this);
+    m_rom_ctrl_env.cfg = cfg.m_rom_ctrl_env_cfg;
+
+    // dut spi host, tb spi device
+    foreach (m_spi_device_agents[i]) begin
+      m_spi_device_agents[i] =
+        spi_agent::type_id::create($sformatf("m_spi_device_agents%0d", i), this);
+      uvm_config_db#(spi_agent_cfg)::set(this, $sformatf("m_spi_device_agents%0d*", i), "cfg",
+                                         cfg.m_spi_device_agent_cfgs[i]);
+    end
+
+    foreach (m_i2c_agents[i]) begin
+      m_i2c_agents[i] = i2c_agent::type_id::create($sformatf("m_i2c_agent%0d", i), this);
+      uvm_config_db#(i2c_agent_cfg)::set(this, $sformatf("m_i2c_agent%0d*", i), "cfg",
+                                          cfg.m_i2c_agent_cfgs[i]);
+    end
+
     m_jtag_riscv_agent = jtag_riscv_agent::type_id::create("m_jtag_riscv_agent", this);
     uvm_config_db#(jtag_riscv_agent_cfg)::set(this, "m_jtag_riscv_agent*", "cfg",
-                   cfg.m_jtag_riscv_agent_cfg);
+                                              cfg.m_jtag_riscv_agent_cfg);
 
-    m_spi_agent = spi_agent::type_id::create("m_spi_agent", this);
-    uvm_config_db#(spi_agent_cfg)::set(this, "m_spi_agent*", "cfg", cfg.m_spi_agent_cfg);
+    m_jtag_riscv_reg_adapter = jtag_riscv_reg_adapter::type_id::create(
+        "m_jtag_riscv_reg_adapter", null, this.get_full_name()
+    );
+    m_jtag_riscv_reg_adapter.cfg = cfg.m_jtag_riscv_agent_cfg;
 
-    // disable alert_esc_agent's driver and only use its monitor
+    // dut spi device, tb spi host
+    m_spi_host_agent = spi_agent::type_id::create("m_spi_host_agent", this);
+    uvm_config_db#(spi_agent_cfg)::set(this, "m_spi_host_agent*", "cfg", cfg.m_spi_host_agent_cfg);
+
+    // disable alert_agent's driver and only use its monitor
     foreach (LIST_OF_ALERTS[i]) begin
-      cfg.m_alert_agent_cfg[LIST_OF_ALERTS[i]].is_active = 0;
+      cfg.m_alert_agent_cfgs[LIST_OF_ALERTS[i]].is_active = 0;
     end
   endfunction
 
   function void connect_phase(uvm_phase phase);
     super.connect_phase(phase);
+    // Like chip_scoreboard, do not check rom_ctrl's alert for signal integrity errors. When a low
+    // power group leaves low power, the alert handler re-initialises its alert channels, and the
+    // in-band init looks like one. The alert receivers check signal integrity in hardware.
+    m_rom_ctrl_env.scoreboard.check_alert_sig_int_err = 0;
     if (cfg.en_scb) begin
       m_jtag_riscv_agent.monitor.analysis_port.connect(scoreboard.jtag_fifo.analysis_export);
     end
@@ -91,14 +144,41 @@ class chip_env extends cip_base_env #(
         virtual_sequencer.uart_sequencer_hs[i] = m_uart_agents[i].sequencer;
       end
     end
+
+    foreach (m_spi_device_agents[i]) begin
+      if (cfg.is_active && cfg.m_spi_device_agent_cfgs[i].is_active) begin
+        virtual_sequencer.spi_device_sequencer_hs[i] = m_spi_device_agents[i].sequencer;
+      end
+    end
+
+    foreach (m_i2c_agents[i]) begin
+      virtual_sequencer.i2c_sequencer_hs[i] = m_i2c_agents[i].sequencer;
+      // Set default monitor enable to zero for shared io agents.
+      cfg.m_i2c_agent_cfgs[i].en_monitor = 1'b0;
+
+      m_i2c_agents[i].monitor.controller_mode_rd_item_port.connect(
+        virtual_sequencer.i2c_rd_fifos[i].analysis_export);
+    end
+
     if (cfg.is_active && cfg.m_jtag_riscv_agent_cfg.is_active) begin
       virtual_sequencer.jtag_sequencer_h = m_jtag_riscv_agent.sequencer;
     end
-    if (cfg.is_active && cfg.m_spi_agent_cfg.is_active) begin
-      virtual_sequencer.spi_sequencer_h = m_spi_agent.sequencer;
+
+    // If we are using JTAG DMI, cfg.m_jtag_dtm_ral will have been constructed (when the build_phase
+    // for the test called cfg.set_use_jtag_dmi). If not, it will be null.
+    if (cfg.m_jtag_dtm_ral != null) begin
+      m_jtag_riscv_agent.set_dtm_reg_map(cfg.m_jtag_dtm_ral.get_default_map());
     end
 
-    // Connect the DUT's UART TX TLM port to the sequencer.
+    if (cfg.is_active && cfg.m_spi_host_agent_cfg.is_active) begin
+      virtual_sequencer.spi_host_sequencer_h = m_spi_host_agent.sequencer;
+    end
+
+    // The chip level scoreboard is intentionally kept lightweight, since most tests are directed,
+    // with stimulus and checks both contained in the sequence. The following TLM connections from
+    // the interface agent's monitor to the sequencer enables sequences to directly retrieve the
+    // packets from the monitor for processing / end-to-end checks.
+
     foreach (m_uart_agents[i]) begin
       m_uart_agents[i].monitor.tx_analysis_port.connect(
           virtual_sequencer.uart_tx_fifos[i].analysis_export);
@@ -107,6 +187,16 @@ class chip_env extends cip_base_env #(
 
   virtual function void end_of_elaboration_phase(uvm_phase phase);
     super.end_of_elaboration_phase(phase);
+
+    if (cfg.jtag_riscv_map != null) begin
+      cfg.jtag_riscv_map.set_sequencer(m_jtag_riscv_agent.sequencer, m_jtag_riscv_reg_adapter);
+
+      `uvm_info(`gfn, "Setting jtag_riscv_map as default map", UVM_MEDIUM)
+      foreach (cfg.ral_models[i]) begin
+        cfg.ral_models[i].set_default_map_w_subblks_by_name("jtag_riscv_map");
+        `uvm_info(`gfn, cfg.ral_models[i].sprint(), UVM_HIGH)
+      end
+    end
   endfunction
 
 endclass

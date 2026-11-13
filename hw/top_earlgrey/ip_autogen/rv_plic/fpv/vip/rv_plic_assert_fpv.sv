@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 // Testbench module for rv_plic. Intended to use with a formal tool.
@@ -23,9 +23,14 @@ module rv_plic_assert_fpv #(parameter int NumSrc = 1,
   input [NumSrc-1:0] ie [NumTarget],
   input [NumSrc-1:0] claim,
   input [NumSrc-1:0] complete,
-  input [PRIOW-1:0]  prio [NumSrc],
-  input [PRIOW-1:0]  threshold [NumTarget]
+  input [NumSrc-1:0][PRIOW-1:0] prio,
+  input [PRIOW-1:0]  threshold [NumTarget],
+  input logic        fatal_alert_i,
+  input tlul_pkg::tl_d2h_t tl_o
 );
+
+  localparam int SrcIdxWidth = NumSrc > 1 ? $clog2(NumSrc - 1) : 1;
+  localparam int TgtIdxWidth = NumTarget > 1 ? $clog2(NumTarget - 1) : 1;
 
   logic claim_reg, claimed;
   logic max_priority;
@@ -33,8 +38,8 @@ module rv_plic_assert_fpv #(parameter int NumSrc = 1,
   logic [$clog2(NumSrc)-1:0] i_high_prio;
 
   // symbolic variables
-  int unsigned src_sel;
-  int unsigned tgt_sel;
+  bit [SrcIdxWidth-1:0] src_sel;
+  bit [TgtIdxWidth-1:0] tgt_sel;
 
   `ASSUME_FPV(IsrcRange_M, src_sel >  0 && src_sel < NumSrc, clk_i, !rst_ni)
   `ASSUME_FPV(ItgtRange_M, tgt_sel >= 0 && tgt_sel < NumTarget, clk_i, !rst_ni)
@@ -101,4 +106,27 @@ module rv_plic_assert_fpv #(parameter int NumSrc = 1,
   // but smaller than the threshold
   `ASSERT(IdChangeWithIrq_A, !$stable(irq_id_o[tgt_sel]) && irq_id_o[tgt_sel] != 0 |->
           irq_o[tgt_sel] || ((irq_id_o[tgt_sel]) == $past(i_high_prio) && !$past(irq)))
+
+  // If a response is coming back from the device, then check if it contains the correct integrity
+  // bits.
+  `ASSERT(DataIntg_A,
+          tl_o.d_valid -> (tlul_pkg::get_data_intg(tl_o.d_data) == tl_o.d_user.data_intg))
+
+  `ASSERT(RspIntg_A,
+          tl_o.d_valid ->
+          (prim_secded_pkg::prim_secded_inv_64_57_enc({51'b0, tlul_pkg::extract_d2h_rsp_intg(tl_o)})
+          >> (64-tlul_pkg::D2HRspIntgWidth)) == tl_o.d_user.rsp_intg)
+
+  // When fatal alert happens then only reset can clear it.
+  `ASSERT(FatalAlertNeverdrops_A, ##1 !$fell(fatal_alert_i))
+
+  // The interrupt gateway in u_gateway is in charge of making sure that the "set; claim; complete"
+  // flow is followed for each interrupt line. This is done with an ia ("interrupt active") signal.
+  // When interrupt i is asserted, both ip[i] and ia[i] are set. When it is claimed, ip[i] gets
+  // cleared (but ia[i] stays high). Subsequent assertions are ignored until the processor marks the
+  // handling complete, which clears ia[i] again.
+  //
+  // As such, ia[i] should always be true when ip[i] is true.
+  `ASSERT(ActiveIfPending_A, u_gateway.ia | ~u_gateway.ip_o)
+
 endmodule : rv_plic_assert_fpv

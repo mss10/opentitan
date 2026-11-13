@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -112,6 +112,11 @@
                    //"-wave-scope-specs {probe_file}",
                    // Dump unpacked structs and arrays.
                    "-dump-agg"]
+    }
+    {
+      name: dsim_waves_off
+      is_sim_mode: 1
+      build_opts: []
     }
     // TODO: support coverage mode
     // Note: no specific build or run options are required for dsim to produce functional

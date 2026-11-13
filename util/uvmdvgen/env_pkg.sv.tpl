@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +10,7 @@ package ${name}_env_pkg;
 % for agent in env_agents:
   import ${agent}_agent_pkg::*;
 % endfor
+  import dv_base_agent_pkg::*;
   import dv_lib_pkg::*;
 % if is_cip:
   import tl_agent_pkg::*;
@@ -28,8 +29,8 @@ package ${name}_env_pkg;
   // parameters
 % if has_alerts:
   // TODO: add the names of alerts in order
-  parameter string LIST_OF_ALERTS[] = {};
   parameter uint   NUM_ALERTS = ;
+  parameter string LIST_OF_ALERTS[NUM_ALERTS] = {};
 % endif
 
   // types

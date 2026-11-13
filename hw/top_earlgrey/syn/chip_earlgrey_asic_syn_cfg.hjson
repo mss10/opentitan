@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -11,12 +11,14 @@
   import_cfgs: [// Project wide common synthesis config file
                 "{proj_root}/hw/syn/tools/dvsim/common_syn_cfg.hjson"]
 
+  // The chip depends on virtual cores for the AST, pad orientation, scan roles
+  // and the JTAG ID, all of which the top mapping resolves.
+  // Note that the imported cfg already supplies the prim mapping, and dvsim
+  // appends these lists rather than replacing them.
+  sv_flist_gen_flags: ["--mapping=lowrisc:systems:chip_earlgrey_asic:0.1"]
+
   // Overrides
   overrides: [
-    {
-      name: design_level
-      value: "top"
-    }
     // Since this synthesizes the design at chip level,
     // we need to instruct the parser script to explicitly
     // expand the top_earlgrey submodule.
@@ -27,7 +29,7 @@
   ]
 
   // Timing constraints for this module
-  sdc_file: "{proj_root}/hw/top_earlgrey/syn/asic.constraints.sdc"
+  sdc_file: "{proj_root}/hw/top_earlgrey/syn/chip_earlgrey_asic.sdc"
 
   // Technology specific timing constraints for this module
   foundry_sdc_file: "{foundry_root}/top_earlgrey/syn/foundry.constraints.sdc"

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,132 +6,234 @@
 //
 //   does hardware-based csrng app interface command requests
 
-module edn_main_sm (
-  input logic                clk_i,
-  input logic                rst_ni,
+`include "prim_assert.sv"
 
-  input logic                auto_req_mode_i,
-  output logic               seq_auto_req_mode_o,
-  output logic               auto_req_mode_end_o,
-  input logic                csrng_cmd_ack_i,
-  output logic               capt_gencmd_fifo_cnt_o,
-  output logic               send_gencmd_o,
-  input logic                max_reqs_cnt_zero_i,
-  output logic               capt_rescmd_fifo_cnt_o,
-  output logic               send_rescmd_o,
-  input logic                cmd_sent_i,
-  output logic               main_sm_err_o
+module edn_main_sm import edn_pkg::*;
+(
+  input logic                   clk_i,
+  input logic                   rst_ni,
+
+  input logic                   edn_enable_i,
+  input logic                   boot_req_mode_i,
+  input logic                   auto_req_mode_i,
+  input logic                   sw_cmd_req_load_i,
+  output logic                  sw_cmd_mode_o,
+  output logic                  boot_wr_ins_cmd_o,
+  output logic                  boot_send_ins_cmd_o,
+  output logic                  boot_wr_gen_cmd_o,
+  output logic                  boot_wr_uni_cmd_o,
+  output logic                  accept_sw_cmds_pulse_o,
+  output logic                  main_sm_done_pulse_o,
+  input logic                   csrng_cmd_ack_i,
+  output logic                  capt_gencmd_fifo_cnt_o,
+  output logic                  send_gencmd_o,
+  input logic                   max_reqs_cnt_zero_i,
+  output logic                  capt_rescmd_fifo_cnt_o,
+  output logic                  send_rescmd_o,
+  input logic                   cmd_sent_i,
+  output logic                  auto_req_mode_busy_o,
+  output logic [StateWidth-1:0] main_sm_state_o,
+  input logic                   csrng_ack_err_i,
+  output logic                  reject_csrng_entropy_o,
+  input logic                   local_escalate_i,
+  output logic                  main_sm_err_o
 );
-
-// Encoding generated with:
-// $ ./util/design/sparse-fsm-encode.py -d 3 -m 8 -n 6 \
-//      -s 3370065314 --language=sv
-//
-// Hamming distance histogram:
-//
-//  0: --
-//  1: --
-//  2: --
-//  3: |||||||||||||||||||| (57.14%)
-//  4: ||||||||||||||| (42.86%)
-//  5: --
-//  6: --
-//
-// Minimum Hamming distance: 3
-// Maximum Hamming distance: 4
-// Minimum Hamming weight: 1
-// Maximum Hamming weight: 5
-//
-
-  localparam int StateWidth = 6;
-  typedef enum logic [StateWidth-1:0] {
-    Idle          = 6'b111011, // idle (hamming distance = 3)
-    AckWait       = 6'b010111, // wait for csrng req ack
-    Dispatch      = 6'b011100, // dispatch the next cmd after ack
-    CaptGenCnt    = 6'b110000, // capture the generate fifo count
-    SendGenCmd    = 6'b001001, // send the generate cmd req
-    CaptReseedCnt = 6'b101110, // capture the reseed fifo count
-    SendReseedCmd = 6'b000010, // send the reseed cmd req
-    Error         = 6'b100101  // illegal state reached and hang
-  } state_e;
 
   state_e state_d, state_q;
 
-  logic [StateWidth-1:0] state_raw_q;
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, state_e, Idle)
 
-  // This primitive is used to place a size-only constraint on the
-  // flops in order to prevent FSM state encoding optimizations.
-
-  prim_flop #(
-    .Width(StateWidth),
-    .ResetValue(StateWidth'(Idle))
-  ) u_state_regs (
-    .clk_i,
-    .rst_ni,
-    .d_i ( state_d ),
-    .q_o ( state_raw_q )
-  );
-
-  assign state_q = state_e'(state_raw_q);
+  assign main_sm_state_o = state_q;
 
   always_comb begin
-    state_d = state_q;
+    state_d                = state_q;
+    boot_wr_ins_cmd_o      = 1'b0;
+    boot_send_ins_cmd_o    = 1'b0;
+    boot_wr_gen_cmd_o      = 1'b0;
+    boot_wr_uni_cmd_o      = 1'b0;
+    accept_sw_cmds_pulse_o = 1'b0;
+    auto_req_mode_busy_o   = 1'b0;
     capt_gencmd_fifo_cnt_o = 1'b0;
-    send_gencmd_o = 1'b0;
+    send_gencmd_o          = 1'b0;
     capt_rescmd_fifo_cnt_o = 1'b0;
-    send_rescmd_o = 1'b0;
-    seq_auto_req_mode_o = 1'b1;
-    auto_req_mode_end_o = 1'b0;
-    main_sm_err_o = 1'b0;
+    send_rescmd_o          = 1'b0;
+    main_sm_done_pulse_o   = 1'b0;
+    main_sm_err_o          = 1'b0;
+    reject_csrng_entropy_o = 1'b0;
+    sw_cmd_mode_o         = 1'b0;
     unique case (state_q)
       Idle: begin
-        seq_auto_req_mode_o = 1'b0;
-        if (auto_req_mode_i) begin
-          state_d = AckWait;
+        if (boot_req_mode_i && edn_enable_i) begin
+          state_d = BootLoadIns;
+        end else if (auto_req_mode_i && edn_enable_i) begin
+          accept_sw_cmds_pulse_o = 1'b1;
+          sw_cmd_mode_o = 1'b1;
+          state_d = AutoLoadIns;
+        end else if (edn_enable_i) begin
+          main_sm_done_pulse_o = 1'b1;
+          accept_sw_cmds_pulse_o = 1'b1;
+          sw_cmd_mode_o = 1'b1;
+          state_d = SWPortMode;
         end
       end
-      AckWait: begin
+      BootLoadIns: begin
+        boot_wr_ins_cmd_o = 1'b1;
+        boot_send_ins_cmd_o = 1'b1;
+        state_d = BootInsAckWait;
+      end
+      BootInsAckWait: begin
+        boot_send_ins_cmd_o = 1'b1;
         if (csrng_cmd_ack_i) begin
-          state_d = Dispatch;
+          state_d = BootLoadGen;
         end
       end
-      Dispatch: begin
+      BootLoadGen: begin
+        boot_wr_gen_cmd_o = 1'b1;
+        state_d = BootGenAckWait;
+      end
+      BootGenAckWait: begin
+        if (csrng_cmd_ack_i) begin
+          state_d = BootPulse;
+        end
+      end
+      BootPulse: begin
+        state_d = BootDone;
+      end
+      BootDone: begin
+        if (!boot_req_mode_i) begin
+          state_d = BootLoadUni;
+        end
+      end
+      BootLoadUni: begin
+        boot_wr_uni_cmd_o = 1'b1;
+        state_d = BootUniAckWait;
+      end
+      BootUniAckWait: begin
+        if (csrng_cmd_ack_i) begin
+          main_sm_done_pulse_o = 1'b1;
+          state_d = Idle;
+        end
+      end
+      //-----------------------------------
+      AutoLoadIns: begin
+        sw_cmd_mode_o = 1'b1;
+        if (sw_cmd_req_load_i) begin
+          state_d = AutoFirstAckWait;
+        end
+      end
+      AutoFirstAckWait: begin
+        sw_cmd_mode_o = 1'b1;
+        if (csrng_cmd_ack_i) begin
+          state_d = AutoDispatch;
+        end
+      end
+      AutoAckWait: begin
+        auto_req_mode_busy_o = 1'b1;
+        if (csrng_cmd_ack_i) begin
+          state_d = AutoDispatch;
+        end
+      end
+      AutoDispatch: begin
+        auto_req_mode_busy_o = 1'b1;
         if (!auto_req_mode_i) begin
-          auto_req_mode_end_o = 1'b1;
+          main_sm_done_pulse_o = 1'b1;
           state_d = Idle;
         end else begin
           if (max_reqs_cnt_zero_i) begin
-            state_d = CaptReseedCnt;
+            state_d = AutoCaptReseedCnt;
           end else begin
-            state_d = CaptGenCnt;
+            state_d = AutoCaptGenCnt;
           end
         end
       end
-      CaptGenCnt: begin
+      AutoCaptGenCnt: begin
+        auto_req_mode_busy_o = 1'b1;
         capt_gencmd_fifo_cnt_o = 1'b1;
-        state_d = SendGenCmd;
+        state_d = AutoSendGenCmd;
       end
-      SendGenCmd: begin
+      AutoSendGenCmd: begin
+        auto_req_mode_busy_o = 1'b1;
         send_gencmd_o = 1'b1;
         if (cmd_sent_i) begin
-          state_d = AckWait;
+          state_d = AutoAckWait;
         end
       end
-      CaptReseedCnt: begin
+      AutoCaptReseedCnt: begin
+        auto_req_mode_busy_o = 1'b1;
         capt_rescmd_fifo_cnt_o = 1'b1;
-        state_d = SendReseedCmd;
+        state_d = AutoSendReseedCmd;
       end
-      SendReseedCmd: begin
+      AutoSendReseedCmd: begin
+        auto_req_mode_busy_o = 1'b1;
         send_rescmd_o = 1'b1;
         if (cmd_sent_i) begin
-          state_d = AckWait;
+          state_d = AutoAckWait;
         end
+      end
+      SWPortMode: begin
+        sw_cmd_mode_o = 1'b1;
+      end
+      RejectCsrngEntropy: begin
+        reject_csrng_entropy_o = 1'b1;
       end
       Error: begin
         main_sm_err_o = 1'b1;
       end
-      default: state_d = Error;
+      default: begin
+        state_d = Error;
+        main_sm_err_o = 1'b1;
+      end
     endcase
+
+    if (local_escalate_i || csrng_ack_err_i) begin
+      // Either move into RejectCsrngEntropy or Error but don't move out of Error as it's terminal.
+      state_d = local_escalate_i ? Error :
+                state_q == Error ? Error : RejectCsrngEntropy;
+      // Tie off outputs, except for main_sm_err_o, auto_req_mode_busy_o, boot_send_ins_cmd_o,
+      // sw_cmd_mode_o and reject_csrng_entropy_o.
+      boot_wr_ins_cmd_o      = 1'b0;
+      boot_wr_gen_cmd_o      = 1'b0;
+      boot_wr_uni_cmd_o      = 1'b0;
+      accept_sw_cmds_pulse_o = 1'b0;
+      capt_gencmd_fifo_cnt_o = 1'b0;
+      send_gencmd_o          = 1'b0;
+      capt_rescmd_fifo_cnt_o = 1'b0;
+      send_rescmd_o          = 1'b0;
+      main_sm_done_pulse_o   = 1'b0;
+    end else if (!edn_enable_i && state_q inside {BootLoadIns, BootInsAckWait, BootLoadGen,
+                                                  BootGenAckWait, BootLoadUni, BootUniAckWait,
+                                                  BootPulse, BootDone,
+                                                  AutoLoadIns, AutoFirstAckWait, AutoAckWait,
+                                                  AutoDispatch, AutoCaptGenCnt, AutoSendGenCmd,
+                                                  AutoCaptReseedCnt, AutoSendReseedCmd,
+                                                  SWPortMode, RejectCsrngEntropy
+                                                 }) begin
+      // Only go to idle if the state is legal and not Idle or Error.
+      // Even when disabled, illegal states must result in a transition to Error.
+      state_d = Idle;
+      // Tie off outputs, except for main_sm_err_o.
+      boot_wr_ins_cmd_o      = 1'b0;
+      boot_send_ins_cmd_o    = 1'b0;
+      boot_wr_gen_cmd_o      = 1'b0;
+      boot_wr_uni_cmd_o      = 1'b0;
+      accept_sw_cmds_pulse_o = 1'b0;
+      auto_req_mode_busy_o   = 1'b0;
+      capt_gencmd_fifo_cnt_o = 1'b0;
+      send_gencmd_o          = 1'b0;
+      capt_rescmd_fifo_cnt_o = 1'b0;
+      send_rescmd_o          = 1'b0;
+      sw_cmd_mode_o          = 1'b0;
+      reject_csrng_entropy_o = 1'b0;
+      main_sm_done_pulse_o   = 1'b1;
+    end
   end
 
+  // The `local_escalate_i` includes `main_sm_err_o`.
+  // The following assertion ensures the Error state is stable until reset.
+  // With `FpvSecCm` prefix, this assertion will added to weekly FPV sec_cm regression.
+  `ASSERT(FpvSecCmErrorStEscalate_A, state_q == Error |-> local_escalate_i)
+
+  // This assertion does not have `FpvSecCm` prefix because the sec_cm FPV environment will
+  // blackbox the `prim_sparse_fsm` `state_q` output.
+  `ASSERT(ErrorStStable_A, state_q == Error |=> $stable(state_q))
 endmodule

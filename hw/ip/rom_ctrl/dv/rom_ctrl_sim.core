@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:dv:rom_ctrl_sim:0.1"
@@ -8,15 +8,15 @@ filesets:
   files_rtl:
     depend:
       - lowrisc:ip:rom_ctrl
-
   files_dv:
     depend:
-      - lowrisc:dv:mem_bkdr_util
+      - lowrisc:dv:rom_ctrl_bkdr_util
       - lowrisc:dv:rom_ctrl_test
       - lowrisc:dv:rom_ctrl_sva
       - lowrisc:dv:rom_ctrl_cov
+      - lowrisc:dv:rom_ctrl_ifs
     files:
-      - tb.sv
+      - tb/tb.sv
     file_type: systemVerilogSource
 
 targets:

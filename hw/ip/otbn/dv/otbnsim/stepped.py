@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,47 +12,81 @@ The valid commands are as follows. All arguments are shown here as <argname>.
 The integer arguments are read with Python's int() function, so should be
 prefixed with "0x" if they are hexadecimal.
 
-    start                Set the PC to zero and start OTBN
+    start_operation         Start an execution or DMEM/IMEM secure wipe
 
-    step                 Run one instruction. Print trace information to
-                         stdout.
+    step                    Run one instruction. Print trace information to
+                            stdout.
 
-    load_elf <path>      Load the ELF file at <path>, replacing current
-                         contents of DMEM and IMEM.
+    load_elf <path>         Load the ELF file at <path>, replacing current
+                            contents of DMEM and IMEM.
 
     add_loop_warp <addr> <from> <to>
 
-                         Add a loop warp to the simulation. This will trigger
-                         at address <addr> and will jump from iteration <from>
-                         to iteration <to>.
+                            Add a loop warp to the simulation. This will
+                            trigger at address <addr> and will jump from
+                            iteration <from> to iteration <to>.
 
-    clear_loop_warps     Clear any loop warp rules
+    clear_loop_warps        Clear any loop warp rules
 
-    load_d <path>        Replace the current contents of DMEM with <path>
-                         (read as an array of 32-bit little-endian words)
+    load_d <path>           Replace the current contents of DMEM with <path>
+                            (read as an array of 32-bit little-endian words)
 
-    load_i <path>        Replace the current contents of IMEM with <path>
-                         (read as an array of 32-bit little-endian words)
+    load_i <path>           Replace the current contents of IMEM with <path>
+                            (read as an array of 32-bit little-endian words)
 
-    dump_d <path>        Write the current contents of DMEM to <path> (same
-                         format as for load).
+    dump_d <path>           Write the current contents of DMEM to <path> (same
+                            format as for load).
 
-    print_regs           Write the contents of all registers to stdout (in hex)
+    print_regs              Write the hex contents of all registers to stdout
 
-    edn_step             Send 32b RND Data to the model.
+    edn_rnd_step            Send 32b RND Data to the model.
 
-    edn_rnd_cdc_done     Finish the RND data write process by signalling RTL
-                         is also finished processing 32b packages from EDN.
+    edn_rnd_cdc_done        Finish the RND data write process by signalling RTL
+                            is also finished processing 32b packages from EDN.
 
-    invalidate_imem      Mark all of IMEM as having invalid ECC checksums
+    edn_urnd_step           Send 32b URND seed data to the model.
 
+    edn_urnd_cdc_done       Finish the URND resseding process by signalling RTL
+                            is also finished processing 32b packages from EDN
+                            and set the seed.
+
+    edn_flush               Flush EDN data from model because of reset signal
+                            in EDN clock domain
+
+    otp_key_cdc_done        Lowers the request flag for any external secure
+                            wipe operation. Gets called when we acknowledge
+                            incoming scrambling key in RTL.
+
+    invalidate_imem         Mark all of IMEM as having invalid ECC checksums
+
+    invalidate_dmem         Mark all of DMEM as having invalid ECC checksums
+
+    set_keymgr_value        Send keymgr data to the model.
+
+    step_crc                Step CRC function with 48 bits of data. No actual
+                            change of state (this is pure, but handled in
+                            Python to simplify verification).
+
+    send_err_escalation     React to an injected error.
+
+    send_stall_request      Make the model stall instead of retiring the next
+                            instruction. In case there is a pending halt, the
+                            stall request is ignored except if it is enforced.
+
+    set_software_errs_fatal Set software_errs_fatal bit.
+
+    set_wfi_enabled         Set the wfi_enabled bit.
+
+    wfi_resume              Resume a wfi instruction that is paused (the host
+                            has issued the RESUME command).
 '''
 
+import binascii
 import sys
 from typing import List, Optional
 
 from sim.decode import decode_file
-from sim.elf import load_elf
+from sim.load_elf import load_elf
 from sim.sim import OTBNSim
 
 
@@ -65,7 +99,8 @@ def read_word(arg_name: str, word_data: str, bits: int) -> int:
                          .format(word_data, arg_name)) from None
 
     if value < 0 or value >> bits:
-        raise ValueError('<{}> argument is {!r}: not representable in {!r} bits.'
+        raise ValueError('<{}> argument is {!r}: '
+                         'not representable in {!r} bits.'
                          .format(arg_name, word_data, bits))
 
     return value
@@ -77,43 +112,89 @@ def end_command() -> None:
     sys.stdout.flush()
 
 
-def on_start(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    '''Jump to an address given as the (only) argument and start running'''
-    if len(args) != 0:
-        raise ValueError('start expects zero arguments. Got {}.'.format(args))
+def check_arg_count(cmd: str, cnt: int, args: List[str]) -> None:
+    if len(args) != cnt:
+        if cnt == 0:
+            txt_cnt = 'no arguments'
+        elif cnt == 1:
+            txt_cnt = 'exactly one argument'
+        else:
+            txt_cnt = f'exactly {cnt} arguments'
 
-    print('START')
-    sim.state.ext_regs.commit()
-    sim.start(collect_stats=False)
+        raise ValueError(f'{cmd} expects {txt_cnt} arguments. Got {args}.')
+
+
+def on_start_operation(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('start_operation', 1, args)
+    command = args[0]
+
+    if command == 'Execute':
+        print('START')
+        sim.start(collect_stats=False)
+    elif command == 'DmemWipe':
+        sim.start_mem_wipe(False)
+    elif command == 'ImemWipe':
+        sim.start_mem_wipe(True)
+    else:
+        raise ValueError(f'Invalid command for start_operation: {command}.')
 
     return None
 
 
 def on_step(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Step one instruction'''
-    if len(args):
-        raise ValueError('step expects zero arguments. Got {}.'
-                         .format(args))
+    check_arg_count('step', 0, args)
 
     pc = sim.state.pc
     assert 0 == pc & 3
 
+    was_wiping = sim.state.wiping()
+
     insn, changes = sim.step(verbose=False)
 
-    print('STALL' if insn is None else insn.rtl_trace(pc))
-    for change in changes:
-        entry = change.rtl_trace()
-        if entry is not None:
-            print(entry)
+    if insn is not None:
+        hdr = insn.rtl_trace(pc)  # type: Optional[str]
+    elif was_wiping:
+        # The trailing space is a bit naff but matches the behaviour in the RTL
+        # tracer, where it's rather difficult to change.
+        done_last_round = (sim.state.wipe_rounds_done == 2)
+        hdr = 'V ' if done_last_round else 'U '
+    elif sim.state.executing():
+        hdr = 'STALL'
+    else:
+        hdr = None
+
+    # When locking immediately, drop headers that get cancelled by RTL.
+    if sim.state.lock_immediately and hdr in ['V ', 'STALL']:
+        hdr = None
+
+    rtl_changes = []
+    for c in changes:
+        rt = c.rtl_trace()
+        if rt is not None:
+            rtl_changes.append(rt)
+
+    # This is a bit of a hack. Very occasionally, we'll see traced changes when
+    # there's not actually an instruction in flight. For example, this happens
+    # if there's a RND request still pending when an operation stops. In this
+    # case, we might see a change where we drop the REQ signal after the secure
+    # wipe has finished. Rather than define a special "do-nothing" trace entry
+    # format for this situation, we cheat and use STALL.
+    if hdr is None and rtl_changes:
+        hdr = 'STALL'
+
+    if hdr is not None:
+        print(hdr)
+        for rt in rtl_changes:
+            print(rt)
 
     return None
 
 
 def on_load_elf(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Load contents of ELF at path given by only argument'''
-    if len(args) != 1:
-        raise ValueError('load_elf expects exactly 1 argument. Got {}.'
-                         .format(args))
+    check_arg_count('load_elf', 1, args)
+
     path = args[0]
 
     print('LOAD_ELF {!r}'.format(path))
@@ -124,9 +205,7 @@ def on_load_elf(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_add_loop_warp(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Add a loop warp to the simulation'''
-    if len(args) != 3:
-        raise ValueError('add_loop_warp expects exactly 3 arguments. Got {}.'
-                         .format(args))
+    check_arg_count('add_loop_warp', 3, args)
 
     try:
         addr = int(args[0], 0)
@@ -150,9 +229,7 @@ def on_add_loop_warp(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_clear_loop_warps(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Run until ecall or error'''
-    if len(args):
-        raise ValueError('clear_loop_warps expects zero arguments. Got {}.'
-                         .format(args))
+    check_arg_count('clear_loop_warps', 0, args)
 
     sim.loop_warps = {}
 
@@ -161,23 +238,21 @@ def on_clear_loop_warps(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_load_d(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Load contents of data memory from file at path given by only argument'''
-    if len(args) != 1:
-        raise ValueError('load_d expects exactly 1 argument. Got {}.'
-                         .format(args))
+    check_arg_count('load_d', 1, args)
+
     path = args[0]
 
     print('LOAD_D {!r}'.format(path))
     with open(path, 'rb') as handle:
-        sim.load_data(handle.read())
+        sim.load_data(handle.read(), has_validity=True)
 
     return None
 
 
 def on_load_i(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Load contents of insn memory from file at path given by only argument'''
-    if len(args) != 1:
-        raise ValueError('load_i expects exactly 1 argument. Got {}.'
-                         .format(args))
+    check_arg_count('load_i', 1, args)
+
     path = args[0]
 
     print('LOAD_I {!r}'.format(path))
@@ -188,9 +263,8 @@ def on_load_i(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_dump_d(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Dump contents of data memory to file at path given by only argument'''
-    if len(args) != 1:
-        raise ValueError('dump_d expects exactly 1 argument. Got {}.'
-                         .format(args))
+    check_arg_count('dump_d', 1, args)
+
     path = args[0]
 
     print('DUMP_D {!r}'.format(path))
@@ -203,9 +277,7 @@ def on_dump_d(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_print_regs(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Print registers to stdout'''
-    if len(args):
-        raise ValueError('print_regs expects zero arguments. Got {}.'
-                         .format(args))
+    check_arg_count('print_regs', 0, args)
 
     print('PRINT_REGS')
     for idx, value in enumerate(sim.state.gprs.peek_unsigned_values()):
@@ -218,9 +290,7 @@ def on_print_regs(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
 
 def on_print_call_stack(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     '''Print call stack to stdout. First element is the bottom of the stack'''
-    if len(args):
-        raise ValueError('print_call_stack expects zero arguments. Got {}.'
-                         .format(args))
+    check_arg_count('print_call_stack', 0, args)
 
     print('PRINT_CALL_STACK')
     for value in sim.state.peek_call_stack():
@@ -229,70 +299,154 @@ def on_print_call_stack(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
     return None
 
 
-def on_edn_step(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    if len(args) != 1:
-        raise ValueError('edn_step expects exactly 1 argument. Got {}.'
-                         .format(args))
+def on_reset(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('reset', 0, args)
+    return OTBNSim()
 
-    edn_rnd_data = read_word('edn_step', args[0], 32)
 
-    sim.state.step_edn(edn_rnd_data)
+def on_edn_rnd_step(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('edn_rnd_step', 2, args)
+    edn_rnd_data = read_word('edn_rnd_step', args[0], 32)
+    fips_err = read_word('fips_err', args[1], 1)
+    sim.state.edn_rnd_step(edn_rnd_data, bool(fips_err))
+    return None
 
+
+def on_edn_urnd_step(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('edn_urnd_step', 1, args)
+    edn_urnd_data = read_word('edn_urnd_step', args[0], 32)
+    sim.state.edn_urnd_step(edn_urnd_data)
+    return None
+
+
+def on_edn_flush(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('edn_flush', 0, args)
+    sim.state.edn_flush()
+    return None
+
+
+def on_edn_urnd_cdc_done(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('urnd_cdc_done', 0, args)
+    sim.urnd_completed()
     return None
 
 
 def on_edn_rnd_cdc_done(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    if len(args) != 0:
-        raise ValueError('edn_rnd_cdc_done expects zero arguments. Got {}.'
-                         .format(args))
-
+    check_arg_count('edn_rnd_cdc_done', 0, args)
     sim.state.rnd_completed()
-
-    return None
-
-
-def on_edn_urnd_reseed_complete(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    if args:
-        raise ValueError('edn_urnd_reseed_complete expects zero arguments. Got {}.'
-                         .format(args))
-
-    # TODO: The set_urnd_reseed_complete() method asserts that we are in state
-    # PRE_EXEC when it is called. However, when the model is used in a
-    # system-level simulation, the edn_urnd_data_valid_i input (which
-    # eventually causes this to be called) is unconditionally true.
-    #
-    # Removing the assertion would drop the check that we only leave PRE_EXEC
-    # by calling this function, so we don't really want to do that. Instead,
-    # let's probe an internal field to keep everything working. This should be
-    # sorted out as part of implementing URND in the ISS properly (at which
-    # point, we should be able to pass the equivalent of edn_urnd_data_valid_i
-    # properly).
-    if not sim.state._urnd_reseed_complete:
-        sim.state.set_urnd_reseed_complete()
-
     return None
 
 
 def on_invalidate_imem(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    if args:
-        raise ValueError('invalidate_imem expects zero arguments. Got {}.'
-                         .format(args))
+    check_arg_count('invalidate_imem', 0, args)
 
-    sim.state.invalidated_imem = True
+    sim.state.invalidate_imem()
+    return None
+
+
+def on_invalidate_dmem(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('invalidate_dmem', 0, args)
+
+    sim.state.dmem.invalidate_dmem()
+    return None
+
+
+def on_set_software_errs_fatal(sim: OTBNSim,
+                               args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('set_software_errs_fatal', 1, args)
+    new_val = read_word('error', args[0], 1)
+    assert new_val in [0, 1]
+    sim.state.software_errs_fatal = new_val != 0
 
     return None
 
 
-def on_reset(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
-    if args:
-        raise ValueError('reset expects zero arguments. Got {}.'
-                         .format(args))
+def on_set_wfi_enabled(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('set_wfi_enabled', 1, args)
+    new_val = read_word('enabled', args[0], 1)
+    assert new_val in [0, 1]
+    sim.state.wfi_enabled = new_val != 0
 
-    return OTBNSim()
+    return None
+
+
+def on_wfi_resume(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('wfi_resume', 0, args)
+    sim.state.request_wfi_resume()
+
+    return None
+
+
+def on_set_urnd_ctrl_enabled(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('set_urnd_ctrl_enabled', 1, args)
+    new_val = read_word('enabled', args[0], 1)
+    assert new_val in [0, 1]
+    sim.state.urnd_ctrl_enabled = new_val != 0
+
+    return None
+
+
+def on_set_keymgr_value(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('set_keymgr_value', 3, args)
+    key0 = read_word('key0', args[0], 512)
+    key1 = read_word('key1', args[1], 512)
+    valid = read_word('valid', args[2], 1) == 1
+    sim.state.wsrs.set_sideload_keys(key0 if valid else None,
+                                     key1 if valid else None)
+
+    return None
+
+
+def on_step_crc(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('step_crc', 2, args)
+
+    item = read_word('item', args[0], 48)
+    state = read_word('state', args[1], 32)
+
+    new_state = binascii.crc32(item.to_bytes(6, 'little'), state)
+    print(f'! otbn.LOAD_CHECKSUM: 0x{new_state:08x}')
+
+    return None
+
+
+def on_send_err_escalation(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('send_err_escalation', 2, args)
+    err_val = read_word('err_val', args[0], 32)
+    lock_immediately = bool(read_word('lock_immediately', args[1], 1))
+    sim.send_err_escalation(err_val, lock_immediately)
+    return None
+
+
+def on_send_stall_request(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('send_stall_request', 1, args)
+    enforced = bool(read_word('enforced', args[0], 1))
+    sim.send_stall_request(enforced)
+    return None
+
+
+def on_set_rma_req(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('set_rma_req', 1, args)
+    rma_req = read_word('rma_req', args[0], 4)
+    sim.set_rma_req(rma_req)
+    return None
+
+
+def on_initial_secure_wipe(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('initial_secure_wipe', 0, args)
+    sim.initial_secure_wipe()
+    return None
+
+
+def on_otp_cdc_done(sim: OTBNSim, args: List[str]) -> Optional[OTBNSim]:
+    check_arg_count('otp_key_cdc_done', 0, args)
+
+    sim.on_otp_cdc_done()
+    return None
 
 
 _HANDLERS = {
-    'start': on_start,
+    'start_operation': on_start_operation,
+    'otp_key_cdc_done': on_otp_cdc_done,
     'step': on_step,
     'load_elf': on_load_elf,
     'add_loop_warp': on_add_loop_warp,
@@ -303,10 +457,23 @@ _HANDLERS = {
     'print_regs': on_print_regs,
     'print_call_stack': on_print_call_stack,
     'reset': on_reset,
-    'edn_step': on_edn_step,
+    'edn_rnd_step': on_edn_rnd_step,
+    'edn_urnd_step': on_edn_urnd_step,
     'edn_rnd_cdc_done': on_edn_rnd_cdc_done,
-    'edn_urnd_reseed_complete': on_edn_urnd_reseed_complete,
-    'invalidate_imem': on_invalidate_imem
+    'edn_urnd_cdc_done': on_edn_urnd_cdc_done,
+    'edn_flush': on_edn_flush,
+    'invalidate_imem': on_invalidate_imem,
+    'invalidate_dmem': on_invalidate_dmem,
+    'set_keymgr_value': on_set_keymgr_value,
+    'step_crc': on_step_crc,
+    'send_err_escalation': on_send_err_escalation,
+    'send_stall_request': on_send_stall_request,
+    'set_rma_req': on_set_rma_req,
+    'initial_secure_wipe': on_initial_secure_wipe,
+    'set_software_errs_fatal': on_set_software_errs_fatal,
+    'set_wfi_enabled': on_set_wfi_enabled,
+    'wfi_resume': on_wfi_resume,
+    'set_urnd_ctrl_enabled': on_set_urnd_ctrl_enabled,
 }
 
 

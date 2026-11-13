@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,7 +9,9 @@ package scan_role_pkg;
 
   import prim_pad_wrapper_pkg::*;
 
+  parameter scan_role_e DioPadAstMiscScanRole         = NoScan;
   parameter scan_role_e DioPadPorNScanRole            = NoScan;
+  parameter scan_role_e DioPadPoraNScanRole           = NoScan;
   parameter scan_role_e DioPadSpiHostD0ScanRole       = NoScan;
   parameter scan_role_e DioPadSpiHostD1ScanRole       = NoScan;
   parameter scan_role_e DioPadSpiHostD2ScanRole       = NoScan;
@@ -20,16 +22,13 @@ package scan_role_pkg;
   parameter scan_role_e DioPadSpiDevD1ScanRole        = NoScan;
   parameter scan_role_e DioPadSpiDevD2ScanRole        = NoScan;
   parameter scan_role_e DioPadSpiDevD3ScanRole        = NoScan;
-  parameter scan_role_e DioPadSpiDevClkScanRole       = NoScan;
+  parameter scan_role_e DioPadSpiDevClkScanRole       = ScanClock;
   parameter scan_role_e DioPadSpiDevCsLScanRole       = NoScan;
   parameter scan_role_e DioPadUsbPScanRole            = NoScan;
   parameter scan_role_e DioPadUsbNScanRole            = NoScan;
   parameter scan_role_e DioPadCc1ScanRole             = NoScan;
   parameter scan_role_e DioPadCc2ScanRole             = NoScan;
-  parameter scan_role_e DioPadFlashTestVoltScanRole   = NoScan;
-  parameter scan_role_e DioPadFlashTestMode0ScanRole  = NoScan;
-  parameter scan_role_e DioPadFlashTestMode1ScanRole  = NoScan;
-  parameter scan_role_e DioPadOtpExtVoltScanRole      = NoScan;
+  parameter scan_role_e DioPadRramAnalogScanRole      = NoScan;
   parameter scan_role_e DioPadIor8ScanRole            = NoScan;
   parameter scan_role_e DioPadIor9ScanRole            = NoScan;
   parameter scan_role_e MioPadIoa0ScanRole            = NoScan;

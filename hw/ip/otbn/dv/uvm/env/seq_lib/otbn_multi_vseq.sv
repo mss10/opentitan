@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -18,6 +18,10 @@ class otbn_multi_vseq extends otbn_base_vseq;
       100    :/ 2
     };
   }
+
+  // This bit dictates if end address check should happen or not. Set it to 0 if the check needs to
+  // be disabled.
+  bit do_end_addr_check = 1;
 
   `uvm_object_new
 
@@ -46,7 +50,7 @@ class otbn_multi_vseq extends otbn_base_vseq;
         end
       join
 
-      run_otbn();      
+      run_otbn(do_end_addr_check);
     end
   endtask
 

@@ -1,11 +1,11 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // N:1 SRAM arbiter
 //
 // Parameter
-//  N:  Number of requst port
+//  N:  Number of request ports
 //  DW: Data width (SECDED is not included)
 //  Aw: Address width
 //  ArbiterImpl: can be either PPC or BINTREE.
@@ -126,9 +126,10 @@ module prim_sram_arbiter #(
 
   // Request FIFO
   prim_fifo_sync #(
-    .Width    (N),
-    .Pass     (1'b0),
-    .Depth    (4)        // Assume at most 4 pipelined
+    .Width       (N),
+    .Pass        (1'b0),
+    .Depth       (4),       // Assume at most 4 pipelined
+    .NeverClears (1'b1)
   ) u_req_fifo (
     .clk_i,
     .rst_ni,
@@ -140,7 +141,8 @@ module prim_sram_arbiter #(
     .rready_i (sram_ack),
     .rdata_o  (steer),
     .full_o   (),
-    .depth_o  ()     // Not used
+    .depth_o  (),     // Not used
+    .err_o    ()
   );
 
   assign rsp_rvalid_o = steer & {N{sram_rvalid_i}};

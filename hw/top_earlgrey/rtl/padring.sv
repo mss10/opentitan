@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -17,6 +17,8 @@ module padring
   parameter pad_type_e [NDioPads-1:0] DioPadType = {NDioPads{BidirStd}},
   parameter pad_type_e [NMioPads-1:0] MioPadType = {NMioPads{BidirStd}},
   // Only used for ASIC target
+  parameter pad_orient_e [NDioPads-1:0] DioPadOrient = {NDioPads{OrientH}},
+  parameter pad_orient_e [NMioPads-1:0] MioPadOrient = {NMioPads{OrientH}},
   parameter bit PhysicalPads = 0,
   parameter int NIoBanks = 4,
   parameter logic [NDioPads-1:0][$clog2(NIoBanks):0] DioPadBank = '0,
@@ -26,7 +28,7 @@ module padring
 ) (
   // This is only used for scan
   input                           clk_scan_i,
-  lc_ctrl_pkg::lc_tx_t            scanmode_i,
+  prim_mubi_pkg::mubi4_t          scanmode_i,
   // RAW outputs used for DFT and infrastructure
   // purposes (e.g. external muxed clock)
   output logic     [NDioPads-1:0] dio_in_raw_o,
@@ -50,15 +52,16 @@ module padring
   pad_pok_t [NIoBanks-1:0] pad_pok;
 
   logic scanmode;
-  prim_lc_dec u_prim_lc_dec (
-    .lc_en_i     ( scanmode_i ),
-    .lc_en_dec_o ( scanmode   )
+  prim_mubi4_dec u_prim_mubi4_dec (
+    .mubi_i     ( scanmode_i ),
+    .mubi_dec_o ( scanmode   )
   );
 
   for (genvar k = 0; k < NDioPads; k++) begin : gen_dio_pads
     prim_pad_wrapper #(
-      .PadType  ( DioPadType[k]  ),
-      .ScanRole ( DioScanRole[k] )
+      .PadType  ( DioPadType[k]   ),
+      .PadOrient( DioPadOrient[k] ),
+      .ScanRole ( DioScanRole[k]  )
     ) u_dio_pad (
       .clk_scan_i,
       .scanmode_i ( scanmode                 ),
@@ -69,6 +72,8 @@ module padring
       // This is currently not dynamically controlled.
       // However, this may change in the future if the
       // need arises (e.g. as part of to power sequencing).
+      // Orthogonal to this pin, the input can be disabled
+      // by setting `attr_i.input_disable` to 1.
       .ie_i       ( 1'b1                     ),
       .out_i      ( dio_out_i[k]             ),
       .oe_i       ( dio_oe_i[k]              ),
@@ -78,8 +83,9 @@ module padring
 
   for (genvar k = 0; k < NMioPads; k++) begin : gen_mio_pads
     prim_pad_wrapper #(
-      .PadType  ( MioPadType[k]  ),
-      .ScanRole ( MioScanRole[k] )
+      .PadType  ( MioPadType[k]   ),
+      .PadOrient( MioPadOrient[k] ),
+      .ScanRole ( MioScanRole[k]  )
     ) u_mio_pad (
       .clk_scan_i,
       .scanmode_i ( scanmode                 ),
@@ -90,6 +96,8 @@ module padring
       // This is currently not dynamically controlled.
       // However, this may change in the future if the
       // need arises (e.g. as part of to power sequencing).
+      // Orthogonal to this pin, the input can be disabled
+      // by setting `attr_i.input_disable` to 1.
       .ie_i       ( 1'b1                     ),
       .out_i      ( mio_out_i[k]             ),
       .oe_i       ( mio_oe_i[k]              ),

@@ -1,14 +1,16 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // ------------------- W A R N I N G: A U T O - G E N E R A T E D   C O D E !! -------------------//
 // PLEASE DO NOT HAND-EDIT THIS FILE. IT HAS BEEN AUTO-GENERATED WITH THE FOLLOWING COMMAND:
 //
-//    hw/ip/prim/util/generate_prim_mubi.py
+//    util/design/gen-mubi.py
 //
 // This package defines common multibit signal types, active high and active low values and
 // the corresponding functions to test whether the values are set or not.
+
+`include "prim_assert.sv"
 
 package prim_mubi_pkg;
 
@@ -27,22 +29,34 @@ from mubi import prim_mubi
   typedef enum logic [MuBi${nbits}Width-1:0] {
     MuBi${nbits}True = ${nbits}'h${prim_mubi.mubi_value_as_hexstr(True, nbits)}, // enabled
     MuBi${nbits}False = ${nbits}'h${prim_mubi.mubi_value_as_hexstr(False, nbits)}  // disabled
-  } mubi${nbits}_e;
+  } mubi${nbits}_t;
 
-  // make a typedef such that this can be used as an intersignal type as well
-  typedef mubi${nbits}_e mubi${nbits}_t;
+  // This is a prerequisite for the multibit functions below to work.
+  `ASSERT_STATIC_IN_PACKAGE(CheckMuBi${nbits}ValsComplementary_A, MuBi${nbits}True == ~MuBi${nbits}False)
 
-  // Test whether the value is supplied is one of the valid enumerations
-  function automatic logic mubi${nbits}_test_invalid(mubi${nbits}_e val);
+  // Test whether the multibit value is one of the valid enumerations
+  function automatic logic mubi${nbits}_test_invalid(mubi${nbits}_t val);
     return ~(val inside {MuBi${nbits}True, MuBi${nbits}False});
   endfunction : mubi${nbits}_test_invalid
 
-  // Test whether the multibit value signals an "enabled" condition.
+  // Convert a 1 input value to a mubi output
+  function automatic mubi${nbits}_t mubi${nbits}_bool_to_mubi(logic val);
+    return (val ? MuBi${nbits}True : MuBi${nbits}False);
+  endfunction : mubi${nbits}_bool_to_mubi
+
+  // Test whether the multibit value of type "mubi${nbits}_t" signals an "enabled" condition.
   // The strict version of this function requires
   // the multibit value to equal True.
   function automatic logic mubi${nbits}_test_true_strict(mubi${nbits}_t val);
     return MuBi${nbits}True == val;
   endfunction : mubi${nbits}_test_true_strict
+
+  // Test whether the multibit value of type "logic vector" signals an "enabled" condition.
+  // The strict version of this function requires
+  // the multibit value to equal True.
+  function automatic logic mubi${nbits}_logic_test_true_strict(logic [${nbits-1}:0] val);
+    return MuBi${nbits}True == val;
+  endfunction : mubi${nbits}_logic_test_true_strict
 
   // Test whether the multibit value signals a "disabled" condition.
   // The strict version of this function requires
@@ -140,7 +154,7 @@ from mubi import prim_mubi
   endfunction : mubi${nbits}_or_lo
 
   // Performs a logical AND operation between two multibit values.
-  // Tlos treats "False" as logical 1, and all other values are
+  // This treats "False" as logical 1, and all other values are
   // treated as 0.
   function automatic mubi${nbits}_t mubi${nbits}_and_lo(mubi${nbits}_t a, mubi${nbits}_t b);
     return mubi${nbits}_and(a, b, MuBi${nbits}False);

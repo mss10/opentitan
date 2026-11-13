@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -240,10 +240,16 @@ class Model:
         csrs.touch_range(0x7d0, 8)  # MOD0 - MOD7
         csrs.touch_addr(0x7d8)      # RND_PREFETCH
         csrs.touch_addr(0xfc0)      # RND
+        csrs.touch_addr(0xfc1)      # URND
 
         wsrs.touch_addr(0x0)        # MOD
         wsrs.touch_addr(0x1)        # RND
+        wsrs.touch_addr(0x2)        # URND
         wsrs.touch_addr(0x3)        # ACC
+        wsrs.touch_addr(0x4)        # KEY_S0_L
+        wsrs.touch_addr(0x5)        # KEY_S0_H
+        wsrs.touch_addr(0x6)        # KEY_S1_L
+        wsrs.touch_addr(0x7)        # KEY_S1_H
 
         # The current PC (the address of the next instruction that needs
         # generating)
@@ -672,7 +678,8 @@ class Model:
                             for idx, value in indices
                             if value % base_align == 0]
 
-            # If there are no known aligned indices for this operand, give up now.
+            # If there are no known aligned indices for this operand, give up
+            # now.
             if not aligned_regs:
                 return None
 
@@ -756,8 +763,9 @@ class Model:
         if src_val is None:
             result = None
         else:
-            # op_vals[2] is the immediate, but is already "encoded" as an unsigned
-            # value. Turn it back into the signed operand that actually gets added.
+            # op_vals[2] is the immediate, but is already "encoded" as an
+            # unsigned value. Turn it back into the signed operand that
+            # actually gets added.
             imm_op = insn.operands[2]
             imm_val = imm_op.op_type.enc_val_to_op_val(op_vals[2], self.pc)
             assert imm_val is not None
@@ -815,7 +823,7 @@ class Model:
         if not exp_shape:
             raise RuntimeError('Unexpected shape for bn.lid')
 
-        grd, grs1, offset, grs1_inc, grd_inc = op_vals
+        grd, grs1, _offset, grs1_inc, grd_inc = op_vals
         grd_val = self.get_reg('gpr', grd)
         grs1_val = self.get_reg('gpr', grs1)
 
@@ -857,7 +865,7 @@ class Model:
         if not exp_shape:
             raise RuntimeError('Unexpected shape for bn.sid')
 
-        grs1, grs2, offset, grs1_inc, grs2_inc = op_vals
+        grs1, grs2, _offset, grs1_inc, grs2_inc = op_vals
         grs1_val = self.get_reg('gpr', grs1)
         grs2_val = self.get_reg('gpr', grs2)
 

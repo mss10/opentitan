@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,8 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/rv_timer/doc/">RV Timer</a> Device Interface Functions
+ * @brief <a href="/book/hw/ip/rv_timer/">RV Timer</a> Device Interface
+ * Functions
  */
 
 #include <stdint.h>
@@ -35,7 +36,7 @@ typedef struct dif_rv_timer_tick_params {
    * respectively.
    *
    * For example, if the clock frequency is 50 MHz, and the desired tick
-   * period is is 1 microsecond, i.e, a tick frequency of 1 MHz, then the
+   * period is 1 microsecond, i.e, a tick frequency of 1 MHz, then the
    * prescaler should be:
    *
    * (50 * 10^6) * (1 * 10^-6) - 1 = 49
@@ -80,6 +81,7 @@ typedef struct dif_rv_timer_tick_params {
  *         counter frequency.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_approximate_tick_params(
     uint64_t clock_freq, uint64_t counter_freq,
     dif_rv_timer_tick_params_t *out);
@@ -91,6 +93,7 @@ dif_result_t dif_rv_timer_approximate_tick_params(
  * @param timer A timer device.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_reset(const dif_rv_timer_t *timer);
 
 /**
@@ -106,6 +109,7 @@ dif_result_t dif_rv_timer_reset(const dif_rv_timer_t *timer);
  * @param params The timing parameters.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_set_tick_params(const dif_rv_timer_t *timer,
                                           uint32_t hart_id,
                                           dif_rv_timer_tick_params_t params);
@@ -121,6 +125,7 @@ dif_result_t dif_rv_timer_set_tick_params(const dif_rv_timer_t *timer,
  * @param state The new enablement state.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_counter_set_enabled(const dif_rv_timer_t *timer,
                                               uint32_t hart_id,
                                               dif_toggle_t state);
@@ -133,6 +138,7 @@ dif_result_t dif_rv_timer_counter_set_enabled(const dif_rv_timer_t *timer,
  * @param[out] out The counter value.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_counter_read(const dif_rv_timer_t *timer,
                                        uint32_t hart_id, uint64_t *out);
 
@@ -144,6 +150,7 @@ dif_result_t dif_rv_timer_counter_read(const dif_rv_timer_t *timer,
  * @param count The counter value to write.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_counter_write(const dif_rv_timer_t *timer,
                                         uint32_t hart_id, uint64_t count);
 
@@ -175,6 +182,7 @@ dif_result_t dif_rv_timer_counter_write(const dif_rv_timer_t *timer,
  * @param threshold The value to go off at.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_rv_timer_arm(const dif_rv_timer_t *timer, uint32_t hart_id,
                               uint32_t comp_id, uint64_t threshold);
 

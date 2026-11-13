@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,7 @@ class spi_host_virtual_sequencer extends cip_base_virtual_sequencer #(
     .COV_T(spi_host_env_cov)
   );
 
-  spi_sequencer  spi_host_sequencer_h;
+  spi_sequencer  spi_sequencer_h;
 
   `uvm_component_utils(spi_host_virtual_sequencer)
   `uvm_component_new

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,8 +16,9 @@
   csr_update(ral.class``i``_phase2_cyc_shadowed);                         \
   csr_update(ral.class``i``_phase3_cyc_shadowed);
 
-`define RAND_WRITE_CLASS_CTRL(i, lock_bit) \
-  `DV_CHECK_RANDOMIZE_WITH_FATAL(ral.class``i``_ctrl_shadowed, lock.value == lock_bit;)  \
+`define RAND_WRITE_CLASS_CTRL(i, en_bit, lock_bit) \
+  `DV_CHECK_RANDOMIZE_WITH_FATAL(ral.class``i``_ctrl_shadowed, \
+                                 en.value == en_bit; lock.value == lock_bit;)  \
   csr_wr(.ptr(ral.class``i``_ctrl_shadowed), .value(ral.class``i``_ctrl_shadowed.get()));
 
 class alert_handler_base_vseq extends cip_base_vseq #(
@@ -35,6 +36,7 @@ class alert_handler_base_vseq extends cip_base_vseq #(
   `uvm_object_new
 
   virtual task dut_init(string reset_kind = "HARD");
+    cfg.alert_handler_vif.init();
     super.dut_init();
     if (do_alert_handler_init) alert_handler_init();
     config_locked = 0;
@@ -46,11 +48,13 @@ class alert_handler_base_vseq extends cip_base_vseq #(
 
   // setup basic alert_handler features
   // alert_class default 0 -> all alert will trigger interrupt classA
-  virtual task alert_handler_init(bit [NUM_ALERT_CLASSES-1:0]            intr_en = '1,
-                                  bit [NUM_ALERTS-1:0]                   alert_en = '1,
-                                  bit [NUM_ALERT_CLASSES-1:0][TL_DW-1:0] alert_class = 'h0,
-                                  bit [NUM_LOCAL_ALERTS-1:0]             loc_alert_en = '1,
-                                  bit [NUM_ALERT_CLASSES-1:0][TL_DW-1:0] loc_alert_class = 'h0);
+  virtual task alert_handler_init(
+      bit [NUM_ALERT_CLASSES-1:0]                       intr_en = '1,
+      bit [NUM_ALERTS-1:0]                              alert_en = '1,
+      bit [NUM_ALERTS-1:0][NUM_ALERT_CLASSES-1:0]       alert_class = 'h0,
+      bit [NUM_LOCAL_ALERTS-1:0]                        loc_alert_en = '1,
+      bit [NUM_LOCAL_ALERTS-1:0][NUM_ALERT_CLASSES-1:0] loc_alert_class = 'h0);
+
     csr_wr(.ptr(ral.intr_enable), .value(intr_en));
     foreach (alert_en[i])        csr_wr(.ptr(ral.alert_en_shadowed[i]),
                                         .value(alert_en[i]));
@@ -62,12 +66,12 @@ class alert_handler_base_vseq extends cip_base_vseq #(
                                         .value(loc_alert_class[i]));
   endtask
 
-  virtual task alert_handler_rand_wr_class_ctrl(bit [NUM_ALERT_CLASSES-1:0] lock_bit);
-    bit [NUM_ALERT_CLASSES-1:0] class_en = $urandom();
-    if (class_en[0]) `RAND_WRITE_CLASS_CTRL(a, lock_bit[0])
-    if (class_en[1]) `RAND_WRITE_CLASS_CTRL(b, lock_bit[1])
-    if (class_en[2]) `RAND_WRITE_CLASS_CTRL(c, lock_bit[2])
-    if (class_en[3]) `RAND_WRITE_CLASS_CTRL(d, lock_bit[3])
+  virtual task alert_handler_rand_wr_class_ctrl(bit [NUM_ALERT_CLASSES-1:0] lock_bit,
+                                                bit [NUM_ALERT_CLASSES-1:0] class_en);
+    `RAND_WRITE_CLASS_CTRL(a, class_en[0], lock_bit[0])
+    `RAND_WRITE_CLASS_CTRL(b, class_en[1], lock_bit[1])
+    `RAND_WRITE_CLASS_CTRL(c, class_en[2], lock_bit[2])
+    `RAND_WRITE_CLASS_CTRL(d, class_en[3], lock_bit[3])
   endtask
 
   virtual task alert_handler_wr_regwen_regs(bit [NUM_ALERT_CLASSES-1:0] regwen = 0,
@@ -133,10 +137,12 @@ class alert_handler_base_vseq extends cip_base_vseq #(
           if (esc_int_errs[index]) begin
             fork
               begin
-                esc_receiver_esc_rsp_seq esc_seq =
-                    esc_receiver_esc_rsp_seq::type_id::create("esc_seq");
-                `DV_CHECK_RANDOMIZE_WITH_FATAL(esc_seq, int_err == 1; standalone_int_err == 1;
-                                               ping_timeout == 0;)
+                esc_receiver_base_seq esc_seq = esc_receiver_base_seq::type_id::create("esc_seq");
+                if (!esc_seq.randomize() with {
+                       int_err == 1; standalone_int_err == 1; ping_timeout == 0;
+                     }) begin
+                  `uvm_fatal(get_full_name(), "Failed to randomize esc_seq.")
+                end
                 esc_seq.start(p_sequencer.esc_device_seqr_h[index]);
               end
             join_none
@@ -148,11 +154,15 @@ class alert_handler_base_vseq extends cip_base_vseq #(
   endtask
 
   // alert_handler scb will compare the read value with expected value
-  // Not using "clear_all_interrupts" function in cip_base_vseq because of the signal interity
+  // Not using "clear_all_interrupts" function in cip_base_vseq because of the signal integrity
   // error: after clearing intr_state, intr_state might come back to 1 in the next cycle.
   virtual task check_alert_interrupts();
     bit [TL_DW-1:0] intr;
+    // Wait until there is no ping handshake.
+    // This will avoid the case where interrupt is set and cleared at the same cycle.
+    `DV_WAIT((cfg.alert_handler_vif.alert_ping_reqs || cfg.alert_handler_vif.esc_ping_reqs) == 0)
     csr_rd(.ptr(ral.intr_state), .value(intr));
+    `DV_WAIT((cfg.alert_handler_vif.alert_ping_reqs || cfg.alert_handler_vif.esc_ping_reqs) == 0)
     csr_wr(.ptr(ral.intr_state), .value('1));
   endtask
 
@@ -198,7 +208,9 @@ class alert_handler_base_vseq extends cip_base_vseq #(
 
   virtual task wait_alert_handshake_done();
     cfg.clk_rst_vif.wait_clks(2);
-    foreach (cfg.alert_host_cfg[i]) cfg.alert_host_cfg[i].vif.wait_ack_complete();
+    foreach (cfg.alert_host_cfg[i]) begin
+      if (!cfg.alert_host_cfg[i].en_alert_lpg) cfg.alert_host_cfg[i].vif.wait_ack_complete();
+    end
   endtask
 
   virtual function bit check_esc_done(bit[TL_DW-1:0] vals[$]);
@@ -253,6 +265,31 @@ class alert_handler_base_vseq extends cip_base_vseq #(
     join
   endtask
 
+  function void enable_lpg_group(bit [NUM_ALERTS-1:0] alert_en_i);
+    foreach (alert_en_i[i]) begin
+      if (alert_en_i[i]) set_alert_lpg(i);
+    end
+  endfunction
+
+  // Enable alert's LPG based on alert_i input.
+  //
+  // Only enable this alert's LPG if the lgp input `lpg_cg_en` or `lpg_rst_en` if not Mubi4True.
+  // Because one LPG will turn off a set of alert sensors. So this task will also set all LPG's
+  // alert_host_cfgs' `en_alert_lpg` to 1.
+  virtual function void set_alert_lpg(int alert_i);
+    int       lpg_i = alert_handler_reg_pkg::LpgMap[alert_i];
+    bit [1:0] set_lpg;
+
+    if (cfg.alert_handler_vif.get_lpg_status(lpg_i) == 0) begin
+      `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(set_lpg, set_lpg > 0;);
+      if (set_lpg[0]) cfg.alert_handler_vif.set_lpg_cg_en(lpg_i);
+      if (set_lpg[1]) cfg.alert_handler_vif.set_lpg_rst_en(lpg_i);
+      foreach (alert_handler_reg_pkg::LpgMap[i]) begin
+        if (alert_handler_reg_pkg::LpgMap[i] == lpg_i) cfg.alert_host_cfg[i].en_alert_lpg = 1;
+      end
+    end
+  endfunction
+
   virtual task alert_handler_crashdump_phases(bit [1:0] classa_phase = $urandom(),
                                               bit [1:0] classb_phase = $urandom(),
                                               bit [1:0] classc_phase = $urandom(),
@@ -302,31 +339,25 @@ class alert_handler_base_vseq extends cip_base_vseq #(
         forever begin
           bit esc_int_err      = esc_int_errs[index]      ? $urandom_range(0, 1) : 0;
           bit ping_timeout_err = ping_timeout_errs[index] ? $urandom_range(0, 1) : 0;
-          esc_receiver_esc_rsp_seq esc_seq =
-              esc_receiver_esc_rsp_seq::type_id::create("esc_seq");
-          `DV_CHECK_RANDOMIZE_WITH_FATAL(esc_seq, int_err == esc_int_err; standalone_int_err == 0;
-                                         ping_timeout == ping_timeout_err;)
+          esc_receiver_base_seq esc_seq = esc_receiver_base_seq::type_id::create("esc_seq");
+          if (!esc_seq.randomize() with {
+                 int_err            == local::esc_int_err;
+                 standalone_int_err == 0;
+                 ping_timeout       == local::ping_timeout_err;
+               }) begin
+            `uvm_fatal(get_full_name(), "Failed to randomize esc_seq.")
+          end
           esc_seq.start(p_sequencer.esc_device_seqr_h[index]);
+
+          // The sequence has finished, which either means that we have seen an escalation and sent
+          // a response, or it means that a reset has happened. Watch the agent's configuration to
+          // wait until it is out of reset before starting a sequence to respond to the next
+          // escalation.
+          wait(!cfg.esc_device_cfg[index].in_reset);
         end
       join_none
     end
   endtask
-
-  // This task will response to all alert_ping
-  virtual task run_alert_ping_rsp_seq_nonblocking(bit [NUM_ALERTS-1:0] alert_int_err);
-    foreach (cfg.alert_host_cfg[i]) begin
-      automatic int index = i;
-      fork
-        forever begin
-          bit alert_timeout = alert_int_err[index] ? $urandom_range(0, 1) : 0;
-          alert_sender_ping_rsp_seq ping_seq =
-              alert_sender_ping_rsp_seq::type_id::create("ping_seq");
-          `DV_CHECK_RANDOMIZE_WITH_FATAL(ping_seq, int_err == 0; ping_timeout == alert_timeout;)
-          ping_seq.start(p_sequencer.alert_host_seqr_h[index]);
-        end
-      join_none
-    end
-  endtask : run_alert_ping_rsp_seq_nonblocking
 
 endclass : alert_handler_base_vseq
 

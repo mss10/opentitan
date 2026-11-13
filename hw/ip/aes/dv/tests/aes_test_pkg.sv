@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -25,5 +25,11 @@ package aes_test_pkg;
   `include "aes_config_error_test.sv"
   `include "aes_clear_test.sv"
   `include "aes_alert_reset_test.sv"
-
+  `include "aes_sideload_test.sv"
+  `include "aes_deinit_test.sv"
+  `include "aes_manual_config_err_test.sv"
+  `include "aes_reseed_test.sv"
+  `include "aes_fi_test.sv"
+  `include "aes_ghash_fi_test.sv"
+  `include "aes_gcm_save_restore_test.sv"
 endpackage

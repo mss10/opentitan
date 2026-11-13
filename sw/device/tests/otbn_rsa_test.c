@@ -1,16 +1,15 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "sw/device/lib/dif/dif_otbn.h"
 #include "sw/device/lib/runtime/ibex.h"
 #include "sw/device/lib/runtime/log.h"
-#include "sw/device/lib/runtime/otbn.h"
-#include "sw/device/lib/testing/check.h"
 #include "sw/device/lib/testing/entropy_testutils.h"
-#include "sw/device/lib/testing/test_framework/test_main.h"
-
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
+#include "sw/device/lib/testing/otbn_testutils_rsa.h"
+#include "sw/device/lib/testing/profile.h"
+#include "sw/device/lib/testing/test_framework/check.h"
+#include "sw/device/lib/testing/test_framework/ottf_main.h"
 
 /**
  * End-to-end RSA encryption and decryption test using OTBN.
@@ -66,22 +65,6 @@ static const bool kTestDecrypt = true;
  */
 static const bool kTestRsaGreater1k = false;
 
-OTBN_DECLARE_APP_SYMBOLS(rsa);
-OTBN_DECLARE_PTR_SYMBOL(rsa, mode);
-OTBN_DECLARE_PTR_SYMBOL(rsa, n_limbs);
-OTBN_DECLARE_PTR_SYMBOL(rsa, in);
-OTBN_DECLARE_PTR_SYMBOL(rsa, out);
-OTBN_DECLARE_PTR_SYMBOL(rsa, modulus);
-OTBN_DECLARE_PTR_SYMBOL(rsa, exp);
-
-static const otbn_app_t kOtbnAppRsa = OTBN_APP_T_INIT(rsa);
-static const otbn_ptr_t kOtbnVarRsaMode = OTBN_PTR_T_INIT(rsa, mode);
-static const otbn_ptr_t kOtbnVarRsaNLimbs = OTBN_PTR_T_INIT(rsa, n_limbs);
-static const otbn_ptr_t kOtbnVarRsaIn = OTBN_PTR_T_INIT(rsa, in);
-static const otbn_ptr_t kOtbnVarRsaOut = OTBN_PTR_T_INIT(rsa, out);
-static const otbn_ptr_t kOtbnVarRsaModulus = OTBN_PTR_T_INIT(rsa, modulus);
-static const otbn_ptr_t kOtbnVarRsaExp = OTBN_PTR_T_INIT(rsa, exp);
-
 enum {
   kRsa512SizeBytes = 512 / 8,
   kRsa1024SizeBytes = 1024 / 8,
@@ -90,92 +73,7 @@ enum {
   kRsa4096SizeBytes = 4096 / 8,
 };
 
-const test_config_t kTestConfig = {
-    .can_clobber_uart = false,
-};
-
-/**
- * Encrypts a message with RSA.
- *
- * @param otbn_ctx The OTBN context object.
- * @param modulus The modulus (n).
- * @param in The plaintext message.
- * @param out The encrypted message.
- * @param size_bytes The size of all buffers in bytes, i.e. the key/modulus
- *                   length (i.e. 128 for RSA 1024). Valid range: 32..512 in
- *                   32 byte-steps (i.e. RSA 256 to RSA 4096).
- */
-static void rsa_encrypt(otbn_t *otbn_ctx, const uint8_t *modulus,
-                        const uint8_t *in, uint8_t *out, size_t size_bytes) {
-  CHECK(otbn_ctx != NULL);
-  CHECK(size_bytes % 32 == 0);
-
-  uint32_t n_limbs = size_bytes / 32;
-  CHECK(n_limbs != 0 && n_limbs <= 16);
-
-  // Write input arguments.
-  uint32_t mode = 1;  // mode 1 => encrypt
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, sizeof(mode), &mode,
-                               kOtbnVarRsaMode) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, sizeof(n_limbs), &n_limbs,
-                               kOtbnVarRsaNLimbs) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, size_bytes, modulus,
-                               kOtbnVarRsaModulus) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, size_bytes, in, kOtbnVarRsaIn) ==
-        kOtbnOk);
-
-  // Call OTBN to perform operation, and wait for it to complete.
-  CHECK(otbn_execute(otbn_ctx) == kOtbnOk);
-  CHECK(otbn_busy_wait_for_done(otbn_ctx) == kOtbnOk);
-
-  // Read back results.
-  CHECK(otbn_copy_data_from_otbn(otbn_ctx, size_bytes, kOtbnVarRsaOut, out) ==
-        kOtbnOk);
-}
-
-/**
- * Decrypts a message with RSA.
- *
- * @param otbn_ctx The OTBN context object.
- * @param modulus The modulus (n).
- * @param private_exponent The private exponent (d).
- * @param in The encrypted message.
- * @param out The decrypted (plaintext) message.
- * @param size_bytes The size of all buffers in bytes, i.e. the key/modulus
- *                   length (i.e. 128 for RSA 1024). Valid range: 32..512 in
- *                   32 byte-steps (i.e. RSA 256 to RSA 4096).
- */
-static void rsa_decrypt(otbn_t *otbn_ctx, const uint8_t *modulus,
-                        const uint8_t *private_exponent, const uint8_t *in,
-                        uint8_t *out, size_t size_bytes) {
-  CHECK(otbn_ctx != NULL);
-  CHECK(size_bytes % 32 == 0);
-
-  // Limbs are 256b words.
-  uint32_t n_limbs = size_bytes / 32;
-  CHECK(n_limbs != 0 && n_limbs <= 16);
-
-  // Write input arguments.
-  uint32_t mode = 2;  // mode 2 => decrypt
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, sizeof(mode), &mode,
-                               kOtbnVarRsaMode) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, sizeof(n_limbs), &n_limbs,
-                               kOtbnVarRsaNLimbs) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, size_bytes, modulus,
-                               kOtbnVarRsaModulus) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, size_bytes, private_exponent,
-                               kOtbnVarRsaExp) == kOtbnOk);
-  CHECK(otbn_copy_data_to_otbn(otbn_ctx, size_bytes, in, kOtbnVarRsaIn) ==
-        kOtbnOk);
-
-  // Call OTBN to perform operation
-  CHECK(otbn_execute(otbn_ctx) == kOtbnOk);
-  CHECK(otbn_busy_wait_for_done(otbn_ctx) == kOtbnOk);
-
-  // Read back results.
-  CHECK(otbn_copy_data_from_otbn(otbn_ctx, size_bytes, kOtbnVarRsaOut, out) ==
-        kOtbnOk);
-}
+OTTF_DEFINE_TEST_CONFIG();
 
 /**
  * CHECK()s that the actual data matches the expected data.
@@ -193,34 +91,6 @@ static void check_data(const uint8_t *actual, const uint8_t *expected,
   }
 }
 
-static uint64_t t_start;
-static uint64_t t_end;
-
-/**
- * Starts a profiling section.
- *
- * Call this function at the start of a section that should be profiled, and
- * call `profile_end()` at the end of it to display the results.
- *
- * Profiling section may not overlap, i.e. `profile_start()`/`profile_end()`
- * pairs may not be nested.
- */
-static void profile_start(void) { t_start = ibex_mcycle_read(); }
-
-/**
- * Ends a profiling section.
- *
- * The time since `profile_start()` is printed as log message.
- *
- * @param msg Name of the operation (for logging purposes).
- */
-static void profile_end(const char *msg) {
-  t_end = ibex_mcycle_read();
-  uint32_t cycles = t_end - t_start;
-  uint32_t time_us = cycles / 100;
-  LOG_INFO("%s took %u cycles or %u us @ 100 MHz.", msg, cycles, time_us);
-}
-
 /**
  * Performs a RSA roundtrip test.
  *
@@ -233,40 +103,45 @@ static void profile_end(const char *msg) {
  *
  * @param size_bytes Size of all data arguments/buffers, in bytes.
  * @param modulus The modulus (n).
- * @param private_exponent The private exponent (d).
+ * @param d_share0 First share of the private exponent (d).
+ * @param d_share1 Second share of the private exponent (d).
  * @param in The input data of size `size_bytes`.
  * @param encrypted_expected The encrypted version of `in`.
  * @param out_encrypted Buffer to hold the encrypted data, as produced by OTBN.
  * @param out_decrypted Buffer to hold the decrypted data, as produced by OTBN.
  */
 static void rsa_roundtrip(uint32_t size_bytes, const uint8_t *modulus,
-                          const uint8_t *private_exponent, const uint8_t *in,
-                          const uint8_t *encrypted_expected,
+                          const uint8_t *d_share0, const uint8_t *d_share1,
+                          const uint8_t *in, const uint8_t *encrypted_expected,
                           uint8_t *out_encrypted, uint8_t *out_decrypted) {
-  otbn_t otbn_ctx;
+  dif_otbn_t otbn;
 
   // Initialize
-  profile_start();
-  CHECK(otbn_init(&otbn_ctx, mmio_region_from_addr(
-                                 TOP_EARLGREY_OTBN_BASE_ADDR)) == kOtbnOk);
-  CHECK(otbn_load_app(&otbn_ctx, kOtbnAppRsa) == kOtbnOk);
-  profile_end("Initialization");
+  uint64_t t_start = profile_start();
+  CHECK_DIF_OK(dif_otbn_init_from_dt(kDtOtbn, &otbn));
+  CHECK_STATUS_OK(otbn_testutils_rsa_load(&otbn));
+  profile_end_and_print(t_start, "Initialization");
 
   // Encrypt
   LOG_INFO("Encrypting");
-  profile_start();
-  rsa_encrypt(&otbn_ctx, modulus, in, out_encrypted, size_bytes);
+  t_start = profile_start();
+  CHECK_STATUS_OK(
+      otbn_testutils_rsa_modexp_f4_start(&otbn, modulus, in, size_bytes));
+  CHECK_STATUS_OK(
+      otbn_testutils_rsa_modexp_f4_finalize(&otbn, out_encrypted, size_bytes));
   check_data(out_encrypted, encrypted_expected, size_bytes);
-  profile_end("Encryption");
+  profile_end_and_print(t_start, "Encryption");
 
   if (kTestDecrypt) {
     // Decrypt
     LOG_INFO("Decrypting");
-    profile_start();
-    rsa_decrypt(&otbn_ctx, modulus, private_exponent, encrypted_expected,
-                out_decrypted, size_bytes);
+    t_start = profile_start();
+    CHECK_STATUS_OK(otbn_testutils_rsa_modexp_consttime_start(
+        &otbn, modulus, d_share0, d_share1, encrypted_expected, size_bytes));
+    CHECK_STATUS_OK(otbn_testutils_rsa_modexp_consttime_finalize(
+        &otbn, out_decrypted, size_bytes));
     check_data(out_decrypted, in, size_bytes);
-    profile_end("Decryption");
+    profile_end_and_print(t_start, "Decryption");
   }
 }
 
@@ -279,13 +154,15 @@ static void test_rsa512_roundtrip(void) {
       0x1a, 0x3f, 0x77, 0xdc, 0xc6, 0x27, 0x6d, 0x83, 0x5c, 0xcd, 0x1d,
       0xdf, 0xe5, 0xf3, 0x98, 0xe6, 0x8b, 0xe6, 0x5b, 0xd4};
 
-  static const uint8_t kPrivateExponent[kRsa512SizeBytes] = {
+  static const uint8_t kDShare0[kRsa512SizeBytes] = {
       0xc1, 0xf3, 0x5d, 0x18, 0x12, 0x7e, 0xe7, 0x0c, 0xbf, 0x33, 0xd0,
       0x1c, 0xd8, 0x5d, 0x91, 0x26, 0xb6, 0xc5, 0xae, 0x78, 0xda, 0x4c,
       0xae, 0x43, 0xa1, 0x57, 0xab, 0x32, 0xcf, 0xa4, 0xd4, 0x72, 0x20,
       0x53, 0x30, 0x55, 0x7a, 0x93, 0xd9, 0xae, 0x75, 0x32, 0x9d, 0x09,
       0x18, 0x06, 0xc8, 0x26, 0x64, 0x28, 0xcf, 0x2c, 0x3b, 0x6e, 0x6b,
       0x5c, 0x28, 0xde, 0x76, 0x6c, 0x2f, 0xcc, 0xf3, 0x31};
+
+  static const uint8_t kDShare1[kRsa512SizeBytes] = {0};
 
   static const uint8_t kEncryptedExpected[kRsa512SizeBytes] = {
       0xb7, 0x02, 0x28, 0xcb, 0x63, 0x5e, 0xa6, 0xfd, 0x55, 0x4a, 0x85,
@@ -301,7 +178,7 @@ static void test_rsa512_roundtrip(void) {
   uint8_t out_decrypted[kRsa512SizeBytes] = {0};
 
   LOG_INFO("Running RSA512 test");
-  rsa_roundtrip(kRsa512SizeBytes, kModulus, kPrivateExponent, kIn,
+  rsa_roundtrip(kRsa512SizeBytes, kModulus, kDShare0, kDShare1, kIn,
                 kEncryptedExpected, out_encrypted, out_decrypted);
 }
 
@@ -319,7 +196,7 @@ static void test_rsa1024_roundtrip(void) {
       0x8c, 0xd,  0x7c, 0x76, 0xc5, 0x85, 0xa7, 0xa,  0xa1, 0x91, 0xe0, 0xad,
       0xae, 0xfa, 0xb,  0xc5, 0xc4, 0x88, 0x7e, 0xbe};
 
-  static const uint8_t kPrivateExponent[kRsa1024SizeBytes] = {
+  static const uint8_t kDShare0[kRsa1024SizeBytes] = {
       0x1,  0x66, 0x7f, 0x2,  0xdb, 0x27, 0x92, 0x7d, 0xd6, 0x41, 0x4e, 0xbf,
       0x47, 0x31, 0x95, 0x8e, 0xfb, 0x5d, 0xee, 0xa1, 0xdf, 0x6d, 0x31, 0xd2,
       0xeb, 0xee, 0xe2, 0xf4, 0xa4, 0x21, 0xa9, 0xb9, 0xd2, 0xcf, 0x94, 0xfe,
@@ -331,6 +208,8 @@ static void test_rsa1024_roundtrip(void) {
       0xd5, 0x54, 0xde, 0xa8, 0xe5, 0xfb, 0xa9, 0xa2, 0x36, 0x21, 0xae, 0xff,
       0xd,  0xfa, 0xba, 0x6b, 0xfd, 0xa3, 0x6a, 0x84, 0xa4, 0x8b, 0x95, 0xd6,
       0xac, 0x5d, 0x4e, 0x2e, 0x7b, 0x14, 0x1f, 0x3d};
+
+  static const uint8_t kDShare1[kRsa1024SizeBytes] = {0};
 
   static const uint8_t kEncryptedExpected[kRsa1024SizeBytes] = {
       0x76, 0x71, 0x99, 0x16, 0x38, 0x3a, 0xe0, 0xca, 0x9e, 0xc4, 0x5e, 0x9b,
@@ -351,7 +230,7 @@ static void test_rsa1024_roundtrip(void) {
   uint8_t out_decrypted[kRsa1024SizeBytes] = {0};
 
   LOG_INFO("Running RSA1024 test");
-  rsa_roundtrip(kRsa1024SizeBytes, kModulus, kPrivateExponent, kIn,
+  rsa_roundtrip(kRsa1024SizeBytes, kModulus, kDShare0, kDShare1, kIn,
                 kEncryptedExpected, out_encrypted, out_decrypted);
 }
 
@@ -380,7 +259,7 @@ static void test_rsa2048_roundtrip(void) {
       0x21, 0xc0, 0xc9, 0x61, 0xc3, 0xc6, 0x1f, 0xaf, 0xf4, 0x47, 0x1a, 0xa5,
       0x2d, 0xa9, 0xc5, 0xbd};
 
-  static const uint8_t kPrivateExponent[kRsa2048SizeBytes] = {
+  static const uint8_t kDShare0[kRsa2048SizeBytes] = {
       0xfd, 0x82, 0x16, 0x63, 0x74, 0xc0, 0x2a, 0xde, 0x83, 0x69, 0x77, 0x3d,
       0x1a, 0x5c, 0x07, 0xbb, 0x97, 0x34, 0xd4, 0xcb, 0x28, 0xc3, 0x28, 0xc0,
       0x6a, 0x28, 0xaf, 0x05, 0xfd, 0x24, 0x84, 0x76, 0xd6, 0xc5, 0xfa, 0x3f,
@@ -403,6 +282,8 @@ static void test_rsa2048_roundtrip(void) {
       0x36, 0x76, 0xc8, 0x0e, 0x2c, 0xd6, 0x39, 0x57, 0x6c, 0x9c, 0xcb, 0x19,
       0x2c, 0x63, 0x73, 0xcb, 0x6b, 0x89, 0x2e, 0xe1, 0xf7, 0xc4, 0x74, 0x61,
       0x67, 0x9a, 0x63, 0x9e};
+
+  static const uint8_t kDShare1[kRsa2048SizeBytes] = {0};
 
   static const uint8_t kEncryptedExpected[kRsa2048SizeBytes] = {
       0x54, 0x83, 0x7c, 0xb0, 0xd9, 0x77, 0x76, 0xb5, 0xf5, 0xc8, 0x51, 0x02,
@@ -433,7 +314,7 @@ static void test_rsa2048_roundtrip(void) {
   uint8_t out_decrypted[kRsa2048SizeBytes] = {0};
 
   LOG_INFO("Running RSA2048 test");
-  rsa_roundtrip(kRsa2048SizeBytes, kModulus, kPrivateExponent, kIn,
+  rsa_roundtrip(kRsa2048SizeBytes, kModulus, kDShare0, kDShare1, kIn,
                 kEncryptedExpected, out_encrypted, out_decrypted);
 }
 
@@ -472,7 +353,7 @@ static void test_rsa3072_roundtrip(void) {
       0x89, 0x89, 0x92, 0xc3, 0x67, 0x97, 0x97, 0x0c, 0x26, 0xcd, 0xec, 0x6b,
       0xbd, 0x2e, 0xc3, 0xa4, 0xa5, 0x86, 0xf1, 0xd5, 0x56, 0x9b, 0xb2, 0xac};
 
-  static const uint8_t kPrivateExponent[kRsa3072SizeBytes] = {
+  static const uint8_t kDShare0[kRsa3072SizeBytes] = {
       0x01, 0xd7, 0x1b, 0x43, 0xb7, 0x32, 0x49, 0x3b, 0xc0, 0x5c, 0x93, 0x33,
       0xfa, 0x2d, 0xd6, 0x33, 0x70, 0x6f, 0xeb, 0x5b, 0x53, 0xdb, 0x2c, 0x0f,
       0x72, 0x26, 0x6a, 0x7c, 0x10, 0x0a, 0x02, 0x1f, 0xed, 0xf0, 0x5f, 0x8d,
@@ -505,6 +386,8 @@ static void test_rsa3072_roundtrip(void) {
       0xb3, 0xc9, 0x02, 0x60, 0xcb, 0x7c, 0x94, 0xd0, 0x11, 0x21, 0xf5, 0xf9,
       0x8c, 0xc5, 0x2b, 0x2b, 0x7e, 0x65, 0x22, 0x19, 0xf5, 0x71, 0x58, 0xa3,
       0xd2, 0x25, 0xa9, 0xb6, 0xc8, 0x8d, 0x85, 0x8c, 0x00, 0x45, 0xf9, 0x32};
+
+  static const uint8_t kDShare1[kRsa3072SizeBytes] = {0};
 
   static const uint8_t kEncryptedExpected[kRsa3072SizeBytes] = {
       0x45, 0x91, 0x09, 0xad, 0x6a, 0xbd, 0xc1, 0x7f, 0x68, 0xea, 0x1e, 0xad,
@@ -546,7 +429,7 @@ static void test_rsa3072_roundtrip(void) {
   uint8_t out_decrypted[kRsa3072SizeBytes] = {0};
 
   LOG_INFO("Running RSA3072 test");
-  rsa_roundtrip(kRsa3072SizeBytes, kModulus, kPrivateExponent, kIn,
+  rsa_roundtrip(kRsa3072SizeBytes, kModulus, kDShare0, kDShare1, kIn,
                 kEncryptedExpected, out_encrypted, out_decrypted);
 }
 
@@ -596,7 +479,7 @@ static void test_rsa4096_roundtrip(void) {
       0x28, 0xfb, 0xef, 0x16, 0xa5, 0xf9, 0x9d, 0xe0, 0x54, 0x13, 0xf8, 0x28,
       0x98, 0xb7, 0x1a, 0x4a, 0x7f, 0xa2, 0x74, 0xf0};
 
-  static const uint8_t kPrivateExponent[kRsa4096SizeBytes] = {
+  static const uint8_t kDShare0[kRsa4096SizeBytes] = {
       0xc1, 0x91, 0x67, 0x67, 0xb2, 0xe7, 0xd2, 0xba, 0x16, 0xf1, 0x70, 0xec,
       0xbf, 0x6e, 0x73, 0x6f, 0x3b, 0x4f, 0x09, 0xed, 0x09, 0x91, 0xc1, 0xc3,
       0x73, 0x8c, 0x19, 0x33, 0x93, 0xcd, 0xd2, 0xb2, 0x9d, 0x53, 0x49, 0xa4,
@@ -640,6 +523,8 @@ static void test_rsa4096_roundtrip(void) {
       0xfa, 0xec, 0x2b, 0xb6, 0x5a, 0x08, 0x73, 0x55, 0xb6, 0xed, 0x74, 0x11,
       0xec, 0x28, 0x79, 0x17, 0xa6, 0x9f, 0xca, 0x15, 0xe1, 0xd6, 0x67, 0x35,
       0x6f, 0x9b, 0x99, 0x46, 0x7f, 0x20, 0x4a, 0x43};
+
+  static const uint8_t kDShare1[kRsa4096SizeBytes] = {0};
 
   static const uint8_t kEncryptedExpected[kRsa4096SizeBytes] = {
       0x59, 0x13, 0x5c, 0x73, 0xb2, 0xee, 0xe6, 0x48, 0x24, 0x95, 0x80, 0xe3,
@@ -691,12 +576,12 @@ static void test_rsa4096_roundtrip(void) {
   uint8_t out_decrypted[kRsa4096SizeBytes] = {0};
 
   LOG_INFO("Running RSA4096 test");
-  rsa_roundtrip(kRsa4096SizeBytes, kModulus, kPrivateExponent, kIn,
+  rsa_roundtrip(kRsa4096SizeBytes, kModulus, kDShare0, kDShare1, kIn,
                 kEncryptedExpected, out_encrypted, out_decrypted);
 }
 
-bool test_main() {
-  entropy_testutils_boot_mode_init();
+bool test_main(void) {
+  CHECK_STATUS_OK(entropy_testutils_auto_mode_init());
 
   test_rsa512_roundtrip();
   test_rsa1024_roundtrip();

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,41 +7,55 @@
 // seq, normal seq with default priority (100) has the priority to access TL driver
 `define create_tl_access_error_case(task_name_, with_c_,
                                     seq_t_ = tl_host_custom_seq #(cip_tl_seq_item),
-                                    seqr_t = p_sequencer.tl_sequencer_h) \
-  begin \
-    seq_t_ tl_seq; \
-    `uvm_info(`gfn, {"Running ", `"task_name_`"}, UVM_HIGH) \
-    `uvm_create_on(tl_seq, seqr_t) \
-    if (cfg.zero_delays) begin \
-      tl_seq.min_req_delay = 0; \
-      tl_seq.max_req_delay = 0; \
-    end \
-    tl_seq.req_abort_pct = $urandom_range(0, 100); \
-    `DV_CHECK_RANDOMIZE_WITH_FATAL(tl_seq, with_c_) \
-    csr_utils_pkg::increment_outstanding_access(); \
-    `DV_SPINWAIT(`uvm_send_pri(tl_seq, 1), \
+                                    seqr_t)                                                \
+  begin                                                                                    \
+    seq_t_ tl_seq;                                                                         \
+    `uvm_info(`gfn, {"Running ", `"task_name_`"}, UVM_MEDIUM)                              \
+    `uvm_create_on(tl_seq, seqr_t)                                                         \
+    if (cfg.zero_delays) begin                                                             \
+      tl_seq.min_req_delay = 0;                                                            \
+      tl_seq.max_req_delay = 0;                                                            \
+    end                                                                                    \
+    tl_seq.req_abort_pct = $urandom_range(0, 100);                                         \
+    `DV_CHECK_RANDOMIZE_WITH_FATAL(tl_seq, with_c_)                                        \
+    csr_utils_pkg::increment_outstanding_access();                                         \
+    `DV_SPINWAIT(`uvm_send_pri(tl_seq, 1),                                                 \
         $sformatf("Timeout: %0s with addr %0h", `"task_name_`", tl_seq.addr), 100_000_000) \
-    csr_utils_pkg::decrement_outstanding_access(); \
+    csr_utils_pkg::decrement_outstanding_access();                                         \
   end
 
-virtual task tl_access_unmapped_addr(string ral_name);
-  addr_range_t loc_unmapped_addr_ranges[$] = updated_unmapped_addr_ranges[ral_name];
+// Generate a sequence of transactions that access unmapped addresses. These transactions should
+// generate error responses but not have any other effect.
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+task tl_access_unmapped_addr(string ral_name, dv_base_reg_block block);
+  addr_range_t     unmapped_ranges[$];
+  bit [BUS_AW-1:0] csr_base_addr = block.default_map.get_base_addr();
 
-  if (loc_unmapped_addr_ranges.size() == 0) return;
+  // Check the block has some unmapped ranges (otherwise this task shouldn't have been called)
+  `DV_CHECK_FATAL(block.unmapped_addr_ranges.size() > 0)
 
-  // randomize unmapped_addr first to improve perf
+  // Subtract the RAL base address from the ends of each range in the block's list of unmapped
+  // ranges.
+  foreach (block.unmapped_addr_ranges[i]) begin
+    addr_range_t range = block.unmapped_addr_ranges[i];
+    unmapped_ranges.push_back(addr_range_t'{range.start_addr - csr_base_addr,
+                                            range.end_addr - csr_base_addr});
+  end
+
   repeat ($urandom_range(10, 100)) begin
     bit [BUS_AW-1:0] unmapped_addr;
 
-    // Randomly pick which unmapped address range to target
-    int idx = $urandom_range(0, loc_unmapped_addr_ranges.size()-1);
+    // Randomly pick which range of unmapped addresses to target
+    int range_idx = $urandom_range(0, unmapped_ranges.size() - 1);
 
-    if (cfg.under_reset) return;
+    if (cfg.stop_transaction_generators()) return;
+
     `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(unmapped_addr,
-        (unmapped_addr & csr_addr_mask[ral_name])
-            inside {[loc_unmapped_addr_ranges[idx].start_addr :
-                     loc_unmapped_addr_ranges[idx].end_addr]};
-    )
+                                       (unmapped_addr & csr_addr_mask[ral_name])
+                                         inside {[unmapped_ranges[range_idx].start_addr :
+                                                  unmapped_ranges[range_idx].end_addr]};)
     `create_tl_access_error_case(
         tl_access_unmapped_addr,
         addr == unmapped_addr;,
@@ -50,20 +64,30 @@ virtual task tl_access_unmapped_addr(string ral_name);
   end
 endtask
 
-virtual task tl_write_less_than_csr_width(string ral_name);
+// Generate a sequence of transactions that write to each register in the block but sending a
+// byte-enable mask that doesn't cover the full width. This is not allowed in OpenTitan and should
+// generate an error response and not change the value of the register.
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+virtual task tl_write_less_than_csr_width(string ral_name, dv_base_reg_block block);
   uvm_reg all_csrs[$];
-
-  cfg.ral_models[ral_name].get_registers(all_csrs);
+  block.get_registers(all_csrs);
   all_csrs.shuffle();
   foreach (all_csrs[i]) begin
     dv_base_reg      csr;
     uint             msb_pos;
     bit [BUS_AW-1:0] addr;
 
-    if (cfg.under_reset) return;
+    if (cfg.stop_transaction_generators()) return;
     `DV_CHECK_FATAL($cast(csr, all_csrs[i]))
     msb_pos = csr.get_msb_pos();
     addr    = csr.get_address();
+
+    // If this is a register that might change on a write that causes an error then we shouldn't
+    // generate writes to it because we might update the register contents unexpectedly.
+    if (csr.writes_ignore_errors) continue;
+
     `create_tl_access_error_case(
         tl_write_less_than_csr_width,
         opcode inside {tlul_pkg::PutFullData, tlul_pkg::PutPartialData};
@@ -83,113 +107,231 @@ virtual task tl_write_less_than_csr_width(string ral_name);
   end
 endtask
 
-virtual task tl_protocol_err(tl_sequencer tl_sequencer_h = p_sequencer.tl_sequencer_h);
+// Generate a stream of transactions which cause TL protocol errors but have no other effect
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+task tl_protocol_err(string ral_name);
   repeat ($urandom_range(10, 100)) begin
-    if (cfg.under_reset) return;
-    `create_tl_access_error_case(
-        tl_protocol_err, , tl_host_protocol_err_seq #(cip_tl_seq_item), tl_sequencer_h
-        )
+    if (cfg.stop_transaction_generators()) return;
+    `create_tl_access_error_case(tl_protocol_err,
+                                 ,
+                                 tl_host_protocol_err_seq #(cip_tl_seq_item),
+                                 p_sequencer.tl_sequencer_hs[ral_name])
   end
 endtask
 
-virtual task tl_write_mem_less_than_word(string ral_name);
-  uint mem_idx;
-  dv_base_mem mem;
-  addr_range_t loc_mem_ranges[$] = updated_mem_ranges[ral_name];
+// Generate a stream of transactions that try to send partial writes to a memory that doesn't
+// support them. These should generate error responses but have no other effect.
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+task tl_write_mem_less_than_word(string            ral_name,
+                                 dv_base_reg_block block,
+                                 addr_range_t      rel_mem_ranges[$]);
+  addr_range_t rel_tgt_ranges[$];
+  addr_range_t block_mem_ranges[$];
+
+  block.get_mem_ranges(block_mem_ranges);
+
+  // For each memory range, look up the memory that contains it. Collect ranges where that memory
+  // doesn't support partial writes. These track addresses relative to the base address of the
+  // block.
+  foreach (rel_mem_ranges[i]) begin
+    dv_base_mem mem;
+    `downcast(mem, get_mem_by_addr(block, block_mem_ranges[i].start_addr))
+    if (!mem.get_mem_partial_write_support()) rel_tgt_ranges.push_back(rel_mem_ranges[i]);
+  end
+
+  // We should have found at least one range that doesn't support partial writes (a property we
+  // check before calling this task).
+  `DV_CHECK_FATAL(rel_tgt_ranges.size() > 0)
+
   repeat ($urandom_range(10, 100)) begin
-    if (cfg.under_reset) return;
-    // if more than one memories, randomly select one memory
-    mem_idx = $urandom_range(0, loc_mem_ranges.size - 1);
-    // only test when mem doesn't support partial write
-    `downcast(mem, get_mem_by_addr(cfg.ral_models[ral_name],
-                                   cfg.ral_models[ral_name].mem_ranges[mem_idx].start_addr))
-    if (mem.get_mem_partial_write_support()) continue;
+    uint range_idx = $urandom_range(0, rel_tgt_ranges.size() - 1);
+
+    if (cfg.stop_transaction_generators()) return;
 
     `create_tl_access_error_case(
         tl_write_mem_less_than_word,
         opcode inside {tlul_pkg::PutFullData, tlul_pkg::PutPartialData};
         addr[1:0] == 0; // word aligned
         (addr & csr_addr_mask[ral_name]) inside
-            {[loc_mem_ranges[mem_idx].start_addr : loc_mem_ranges[mem_idx].end_addr]};
+            {[rel_tgt_ranges[range_idx].start_addr : rel_tgt_ranges[range_idx].end_addr]};
         mask != '1 || size < 2;, ,
-        p_sequencer.tl_sequencer_hs[ral_name]
-        )
+        p_sequencer.tl_sequencer_hs[ral_name])
   end
 endtask
 
-virtual task tl_read_wo_mem_err(string ral_name);
-  uint mem_idx;
-  addr_range_t loc_mem_ranges[$] = updated_mem_ranges[ral_name];
+// Generate a stream of transactions that read from a write-only memory. These should generate error
+// responses but have no other effect.
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+task tl_read_wo_mem_err(string            ral_name,
+                        dv_base_reg_block block,
+                        addr_range_t      rel_mem_ranges[$]);
+  addr_range_t rel_tgt_ranges[$];
+  addr_range_t block_mem_ranges[$];
+
+  block.get_mem_ranges(block_mem_ranges);
+
+  // For each memory range, look up the memory that contains it. Collect ranges where that memory is
+  // write-only. These track addresses relative to the base address of the block.
+  foreach (rel_mem_ranges[i]) begin
+    if (get_mem_access_by_addr(block, block_mem_ranges[i].start_addr) == "WO") begin
+      rel_tgt_ranges.push_back(rel_mem_ranges[i]);
+    end
+  end
+
+  // If we call this, there should be at least one write-only memory. Check that there is.
+  `DV_CHECK_FATAL(rel_tgt_ranges.size() > 0)
+
   repeat ($urandom_range(10, 100)) begin
-    if (cfg.under_reset) return;
-    // if more than one memories, randomly select one memory
-    mem_idx = $urandom_range(0, loc_mem_ranges.size - 1);
-    if (get_mem_access_by_addr(cfg.ral_models[ral_name],
-        cfg.ral_models[ral_name].mem_ranges[mem_idx].start_addr) != "WO") continue;
+    uint range_idx = $urandom_range(0, rel_tgt_ranges.size() - 1);
+
+    if (cfg.stop_transaction_generators()) return;
+
     `create_tl_access_error_case(
         tl_read_wo_mem_err,
         opcode == tlul_pkg::Get;
         (addr & csr_addr_mask[ral_name]) inside
-            {[loc_mem_ranges[mem_idx].start_addr :
-              loc_mem_ranges[mem_idx].end_addr]};, ,
-        p_sequencer.tl_sequencer_hs[ral_name]
-        )
+            {[rel_tgt_ranges[range_idx].start_addr :
+              rel_tgt_ranges[range_idx].end_addr]};, ,
+        p_sequencer.tl_sequencer_hs[ral_name])
   end
 endtask
 
-virtual task tl_write_ro_mem_err(string ral_name);
-  uint mem_idx;
-  addr_range_t loc_mem_ranges[$] = updated_mem_ranges[ral_name];
+// Generate a stream of transactions that write to a read-only memory. These should generate error
+// responses but have no other effect.
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+task tl_write_ro_mem_err(string            ral_name,
+                         dv_base_reg_block block,
+                         addr_range_t      rel_mem_ranges[$]);
+  addr_range_t rel_tgt_ranges[$];
+  addr_range_t block_mem_ranges[$];
+
+  block.get_mem_ranges(block_mem_ranges);
+
+  // For each memory range, look up the memory that contains it. Collect ranges where that memory is
+  // read-only. These track addresses relative to the base address of the block.
+  foreach (rel_mem_ranges[i]) begin
+    if (get_mem_access_by_addr(block, block_mem_ranges[i].start_addr) == "RO") begin
+      rel_tgt_ranges.push_back(rel_mem_ranges[i]);
+    end
+  end
+
+  // If we call this, there should be at least one write-only memory. Check that there is.
+  `DV_CHECK_FATAL(rel_tgt_ranges.size() > 0)
+
   repeat ($urandom_range(10, 100)) begin
-    if (cfg.under_reset) return;
-    // if more than one memories, randomly select one memory
-    mem_idx = $urandom_range(0, loc_mem_ranges.size - 1);
-    if (get_mem_access_by_addr(cfg.ral_models[ral_name],
-        cfg.ral_models[ral_name].mem_ranges[mem_idx].start_addr) != "RO") continue;
+    uint range_idx = $urandom_range(0, rel_tgt_ranges.size() - 1);
+
+    if (cfg.stop_transaction_generators()) return;
+
     `create_tl_access_error_case(
         tl_write_ro_mem_err,
         opcode != tlul_pkg::Get;
         (addr & csr_addr_mask[ral_name]) inside
-            {[loc_mem_ranges[mem_idx].start_addr :
-              loc_mem_ranges[mem_idx].end_addr]};
-        )
+            {[rel_tgt_ranges[range_idx].start_addr :
+              rel_tgt_ranges[range_idx].end_addr]};, ,
+        p_sequencer.tl_sequencer_hs[ral_name])
+  end
+endtask
+
+// Return the address of a randomly chosen CSR from which an instruction fetch is not allowed
+virtual function bit[BUS_AW-1:0] pick_rand_nofetch_csr_addr (dv_base_reg_block block);
+  uvm_reg regs[$];
+  uvm_reg chosen_reg;
+  block.get_nofetch_csrs(regs);
+
+  if (regs.size() == 0) begin
+    `uvm_fatal(get_name(),
+               $sformatf("Cannot pick a random address: block %0s has no no-fetch CSRs.",
+                         block.get_name()))
+  end
+
+  chosen_reg = regs[$urandom_range(0, regs.size() - 1)];
+
+  return chosen_reg.get_address();
+endfunction
+
+// Generate a stream of transactions that trigger errors connected with instr_type. This is either
+// because the multi-bit encoded instr_type is not a valid mubi value or because it is MuBi4True and
+// the transaction is a write ("writing through the fetch port").
+//
+// If cfg.stop_transaction_generators() becomes true (because we are in reset or wish to start a
+// reset), stop generating transactions and return.
+virtual task tl_instr_type_err(string ral_name);
+  dv_base_reg_block ral_model = cfg.ral_models[ral_name];
+  bit has_nofetch_csrs = ral_model.has_nofetch_csrs();
+
+  repeat ($urandom_range(10, 100)) begin
+    bit [BUS_AW-1:0] addr;
+    bit              write;
+    bit [BUS_DW-1:0] data;
+    mubi4_t          instr_type;
+
+    if (cfg.stop_transaction_generators()) return;
+    `DV_CHECK_STD_RANDOMIZE_FATAL(addr);
+    `DV_CHECK_STD_RANDOMIZE_FATAL(data);
+
+    randcase
+      1: begin
+        // invalid instr_type
+        bit[3:0] instr_type_bits;
+        `DV_CHECK_STD_RANDOMIZE_FATAL(write);
+        `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(instr_type_bits,
+                                           !(instr_type_bits inside {MuBi4True, MuBi4False});)
+        instr_type = mubi4_t'(instr_type_bits);
+      end
+      1: begin
+        // write with instr_type = MuBi4True
+        write = 1'b1;
+        instr_type = MuBi4True;
+      end
+      has_nofetch_csrs: begin
+        write = 1'b0;
+        instr_type = MuBi4True;
+        addr = pick_rand_nofetch_csr_addr(ral_model);
+      end
+    endcase
+
+    tl_access(.addr(addr), .write(write), .data(data), .instr_type(instr_type), .exp_err_rsp(1),
+              .tl_sequencer_h(p_sequencer.tl_sequencer_hs[ral_name]));
   end
 endtask
 
 virtual task run_tl_errors_vseq(int num_times = 1, bit do_wait_clk = 0);
-  // TODO(#6628): Target specific tlul_assert devices rather than
-  //              globally enabling/disabling all of them.
-  //
-  //  With this approach, ALL tlul assertions are being disabled and then enabled.
-  //  A better solution (as per the linked issue) is to move the assertion enable
-  //  function calls back to encapsulate the `for` loop inside `run_tl_errors_vseq_sub()`
-  //  and pass in an appropriate "path" argument to the function to enable/disable
-  //  ONLY the corresponding tlul_assert monitor.
   set_tl_assert_en(.enable(0));
-  `loop_ral_models_to_create_threads(run_tl_errors_vseq_sub(num_times, do_wait_clk, ral_name);)
+  for (int trans = 1; trans <= num_times; trans++) begin
+    if (cfg.stop_transaction_generators()) return;
+    `uvm_info(`gfn, $sformatf("Running run_tl_errors_vseq %0d/%0d", trans, num_times), UVM_LOW)
+    `loop_ral_models_to_create_threads(run_tl_errors_vseq_sub(do_wait_clk, ral_name);)
+  end
   csr_utils_pkg::wait_no_outstanding_access();
   set_tl_assert_en(.enable(1));
 endtask
 
 // generic task to check interrupt test reg functionality
-virtual task run_tl_errors_vseq_sub(int num_times = 1, bit do_wait_clk = 0, string ral_name);
-  addr_range_t loc_mem_range[$] = cfg.ral_models[ral_name].mem_ranges;
-  bit has_mem = (loc_mem_range.size > 0);
-  bit [BUS_AW-1:0] csr_base_addr = cfg.ral_models[ral_name].default_map.get_base_addr();
-  bit has_mem_byte_access_err;
-  bit has_wo_mem;
-  bit has_ro_mem;
-
-  bit has_csr_addrs = (cfg.ral_models[ral_name].csr_addrs.size() > 0);
+virtual task run_tl_errors_vseq_sub(bit do_wait_clk = 0, string ral_name);
+  dv_base_reg_block ral_model = cfg.ral_models[ral_name];
+  bit [BUS_AW-1:0]  csr_base_addr = ral_model.default_map.get_base_addr();
+  bit               has_mem_byte_access_err, has_wo_mem, has_ro_mem;
+  bit               has_csrs = ral_model.has_csrs();
 
   // get_addr_mask returns address map size - 1 and get_max_offset return the offset of high byte
   // in address map. The difference btw them is unmapped address
-  csr_addr_mask[ral_name] = cfg.ral_models[ral_name].get_addr_mask();
+  csr_addr_mask[ral_name] = ral_model.get_addr_mask();
 
   // word aligned. This is used to constrain the random address and LSB 2 bits are masked out
   csr_addr_mask[ral_name][1:0] = 0;
 
   if (updated_mem_ranges[ral_name].size == 0) begin
+    addr_range_t loc_mem_range[$];
+    ral_model.get_mem_ranges(loc_mem_range);
     foreach (loc_mem_range[i]) begin
       updated_mem_ranges[ral_name].push_back(addr_range_t'{
           loc_mem_range[i].start_addr - csr_base_addr,
@@ -197,143 +339,250 @@ virtual task run_tl_errors_vseq_sub(int num_times = 1, bit do_wait_clk = 0, stri
     end
   end
 
-  if (cfg.ral_models[ral_name].has_unmapped_addrs) begin
-    addr_range_t loc_unmapped_addr_ranges[$] = cfg.ral_models[ral_name].unmapped_addr_ranges;
-    foreach (loc_unmapped_addr_ranges[i]) begin
-      updated_unmapped_addr_ranges[ral_name].push_back(addr_range_t'{
-          loc_unmapped_addr_ranges[i].start_addr - csr_base_addr,
-          loc_unmapped_addr_ranges[i].end_addr - csr_base_addr});
+  get_all_mem_attrs(ral_model, has_mem_byte_access_err, has_wo_mem, has_ro_mem);
+
+  // use multiple thread to create outstanding access
+  fork
+    begin: isolation_fork
+      repeat ($urandom_range(10, 20)) begin
+        fork
+          begin
+            randcase
+              // One option that always exists is to generate a stream of transactions that cause
+              // protocol errors
+              1: tl_protocol_err(ral_name);
+
+              // If there are CSRs, send writes with invalid byte enable masks to all of them
+              has_csrs: tl_write_less_than_csr_width(ral_name, ral_model);
+
+              // If there are some unmapped addresses, generate transactions that access them.
+              ral_model.has_unmapped_addrs: tl_access_unmapped_addr(ral_name, ral_model);
+
+              // If the memory doesn't support partial writes, generate transactions that try to do
+              // them.
+              has_mem_byte_access_err: tl_write_mem_less_than_word(ral_name, ral_model,
+                                                                   updated_mem_ranges[ral_name]);
+
+              // If the block has a write-only memory, generate transactions that try to read it.
+              has_wo_mem: tl_read_wo_mem_err(ral_name,
+                                             ral_model,
+                                             updated_mem_ranges[ral_name]);
+
+              // If the block has a read-only memory, generate transactions that try to write to
+              // it.
+              has_ro_mem: tl_write_ro_mem_err(ral_name,
+                                              ral_model,
+                                              updated_mem_ranges[ral_name]);
+
+              1: tl_instr_type_err(ral_name);
+            endcase
+          end
+        join_none
+      end
+      wait fork;
+    end: isolation_fork
+  join
+  // when reset occurs, end this seq ASAP to avoid killing seq while sending trans
+  if (do_wait_clk) begin
+    repeat($urandom_range(500, 10_000)) begin
+      if (cfg.under_reset) return;
+      cfg.clk_rst_vif.wait_clks(1);
     end
   end
-
-  get_all_mem_attrs(cfg.ral_models[ral_name], has_mem_byte_access_err, has_wo_mem, has_ro_mem);
-
-  for (int trans = 1; trans <= num_times; trans++) begin
-    `uvm_info(`gfn, $sformatf("Running run_tl_errors_vseq %0d/%0d", trans, num_times), UVM_LOW)
-    // TODO: once devmode is not tied internally in design, randomly drive devmode_vif
-    // if (cfg.en_devmode == 1) begin
-    //  cfg.devmode_vif.drive($urandom_range(0, 1));
-    // end
-
-    // use multiple thread to create outstanding access
-    fork
-      begin: isolation_fork
-        repeat ($urandom_range(10, 20)) begin
-          fork
-            begin
-              randcase
-                1: tl_protocol_err(p_sequencer.tl_sequencer_hs[ral_name]);
-                // only run when csr addresses exist
-                has_csr_addrs: tl_write_less_than_csr_width(ral_name);
-
-                // only run when unmapped addr exists
-                cfg.ral_models[ral_name].has_unmapped_addrs: tl_access_unmapped_addr(ral_name);
-
-                // only run this task when the error can be triggered
-                has_mem_byte_access_err: tl_write_mem_less_than_word(ral_name);
-                has_wo_mem: tl_read_wo_mem_err(ral_name);
-                has_ro_mem: tl_write_ro_mem_err(ral_name);
-              endcase
-            end
-          join_none
-        end
-        wait fork;
-      end: isolation_fork
-    join
-    // when reset occurs, end this seq ASAP to avoid killing seq while sending trans
-    if (do_wait_clk) begin
-      repeat($urandom_range(500, 10_000)) begin
-        if (cfg.under_reset) return;
-        cfg.clk_rst_vif.wait_clks(1);
-      end
-    end
-  end // for
 endtask : run_tl_errors_vseq_sub
 
 virtual task run_tl_intg_err_vseq(int num_times = 1);
-  // TODO(#6628) as above TODO
   set_tl_assert_en(.enable(0));
 
-  `loop_ral_models_to_create_threads(run_tl_intg_err_vseq_sub(num_times, ral_name);)
+  // If there are multiple TLUL interfaces, race condition may occurs as one TLUL is updating intg
+  // status CSR while the other TLUL interface reads it. Exclude checking the CSR
+  if (cfg.ral_models.size > 1) begin
+    foreach (cfg.tl_intg_alert_fields[csr_field]) begin
+      csr_excl_item csr_excl = get_excl_item(csr_field);
+      csr_excl.add_excl(csr_field.`gfn, CsrExclCheck, CsrRwTest);
+      `uvm_info(`gfn, $sformatf("Exclude CSR %s check, due to potential race condition",
+                                csr_field.`gfn), UVM_MEDIUM)
+    end
+  end
+  for (int trans = 1; trans <= num_times; trans++) begin
+    if (cfg.stop_transaction_generators()) break;
+    `uvm_info(`gfn, $sformatf("Running run_tl_intg_err_vseq %0d/%0d", trans, num_times),
+              UVM_LOW)
+    foreach (cfg.ral_models[ral_name]) begin
+      run_tl_intg_err_vseq_sub(ral_name);
+      dut_init("HARD");
+    end
+  end
   csr_utils_pkg::wait_no_outstanding_access();
 
   set_tl_assert_en(.enable(1));
 endtask
 
-virtual task run_tl_intg_err_vseq_sub(int num_times = 1, string ral_name);
-  `DV_CHECK_EQ(cfg.en_tl_intg_gen, 1)
-
-  for (int trans = 1; trans <= num_times; trans++) begin
-    `uvm_info(`gfn, $sformatf("Running run_tl_intg_err_vseq %0d/%0d", trans, num_times),
-              UVM_LOW)
-    fork
-      // run csr_rw seq to send some normal CSR accesses in parallel
-      begin
+virtual task run_tl_intg_err_vseq_sub(string ral_name);
+  fork
+    // run csr_rw seq to send some normal CSR accesses in parallel
+    begin
+      if (en_csr_vseq_w_tl_intg) begin
         `uvm_info(`gfn, "Run csr_rw seq", UVM_HIGH)
-        run_csr_vseq("rw");
+        run_csr_vseq(.csr_test_type("rw"), .ral_name(ral_name));
       end
-      begin
-        issue_tl_access_w_intg_err(ral_name);
-
-        // Check design's response to tl_intg_error.
-        // This virtual task verifies the fatal alert is firing continuously and verifies integrity
-        // error status register field is set.
-        check_tl_intg_error_response();
+    end
+    begin
+      // check integrity status before injecting fault
+      foreach (cfg.tl_intg_alert_fields[csr_field]) begin
+        csr_rd_check(.ptr(csr_field), .compare_vs_ral(1));
       end
-    join
 
-    // issue hard reset for fatal alert to recover
-    dut_init("HARD");
-  end
+      issue_tl_access_w_intg_err(ral_name);
+
+      // Check design's response to tl_intg_error.
+      // This virtual task verifies the fatal alert is firing continuously and verifies integrity
+      // error status register field is set.
+      check_tl_intg_error_response();
+    end
+  join
 endtask
 
 virtual task issue_tl_access_w_intg_err(string ral_name);
   bit [BUS_AW-1:0] addr;
   bit [BUS_DW-1:0] data = $urandom;
-  bit              write;
+  bit              write = $urandom_range(0, 1);
   tl_intg_err_e    tl_intg_err_type;
-  bit              has_mem = cfg.ral_models[ral_name].mem_ranges.size > 0;
+  addr_range_t     mem_ranges[$];
+  bit              has_mem;
+
+  cfg.ral_models[ral_name].get_mem_ranges(mem_ranges);
+  has_mem = (mem_ranges.size() > 0);
 
   #($urandom_range(10, 1000) * 1ns);
   `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(tl_intg_err_type,
                                      tl_intg_err_type != TlIntgErrNone;)
-  // data integrity doesn't apply to read
-  `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(write,
-      tl_intg_err_type inside {TlIntgErrData, TlIntgErrBoth} -> write == 1;)
-
   randcase
     // any address
     1: addr = $urandom;
     // mem address
     has_mem: begin
-      int mem_idx = $urandom_range(0, cfg.ral_models[ral_name].mem_ranges.size - 1);
-      addr = $urandom_range(cfg.ral_models[ral_name].mem_ranges[mem_idx].start_addr,
-                            cfg.ral_models[ral_name].mem_ranges[mem_idx].end_addr);
+      int mem_idx = $urandom_range(0, mem_ranges.size - 1);
+      addr = $urandom_range(mem_ranges[mem_idx].start_addr, mem_ranges[mem_idx].end_addr);
     end
   endcase
-  tl_access(.addr($urandom), .write(write), .data(data),
-            .tl_intg_err_type(tl_intg_err_type));
+  tl_access(.addr(addr), .write(write), .data(data), .tl_intg_err_type(tl_intg_err_type),
+            .mask(get_rand_contiguous_mask()),
+            .tl_sequencer_h(p_sequencer.tl_sequencer_hs[ral_name]));
 endtask
 
 virtual task check_tl_intg_error_response();
   `DV_CHECK_FATAL(cfg.tl_intg_alert_name inside {cfg.list_of_alerts}, $sformatf(
       "tl intg alert (%s) is not inside %p", cfg.tl_intg_alert_name, cfg.list_of_alerts))
 
-  `uvm_info(`gfn, "expected fatal alert is triggered", UVM_LOW)
-
   // Check both alert and CSR status update
   fork
     // This is a fatal alert and design keeps sending it until reset is issued.
     // Check alerts are triggered for a few times
-    repeat ($urandom_range(5, 20)) begin
-      wait_alert_trigger(cfg.tl_intg_alert_name, .wait_complete(1));
+    begin
+      repeat ($urandom_range(5, 20)) begin
+        wait_alert_trigger(cfg.tl_intg_alert_name, .wait_complete(1));
+      end
     end
-    // Check corresponding CSR status is updated correctly
-    foreach (cfg.tl_intg_alert_fields[csr_field]) begin
-      bit [BUS_DW-1:0] exp_val = cfg.tl_intg_alert_fields[csr_field];
-      csr_rd_check(.ptr(csr_field), .compare_value(exp_val));
+    begin
+      // Check corresponding CSR status is updated correctly
+      foreach (cfg.tl_intg_alert_fields[csr_field]) begin
+        void'(csr_field.predict(.value(cfg.tl_intg_alert_fields[csr_field]),
+                                .kind(UVM_PREDICT_READ)));
+
+        csr_rd_check(.ptr(csr_field), .compare_vs_ral(1));
+      end
     end
   join
 endtask
+
+virtual task run_passthru_mem_tl_intg_err_vseq(int num_times = 1);
+  for (int trans = 1; trans <= num_times; trans++) begin
+    if (cfg.stop_transaction_generators()) break;
+    `uvm_info(`gfn, $sformatf("Running run_passthru_mem_tl_intg_err_vseq %0d/%0d",
+                              trans, num_times),
+              UVM_LOW)
+    `loop_ral_models_to_create_threads(run_passthru_mem_tl_intg_err_vseq_sub(ral_name);)
+    // no fatal alert is triggered as the intg error will be detected in ibex instead of currect
+    // block.
+    check_no_fatal_alerts();
+    // calling dut_init to initialize the mem again
+    dut_init("HARD");
+  end
+  csr_utils_pkg::wait_no_outstanding_access();
+endtask
+
+virtual task run_passthru_mem_tl_intg_err_vseq_sub(string ral_name);
+  uvm_mem mems[$];
+  dv_base_mem passthru_mems[$];
+
+  cfg.ral_models[ral_name].get_memories(mems);
+
+  foreach (mems[i]) begin
+    dv_base_mem dv_mem;
+    `downcast(dv_mem, mems[i])
+    if (dv_mem.get_data_intg_passthru()) passthru_mems.push_back(dv_mem);
+  end
+
+  fork
+    // run csr_rw seq to send some normal CSR accesses in parallel
+    if (en_csr_vseq_w_passthru_mem_intg) begin
+      `uvm_info(`gfn, "Run csr_rw seq", UVM_HIGH)
+      run_csr_vseq(.csr_test_type("rw"), .ral_name(ral_name));
+    end
+    begin
+      if (passthru_mems.size > 0) begin
+        cfg.disable_d_user_data_intg_check_for_passthru_mem = 1;
+        test_intg_err_in_passthru_mem(passthru_mems);
+        cfg.disable_d_user_data_intg_check_for_passthru_mem = 0;
+      end
+    end
+  join
+endtask
+
+virtual task test_intg_err_in_passthru_mem(const ref dv_base_mem mems[$]);
+  foreach (mems[i]) begin
+    bit [BUS_AW-1:0] offset;
+    bit [BUS_AW-1:0] addr;
+    bit [BUS_DW-1:0] data;
+    string ral_name;
+    cip_tl_seq_item tl_access_rsp;
+    bit completed, saw_err;
+    bit data_intg_ok;
+
+    offset = $urandom_range(0, mems[i].get_n_bytes() - 1);
+    addr = mems[i].get_address(offset);
+    ral_name = mems[i].get_parent().get_name();
+    // Before inject faults, this read should have correct integrity
+    tl_access_sub(.addr(addr), .write(0), .data(data), .completed(completed), .saw_err(saw_err),
+                  .check_err_rsp(1),  .rsp(tl_access_rsp),
+                  .tl_sequencer_h(p_sequencer.tl_sequencer_hs[ral_name]));
+    `DV_CHECK_EQ(completed, 1)
+    `DV_CHECK_EQ(saw_err, 0)
+    void'(tl_access_rsp.is_d_chan_intg_ok(.en_rsp_intg_chk(1),
+                                          .en_data_intg_chk(1),
+                                          .throw_error(1)));
+
+    `uvm_info(`gfn, $sformatf("Backdoor inject intg fault to %s addr 0x%0h", ral_name, addr),
+              UVM_LOW)
+    inject_intg_fault_in_passthru_mem(mems[i], addr);
+
+    // Issue a read on the address that has been injected with integrity error
+    tl_access_sub(.addr(addr), .write(0), .data(data), .completed(completed), .saw_err(saw_err),
+                  .check_err_rsp(1),  .rsp(tl_access_rsp),
+                  .tl_sequencer_h(p_sequencer.tl_sequencer_hs[ral_name]));
+    `DV_CHECK_EQ(completed, 1)
+    `DV_CHECK_EQ(saw_err, 0)
+    // data integrity should be wrong
+    data_intg_ok = tl_access_rsp.is_d_chan_intg_ok(.en_rsp_intg_chk(0),
+                                                   .en_data_intg_chk(1),
+                                                   .throw_error(0));
+    `DV_CHECK_EQ(data_intg_ok, 0)
+  end
+endtask
+
+virtual function void inject_intg_fault_in_passthru_mem(dv_base_mem mem, bit [BUS_AW-1:0] addr);
+  `uvm_fatal(`gfn, "This must be overridden in extended block common_vseq")
+endfunction
 
 `undef create_tl_access_error_case

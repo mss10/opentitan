@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -19,7 +19,9 @@ package kmac_env_pkg;
   import kmac_app_agent_pkg::*;
   import kmac_ral_pkg::*;
   import kmac_pkg::*;
-  import keymgr_pkg::*;
+  import keymgr_dpe_pkg::*;
+  import key_sideload_agent_pkg::*;
+  import sec_cm_pkg::*;
 
   // macro includes
   `include "uvm_macros.svh"
@@ -62,9 +64,17 @@ package kmac_env_pkg;
   // `right_encode()` or `left_encode()`.
   parameter int MAX_ENCODE_WIDTH = 2040;
 
+  parameter uint HASH_CNT_WIDTH = 10;
   // alerts
-  parameter uint NUM_ALERTS = 1;
-  parameter string LIST_OF_ALERTS[] = {"fatal_fault"};
+  parameter uint NUM_ALERTS = 2;
+  parameter string LIST_OF_ALERTS[NUM_ALERTS] = {"recov_operation_err", "fatal_fault_err"};
+
+  parameter uint NUM_EDN = 1;
+
+  parameter uint NUM_APP_INTF = 4;
+  parameter app_config_t APP_CFG[NUM_APP_INTF] =
+    '{kmac_pkg::AppCfgKeyMgr, kmac_pkg::AppCfgLcCtrl,
+      kmac_pkg::AppCfgRomCtrl, kmac_pkg::AppCfgOtbn};
 
   /////////////////////////////
   // Timing Model Parameters //
@@ -83,22 +93,6 @@ package kmac_env_pkg;
 
   // log_2(W)
   localparam int L = $clog2(W);
-
-  // number of rounds performed by keccak logic
-  parameter int KECCAK_NUM_ROUNDS = 12 + 2 * L;
-
-  parameter int ENTROPY_STORAGE_WIDTH = 320;
-  parameter int ENTROPY_LFSR_WIDTH    = 64;
-
-  // After seeding lfsr, internal entropy_storage is filled up in 5 cycles,
-  // ENTROPY_LFSR_WIDTH bits per cycles
-  parameter int CYCLES_TO_FILL_ENTROPY = ENTROPY_STORAGE_WIDTH / ENTROPY_LFSR_WIDTH;
-
-  // 7 cycles total:                                     5 cycles        + 2 cycles (latch/consume entropy)
-  parameter int ENTROPY_FULL_EXPANSION_CYCLES = CYCLES_TO_FILL_ENTROPY + 2;
-
-  // 3 cycles total:                         1 cycle, entropy is reused + 2 cycles (latch/consume)
-  parameter int ENTROPY_FAST_PROCESSING_CYCLES = 3;
 
   // interrupt types
   typedef enum int {
@@ -132,13 +126,29 @@ package kmac_env_pkg;
     KmacStatusFifoDepthLSB = 8,
     KmacStatusFifoDepthMSB = 12,
     KmacStatusFifoEmpty = 14,
-    KmacStatusFifoFull = 15
+    KmacStatusFifoFull = 15,
+    KmacStatusEntropyReady = 20,
+    KmacStatusEntropyReseeding = 21
   } kmac_status_e;
+
+  typedef enum int {
+    KmacPrescaler = 0,
+    EntropyPeriodReserved = 10,
+    KmacWaitTimer = 16
+  } kmac_entropy_period_e;
+
+
+  typedef enum int {
+    KmacCmdIdx = 5,
+    KmacEntropyReqIdx = 8,
+    KmacHashCntClrIdx = 9
+  } kmac_cmd_idx_e;
 
   typedef enum int {
     AppKeymgr,
     AppLc,
-    AppRom
+    AppRom,
+    AppOtbn
   } kmac_app_e;
 
   // state values of the App FSM
@@ -149,22 +159,31 @@ package kmac_env_pkg;
     StAppOutLen             = 10'b1011001111,
     StAppProcess            = 10'b1000100110,
     StAppWait               = 10'b0010010110,
+    StAppPushDigest         = 10'b0000000001,
+    StAppFinish             = 10'b0000000010,
     StSw                    = 10'b0111111111,
-    StKeyMgrErrKeyNotValid  = 10'b1001110100,
+    StErrorKeyNotValid      = 10'b1001110100,
     StError                 = 10'b1101011101
   } kmac_app_st_e;
 
-  // states of the error FSM
-  typedef enum bit [2:0] {
-    ErrStIdle,
-    ErrStMsgFeed,
-    ErrStProcessing,
-    ErrStAbsorbed,
-    ErrStSqueezing
-  } kmac_err_st_e;
+  typedef enum bit [23:0] {
+    kmac_cmd_idx = 0,
+    kmac_st_idx = 8
+  } kmac_err_info_idx_e;
 
-  typedef virtual pins_if#(1)       idle_vif;
-  typedef virtual kmac_sideload_if  sideload_vif;
+  typedef struct packed {
+    bit [4:0] padded_zeros_0;
+    bit sw_err;       // Field that recommended to fill
+    bit mode_strength_err;
+    bit prefix_err;
+    bit [4:0] padded_zeros_1;
+    bit [2:0] StL;    // Field that recommended to fill
+    bit [1:0] padded_zeros_2;
+    bit [5:0] sw_cmd; // Field that recommended to fill
+  } kmac_sw_cmd_seq_err_info_t;
+
+  typedef virtual key_sideload_if sideload_vif;
+  typedef virtual kmac_if         kmac_vif;
 
   // Helper functions that returns the KMAC key size in bytes/words/blocks
   function automatic int get_key_size_bytes(kmac_pkg::key_len_e len);
@@ -174,7 +193,7 @@ package kmac_env_pkg;
       Key256: return 32;
       Key384: return 48;
       Key512: return 64;
-      default: `uvm_fatal("kmac_env_pkg", $sformatf("%0s is an invalid key length", len.name()))
+      default: `uvm_fatal("kmac_env_pkg", $sformatf("%0d is an invalid key length", len))
     endcase
   endfunction
 

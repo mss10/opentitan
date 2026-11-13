@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,39 +10,60 @@ class chip_common_vseq extends chip_stub_cpu_base_vseq;
   }
   `uvm_object_new
 
-  virtual task apply_reset(string kind = "HARD");
-    // The CSR tests (handled by this class) need to wait until the rom_ctrl block has finished
-    // running KMAC before they can start issuing reads and writes. Otherwise, they might write to a
-    // KMAC register while KMAC is in operation. This would have no effect and a subsequent read
-    // from the register would show a mismatched value. We handle this by considering rom_ctrl's
-    // operation as "part of reset".
-    //
-    // Once the base class reset is finished, we're just after a chip reset. In a second, rom_ctrl
-    // is going to start asking KMAC to do an operation. At that point, KMAC's CFG_REGWEN register
-    // will go low. When the operation is finished, it will go high again. Wait until then.
-    int unsigned rc_phase = 0;
+  virtual task post_apply_reset(string reset_kind = "HARD");
+    super.post_apply_reset(reset_kind);
 
-    super.apply_reset(kind);
-
-    `uvm_info(`gfn, "waiting for rom_ctrl after reset", UVM_MEDIUM)
-    while (rc_phase < 2) begin
-      bit [BUS_DW-1:0] rd_data;
-      tl_access(.addr(ral.kmac.cfg_regwen.get_address()),
-                .write(1'b0),
-                .data(rd_data),
-                .blocking(1'b1));
-      if (rd_data[0] == rc_phase[0]) begin
-        `uvm_info(`gfn, "KMAC's cfg_regwen has changed; bumping phase", UVM_HIGH)
-        rc_phase++;
-      end
+    for (int ram_idx = 0; ram_idx < cfg.num_ram_ret_tiles; ram_idx++) begin
+      cfg.mem_bkdr_util_h[chip_mem_e'(RamRet0 + ram_idx)].randomize_mem();
     end
-    `uvm_info(`gfn, "rom_ctrl done after reset", UVM_HIGH)
+    for (int ram_idx = 0; ram_idx < cfg.num_ram_main_tiles; ram_idx++) begin
+      cfg.mem_bkdr_util_h[chip_mem_e'(RamMain0 + ram_idx)].randomize_mem();
+    end
   endtask
 
   virtual task body();
+    string csr_test_type;
+    void'($value$plusargs("csr_%0s", csr_test_type));
+    // sio are driven X when csb is inactive, but these pins can be configured as wakeup cause,
+    // assign a known value to avoid X propagation in case that `PINMUX.WKUP_CAUSE` is programmed.
+    cfg.chip_vif.spi_host_if.sio_out = $urandom;
+
+    // These types of CSR tests are quite long; run them only once.
+    if (csr_test_type inside {"bit_bash", "aliasing"}) num_trans = 1;
     run_common_vseq_wrapper(num_trans);
   endtask : body
 
-endclass
+  virtual task pre_start();
+    // CSR tests write to chip CSRs, which includes the pinmux registers. Random writes to the
+    // pinmux may inadvertently connect the chip IOs to peripherals, causing Xs to propagate, if
+    // the chip MIOs are not initialized. Hence, we weakly pull down ALL MIOs for these tests.
+    cfg.chip_vif.mios_if.pins_pd = '1;
+    cfg.chip_vif.dios_if.pins_pd[top_earlgrey_pkg::DioPadSpiDevD3:
+                                 top_earlgrey_pkg::DioPadSpiHostD0] = '1;
 
-`undef add_ip_csr_exclusions
+    super.pre_start();
+    // Disable assertions failed due to CSR random write value.
+    $assertoff(0,
+        "tb.dut.top_earlgrey.earlgrey_pd_aon.u_adc_ctrl.u_adc_ctrl_core.u_adc_ctrl_fsm.LpSampleCntCfg_M");
+    $assertoff(0,
+        "tb.dut.top_earlgrey.earlgrey_pd_aon.u_adc_ctrl.u_adc_ctrl_core.u_adc_ctrl_fsm.NpSampleCntCfg_M");
+  endtask
+
+  virtual task post_start();
+    super.post_start();
+    $asserton(0,
+        "tb.dut.top_earlgrey.earlgrey_pd_aon.u_adc_ctrl.u_adc_ctrl_core.u_adc_ctrl_fsm.LpSampleCntCfg_M");
+    $asserton(0,
+        "tb.dut.top_earlgrey.earlgrey_pd_aon.u_adc_ctrl.u_adc_ctrl_core.u_adc_ctrl_fsm.NpSampleCntCfg_M");
+    cfg.chip_vif.mios_if.pins_pd = '0;
+    cfg.chip_vif.dios_if.pins_pd[top_earlgrey_pkg::DioPadSpiDevD3:
+                                 top_earlgrey_pkg::DioPadSpiHostD0] = '0;
+  endtask
+
+  // Wait for cpu fetch enable before primary sequence start
+  // in stub cpu test.
+  virtual protected task run_common_vseq_wrapper(int num_times = 1);
+    wait(cfg.chip_vif.pwrmgr_cpu_fetch_en == 1);
+    super.run_common_vseq_wrapper(num_times);
+  endtask
+endclass

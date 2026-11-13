@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -18,32 +18,34 @@
 #include "sv_scoped.h"
 #include "sv_utils.h"
 
-// Read (the start of) the contents of a file at path as a vector of bytes.
-// Expects num_bytes bytes of data. On failure, throws a std::runtime_error.
-static std::vector<uint8_t> read_vector_from_file(const std::string &path,
-                                                  size_t num_bytes);
-
-// Write a vector of bytes to a new file at path. On failure, throws a
-// std::runtime_error.
-static void write_vector_to_file(const std::string &path,
-                                 const std::vector<uint8_t> &data);
-
 extern "C" {
-// These functions are only implemented if DesignScope != "", i.e. if we're
-// running a block-level simulation. Code needs to check at runtime if
-// otbn_rf_peek() and otbn_stack_element_peek() are available before calling
-// them.
-int otbn_rf_peek(int index, svBitVecVal *val) __attribute__((weak));
-int otbn_stack_element_peek(int index, svBitVecVal *val) __attribute__((weak));
+int otbn_rf_peek(int index, svBitVecVal *val);
+int otbn_stack_element_peek(int index, svBitVecVal *val);
 }
 
 #define RUNNING_BIT (1U << 0)
 #define CHECK_DUE_BIT (1U << 1)
 #define FAILED_STEP_BIT (1U << 2)
-#define FAILED_CMP_BIT (1U << 3)
 
-static std::vector<uint8_t> read_vector_from_file(const std::string &path,
-                                                  size_t num_bytes) {
+// Values come from otbn_pkg to signify the value for specific operations.
+#define CMD_EXECUTE 0xD8
+#define CMD_SECWIPE_DMEM 0xC3
+#define CMD_SECWIPE_IMEM 0x1E
+#define CMD_RESUME 0xA6
+
+// Values of the `STATUS` register, as defined in `otbn.hjson`.
+#define STATUS_IDLE 0x00
+#define STATUS_BUSY_EXECUTE 0x01
+#define STATUS_BUSY_SEC_WIPE_DMEM 0x02
+#define STATUS_BUSY_SEC_WIPE_IMEM 0x03
+#define STATUS_BUSY_SEC_WIPE_INT 0x04
+#define STATUS_PAUSED 0x05
+#define STATUS_LOCKED 0xFF
+
+// Read (the start of) the contents of a file at path as a vector of bytes.
+// Expects num_bytes bytes of data. On failure, throws a std::runtime_error.
+static Ecc32MemArea::EccWords read_words_from_file(const std::string &path,
+                                                   size_t num_words) {
   std::filebuf fb;
   if (!fb.open(path.c_str(), std::ios::in | std::ios::binary)) {
     std::ostringstream oss;
@@ -51,23 +53,46 @@ static std::vector<uint8_t> read_vector_from_file(const std::string &path,
     throw std::runtime_error(oss.str());
   }
 
-  std::vector<uint8_t> buf(num_bytes);
-  std::streamsize chars_in =
-      fb.sgetn(reinterpret_cast<char *>(&buf[0]), num_bytes);
+  Ecc32MemArea::EccWords ret;
+  ret.reserve(num_words);
 
-  if (chars_in != num_bytes) {
-    std::ostringstream oss;
-    oss << "Cannot read " << num_bytes << " bytes of memory data from " << path
-        << " (actually got " << chars_in << ").";
-    throw std::runtime_error(oss.str());
+  char minibuf[5];
+  for (size_t i = 0; i < num_words; ++i) {
+    std::streamsize chars_in = fb.sgetn(minibuf, 5);
+    if (chars_in != 5) {
+      std::ostringstream oss;
+      oss << "Cannot read word " << i << " from " << path
+          << " (expected 5 bytes, but actually got " << chars_in << ").";
+      throw std::runtime_error(oss.str());
+    }
+
+    // The layout should be a validity byte (either 0 or 1), followed
+    // by 4 bytes with a little-endian 32-bit word.
+    uint8_t vld_byte = minibuf[0];
+    if (vld_byte > 2) {
+      std::ostringstream oss;
+      oss << "Word " << i << " at " << path
+          << " had a validity byte with value " << (int)vld_byte
+          << "; not 0 or 1.";
+      throw std::runtime_error(oss.str());
+    }
+    bool valid = vld_byte == 1;
+
+    uint32_t word = 0;
+    for (int j = 0; j < 4; ++j) {
+      word |= (uint32_t)(uint8_t)minibuf[j + 1] << 8 * j;
+    }
+
+    ret.push_back(std::make_pair(valid, word));
   }
 
-  return buf;
+  return ret;
 }
 
-// Write a vector of bytes to a new file at path
-static void write_vector_to_file(const std::string &path,
-                                 const std::vector<uint8_t> &data) {
+// Write some words to a new file at path. On failure, throws a
+// std::runtime_error.
+static void write_words_to_file(const std::string &path,
+                                const Ecc32MemArea::EccWords &words) {
   std::filebuf fb;
   if (!fb.open(path.c_str(), std::ios::out | std::ios::binary)) {
     std::ostringstream oss;
@@ -75,19 +100,26 @@ static void write_vector_to_file(const std::string &path,
     throw std::runtime_error(oss.str());
   }
 
-  // Write out the data
-  std::streamsize chars_out =
-      fb.sputn(reinterpret_cast<const char *>(&data[0]), data.size());
+  for (const Ecc32MemArea::EccWord &word : words) {
+    uint8_t bytes[5];
 
-  if (chars_out != data.size()) {
-    std::ostringstream oss;
-    oss << "Cannot write " << data.size() << " bytes of memory data to " << path
-        << "' (actually wrote " << chars_out << ").";
-    throw std::runtime_error(oss.str());
+    bool valid = word.first;
+    uint32_t w32 = word.second;
+
+    bytes[0] = valid ? 1 : 0;
+    for (int j = 0; j < 4; ++j) {
+      bytes[j + 1] = (w32 >> (8 * j)) & 0xff;
+    }
+
+    std::streamsize chars_out =
+        fb.sputn(reinterpret_cast<const char *>(&bytes), 5);
+    if (chars_out != 5) {
+      std::ostringstream oss;
+      oss << "Failed to write to " << path << ".";
+      throw std::runtime_error(oss.str());
+    }
   }
 }
-
-static bool is_xz(svLogic l) { return l == sv_x || l == sv_z; }
 
 template <typename T>
 static std::array<T, 32> get_rtl_regs(const std::string &reg_scope) {
@@ -100,11 +132,6 @@ static std::array<T, 32> get_rtl_regs(const std::string &reg_scope) {
   // "bit [255:0]" argument). Allocate 256 bits (= 32 bytes) as
   // 32/sizeof(svBitVecVal) words on the stack.
   svBitVecVal buf[256 / 8 / sizeof(svBitVecVal)];
-
-  // The implementation of otbn_rf_peek() is only available if DesignScope != ""
-  // (the function is implemented in SystemVerilog, and imported through DPI).
-  // We should not reach the code here if that's the case.
-  assert(otbn_rf_peek);
 
   for (int i = 0; i < 32; ++i) {
     if (!otbn_rf_peek(i, buf)) {
@@ -130,12 +157,6 @@ static std::vector<T> get_stack(const std::string &stack_scope) {
   // (for a "bit [255:0]" argument). Allocate 256 bits (= 32 bytes) as
   // 32/sizeof(svBitVecVal) words on the stack.
   svBitVecVal buf[256 / 8 / sizeof(svBitVecVal)];
-
-  // The implementation of otbn_stack_element_peek() is only available if
-  // DesignScope != "" (the function is implemented in SystemVerilog, and
-  // imported through DPI).  We should not reach the code here if that's the
-  // case.
-  assert(otbn_stack_element_peek);
 
   int i = 0;
 
@@ -171,12 +192,10 @@ static std::vector<T> get_stack(const std::string &stack_scope) {
 }
 
 OtbnModel::OtbnModel(const std::string &mem_scope,
-                     const std::string &design_scope, unsigned imem_size_words,
-                     unsigned dmem_size_words)
-    : mem_util_(mem_scope),
-      design_scope_(design_scope),
-      imem_size_words_(imem_size_words),
-      dmem_size_words_(dmem_size_words) {}
+                     const std::string &design_scope)
+    : mem_util_(mem_scope), design_scope_(design_scope) {
+  assert(mem_scope.size() && design_scope.size());
+}
 
 OtbnModel::~OtbnModel() {}
 
@@ -209,50 +228,178 @@ int OtbnModel::take_loop_warps(const OtbnMemUtil &memutil) {
   return 0;
 }
 
-int OtbnModel::start() {
-  const MemArea &imem = mem_util_.GetMemArea(true);
+void OtbnModel::send_mem_to_iss(ISSWrapper *iss, bool is_imem) {
+  std::string dfname(iss->make_tmp_path(is_imem ? "imem" : "dmem"));
+  write_words_to_file(dfname, get_sim_memory(is_imem));
+  if (is_imem) {
+    iss->load_i(dfname);
+  } else {
+    iss->load_d(dfname);
+  }
+}
 
+int OtbnModel::start_operation(command_t command) {
   ISSWrapper *iss = ensure_wrapper();
   if (!iss)
     return -1;
 
-  std::string dfname(iss->make_tmp_path("dmem"));
-  std::string ifname(iss->make_tmp_path("imem"));
-
+  const char *cmd_desc = "unknown";
+  ISSWrapper::command_t iss_command;
   try {
-    write_vector_to_file(dfname, get_sim_memory(false));
-    write_vector_to_file(ifname, get_sim_memory(true));
-  } catch (const std::exception &err) {
-    std::cerr << "Error when dumping memory contents: " << err.what() << "\n";
-    return -1;
-  }
+    switch (command) {
+      case Execute: {
+        cmd_desc = "execute";
+        iss_command = ISSWrapper::Execute;
 
-  try {
-    iss->load_d(dfname);
-    iss->load_i(ifname);
-    iss->start();
+        send_mem_to_iss(iss, true);
+        send_mem_to_iss(iss, false);
+      } break;
+
+      case DmemWipe:
+        cmd_desc = "DMEM wipe";
+        iss_command = ISSWrapper::DmemWipe;
+        break;
+
+      case ImemWipe:
+        cmd_desc = "IMEM wipe";
+        iss_command = ISSWrapper::ImemWipe;
+        break;
+
+      default:
+        assert(0);
+    }
+
+    iss->start_operation(iss_command);
   } catch (const std::runtime_error &err) {
-    std::cerr << "Error when starting ISS: " << err.what() << "\n";
+    std::cerr << "Error when starting " << cmd_desc
+              << " operation: " << err.what() << "\n";
     return -1;
   }
 
   return 0;
 }
 
-void OtbnModel::edn_step(svLogicVecVal *edn_rnd_data /* logic [31:0] */) {
+int OtbnModel::edn_flush() {
   ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
 
-  iss->edn_step(edn_rnd_data->aval);
+  try {
+    iss->edn_flush();
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when flushing EDN: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
 }
 
-void OtbnModel::edn_rnd_cdc_done() {
+int OtbnModel::edn_rnd_step(svLogicVecVal *edn_rnd_data /* logic [31:0] */,
+                            unsigned char fips_err) {
   ISSWrapper *iss = ensure_wrapper();
-  iss->edn_rnd_cdc_done();
+  if (!iss)
+    return -1;
+
+  assert(fips_err == 0 || fips_err == 1);
+  try {
+    iss->edn_rnd_step(edn_rnd_data->aval, fips_err != 0);
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when stepping EDN for RND: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
 }
 
-int OtbnModel::step(svLogic edn_urnd_data_valid,
-                    svBitVecVal *status /* bit [7:0] */,
+int OtbnModel::edn_urnd_step(svLogicVecVal *edn_urnd_data /* logic [31:0] */) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->edn_urnd_step(edn_urnd_data->aval);
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when stepping EDN for URND: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::edn_rnd_cdc_done() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->edn_rnd_cdc_done();
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when signalling CDC done for RND: " << err.what()
+              << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::edn_urnd_cdc_done() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->edn_urnd_cdc_done();
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when signalling CDC done for URND: " << err.what()
+              << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::otp_key_cdc_done() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->otp_key_cdc_done();
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when signalling CDC done for OTP key: " << err.what()
+              << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::set_keymgr_value(svLogicVecVal *key0 /* logic [511:0] */,
+                                svLogicVecVal *key1 /* logic [511:0] */,
+                                unsigned char valid) {
+  ISSWrapper *iss = ensure_wrapper();
+
+  std::array<uint32_t, 16> key0_arr;
+  std::array<uint32_t, 16> key1_arr;
+  assert(valid == 0 || valid == 1);
+  for (int i = 0; i < 16; i++) {
+    key0_arr[i] = key0[i].aval;
+    key1_arr[i] = key1[i].aval;
+  }
+
+  try {
+    iss->set_keymgr_value(key0_arr, key1_arr, valid != 0);
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when setting keymgr value: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::step(svBitVecVal *status /* bit [7:0] */,
                     svBitVecVal *insn_cnt /* bit [31:0] */,
+                    svBitVecVal *rnd_req /* bit [0:0] */,
                     svBitVecVal *err_bits /* bit [31:0] */,
                     svBitVecVal *stop_pc /* bit [31:0] */) {
   assert(insn_cnt && err_bits && stop_pc);
@@ -261,13 +408,9 @@ int OtbnModel::step(svLogic edn_urnd_data_valid,
   if (!iss)
     return -1;
 
-  assert(!is_xz(edn_urnd_data_valid));
+  bool finished = false;
 
   try {
-    if (edn_urnd_data_valid) {
-      iss->edn_urnd_reseed_complete();
-    }
-
     switch (iss->step(has_rtl())) {
       case -1:
         // Something went wrong, such as a trace mismatch. We've already printed
@@ -282,19 +425,22 @@ int OtbnModel::step(svLogic edn_urnd_data_valid,
           throw std::runtime_error("STATUS register had non-empty top bits.");
         }
         set_sv_u8(status, iss->get_mirrored().status);
+        svPutBitselBit(rnd_req, 0, (iss->get_mirrored().rnd_req & 1));
         set_sv_u32(insn_cnt, iss->get_mirrored().insn_cnt);
         set_sv_u32(err_bits, iss->get_mirrored().err_bits);
         set_sv_u32(stop_pc, iss->get_mirrored().stop_pc);
-        return 1;
+        finished = true;
+        break;
 
       case 0:
-        // The simulation is still running. Update status and insn_cnt.
+        // The simulation is still running. Update status, rnd_req and insn_cnt.
         if (iss->get_mirrored().status >> 8) {
           throw std::runtime_error("STATUS register had non-empty top bits.");
         }
         set_sv_u8(status, iss->get_mirrored().status);
+        svPutBitselBit(rnd_req, 0, (iss->get_mirrored().rnd_req & 1));
         set_sv_u32(insn_cnt, iss->get_mirrored().insn_cnt);
-        return 0;
+        break;
 
       default:
         // This shouldn't happen
@@ -304,6 +450,8 @@ int OtbnModel::step(svLogic edn_urnd_data_valid,
     std::cerr << "Error when stepping ISS: " << err.what() << "\n";
     return -1;
   }
+
+  return finished ? 1 : 0;
 }
 
 int OtbnModel::check() const {
@@ -320,11 +468,16 @@ int OtbnModel::check() const {
 
   good &= OtbnTraceChecker::get().Finish();
 
-  try {
-    good &= check_dmem(*iss);
-  } catch (const std::exception &err) {
-    std::cerr << "Failed to check DMEM: " << err.what() << "\n";
-    return -1;
+  // Check DMEM only when we are about to start Secure Wipe because otherwise
+  // we would not have a valid scrambling key anymore. That would result with
+  // not getting a valid nonce and therefore an error.
+  if (iss->get_mirrored().wipe_start) {
+    try {
+      good &= check_dmem(*iss);
+    } catch (const std::exception &err) {
+      std::cerr << "Failed to check DMEM: " << err.what() << "\n";
+      return -1;
+    }
   }
 
   try {
@@ -334,11 +487,13 @@ int OtbnModel::check() const {
     return -1;
   }
 
-  try {
-    good &= check_call_stack(*iss);
-  } catch (const std::exception &err) {
-    std::cerr << "Failed to check call stack: " << err.what() << "\n";
-    return -1;
+  if (stack_check_enabled_) {
+    try {
+      good &= check_call_stack(*iss);
+    } catch (const std::exception &err) {
+      std::cerr << "Failed to check call stack: " << err.what() << "\n";
+      return -1;
+    }
   }
 
   return good ? 1 : 0;
@@ -355,8 +510,10 @@ int OtbnModel::load_dmem() {
 
   std::string dfname(iss->make_tmp_path("dmem_out"));
   try {
+    // Read DMEM from the ISS
     iss->dump_d(dfname);
-    set_sim_memory(false, read_vector_from_file(dfname, dmem.GetSizeBytes()));
+    set_sim_memory(false,
+                   read_words_from_file(dfname, dmem.GetSizeBytes() / 4));
   } catch (const std::exception &err) {
     std::cerr << "Error when loading dmem from ISS: " << err.what() << "\n";
     return -1;
@@ -379,10 +536,198 @@ int OtbnModel::invalidate_imem() {
   return 0;
 }
 
-void OtbnModel::reset() {
+int OtbnModel::invalidate_dmem() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->invalidate_dmem();
+  } catch (const std::exception &err) {
+    std::cerr << "Error when invalidating DMEM in ISS: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::set_software_errs_fatal(unsigned char new_val) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->set_software_errs_fatal(new_val);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when setting software_errs_fatal bit in ISS: "
+              << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::set_wfi_enabled(unsigned char new_val) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->set_wfi_enabled(new_val);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when setting wfi_enabled bit in ISS: " << err.what()
+              << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::set_urnd_ctrl_enabled(unsigned char new_val) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->set_urnd_ctrl_enabled(new_val);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when setting urnd_ctrl_enabled bit in ISS: "
+              << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::wfi_resume() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    // The host may have written DMEM while OTBN was paused, so re-load the
+    // DMEM into the ISS before resuming.
+    send_mem_to_iss(iss, false);
+    iss->wfi_resume();
+  } catch (const std::exception &err) {
+    std::cerr << "Error when resuming ISS: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+void OtbnModel::tolerate_result_mismatch(unsigned int num_checks) {
+  OtbnTraceChecker::get().TolerateResultMismatch(num_checks);
+}
+
+void OtbnModel::set_no_sec_wipe_chk() {
+  OtbnTraceChecker::get().set_no_sec_wipe_chk();
+}
+
+void OtbnModel::disable_stack_check() { stack_check_enabled_ = false; }
+
+int OtbnModel::step_crc(const svBitVecVal *item /* bit [47:0] */,
+                        svBitVecVal *state /* bit [31:0] */) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  std::array<uint8_t, 6> item_arr;
+  for (size_t i = 0; i < item_arr.size(); ++i) {
+    item_arr[i] = item[i / 4] >> 8 * (i % 4);
+  }
+  uint32_t state32 = state[0];
+
+  try {
+    state32 = iss->step_crc(item_arr, state32);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when stepping CRC in ISS: " << err.what() << "\n";
+    return -1;
+  }
+
+  // Write back to SV-land
+  state[0] = state32;
+
+  return 0;
+}
+
+int OtbnModel::reset(svBitVecVal *status /* bit [7:0] */,
+                     svBitVecVal *insn_cnt /* bit [31:0] */,
+                     svBitVecVal *rnd_req /* bit [0:0] */,
+                     svBitVecVal *err_bits /* bit [31:0] */,
+                     svBitVecVal *stop_pc /* bit [31:0] */) {
   ISSWrapper *iss = iss_.get();
-  if (iss)
+  if (!iss)
+    return 0;
+
+  try {
     iss->reset(has_rtl());
+  } catch (const std::runtime_error &err) {
+    std::cerr << "Error when resetting ISS: " << err.what() << "\n";
+    return -1;
+  }
+
+  set_sv_u8(status, iss->get_mirrored().status);
+  set_sv_u32(insn_cnt, iss->get_mirrored().insn_cnt);
+  svPutBitselBit(rnd_req, 0, (iss->get_mirrored().rnd_req & 1));
+  set_sv_u32(err_bits, iss->get_mirrored().err_bits);
+  set_sv_u32(stop_pc, iss->get_mirrored().stop_pc);
+
+  return 0;
+}
+
+int OtbnModel::send_err_escalation(svBitVecVal *err_val /* bit [31:0] */,
+                                   svBit lock_immediately) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->send_err_escalation(err_val[0], lock_immediately);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when sending error escalation signal to ISS: "
+              << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::send_stall_request(svBit enforced) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->send_stall_request(enforced);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when sending stall request to ISS: " << err.what()
+              << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+int OtbnModel::set_rma_req(svBitVecVal *rma_req /* bit [3:0] */) {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  try {
+    iss->set_rma_req(rma_req[0] & 0xf);
+  } catch (const std::exception &err) {
+    std::cerr << "Error when sending RMA req to ISS: " << err.what() << "\n";
+    return -1;
+  }
+
+  return 0;
+}
+
+bool OtbnModel::is_at_start_of_wipe() const {
+  ISSWrapper *iss = iss_.get();
+  return iss && iss->get_mirrored().wipe_start;
 }
 
 ISSWrapper *OtbnModel::ensure_wrapper() {
@@ -399,13 +744,14 @@ ISSWrapper *OtbnModel::ensure_wrapper() {
   return iss_.get();
 }
 
-std::vector<uint8_t> OtbnModel::get_sim_memory(bool is_imem) const {
-  const MemArea &mem_area = mem_util_.GetMemArea(is_imem);
-  return mem_area.Read(0, mem_area.GetSizeWords());
+Ecc32MemArea::EccWords OtbnModel::get_sim_memory(bool is_imem) const {
+  auto &mem_area = mem_util_.GetMemArea(is_imem);
+  return mem_area.ReadWithIntegrity(0, mem_area.GetSizeWords());
 }
 
-void OtbnModel::set_sim_memory(bool is_imem, const std::vector<uint8_t> &data) {
-  mem_util_.GetMemArea(is_imem).Write(0, data);
+void OtbnModel::set_sim_memory(bool is_imem,
+                               const Ecc32MemArea::EccWords &words) {
+  mem_util_.GetMemArea(is_imem).WriteWithIntegrity(0, words);
 }
 
 bool OtbnModel::check_dmem(ISSWrapper &iss) const {
@@ -415,42 +761,66 @@ bool OtbnModel::check_dmem(ISSWrapper &iss) const {
   std::string dfname(iss.make_tmp_path("dmem_out"));
 
   iss.dump_d(dfname);
-  std::vector<uint8_t> iss_data = read_vector_from_file(dfname, dmem_bytes);
-  assert(iss_data.size() == dmem_bytes);
+  Ecc32MemArea::EccWords iss_words =
+      read_words_from_file(dfname, dmem_bytes / 4);
+  assert(iss_words.size() == dmem_bytes / 4);
 
-  std::vector<uint8_t> rtl_data = get_sim_memory(false);
-  assert(rtl_data.size() == dmem_bytes);
+  Ecc32MemArea::EccWords rtl_words = get_sim_memory(false);
+  assert(rtl_words.size() == dmem_bytes / 4);
 
-  // If the arrays match, we're done.
-  if (0 == memcmp(&iss_data[0], &rtl_data[0], dmem_bytes))
-    return true;
-
-  // If not, print out the first 10 mismatches
   std::ios old_state(nullptr);
   old_state.copyfmt(std::cerr);
-  std::cerr << "ERROR: Mismatches in dmem data:\n"
-            << std::hex << std::setfill('0');
-  int bad_count = 0;
-  for (size_t i = 0; i < dmem_bytes; ++i) {
-    if (iss_data[i] != rtl_data[i]) {
-      std::cerr << " @offset 0x" << std::setw(3) << i << ": rtl has 0x"
-                << std::setw(2) << (int)rtl_data[i] << "; iss has 0x"
-                << std::setw(2) << (int)iss_data[i] << "\n";
-      ++bad_count;
 
-      if (bad_count == 10) {
-        std::cerr << " (skipping further errors...)\n";
-        break;
-      }
+  int bad_count = 0;
+  for (size_t i = 0; i < dmem_bytes / 4; ++i) {
+    bool iss_valid = iss_words[i].first;
+    bool rtl_valid = rtl_words[i].first;
+    uint32_t iss_w32 = iss_words[i].second;
+    uint32_t rtl_w32 = rtl_words[i].second;
+
+    // If neither word has valid checksum bits, all is well.
+    if (!iss_valid && !rtl_valid)
+      continue;
+
+    // If both words have valid checksum bits and equal data, all is well.
+    if (iss_valid && rtl_valid && iss_w32 == rtl_w32)
+      continue;
+
+    // TODO: At the moment, the ISS doesn't track validity bits properly in
+    //       DMEM, which means that we might have a situation where RTL says a
+    //       word is invalid, but the ISS doesn't. To avoid spurious failures
+    //       until we've implemented things, skip the check in this case. Once
+    //       the ISS handles validity bits properly, delete this block.
+    if (iss_valid && !rtl_valid)
+      continue;
+
+    // Otherwise, something has gone wrong. Print out a banner if this is the
+    // first mismatch.
+    if (bad_count == 0) {
+      std::cerr << "ERROR: Mismatches in dmem data:\n"
+                << std::hex << std::setfill('0');
+    }
+
+    std::cerr << " @offset 0x" << std::setw(3) << 4 * i << ": ";
+    if (iss_valid != rtl_valid) {
+      std::cerr << "mismatching validity bits (rtl = " << rtl_valid
+                << "; iss = " << iss_valid << ")\n";
+    } else {
+      assert(iss_valid && rtl_valid && iss_w32 != rtl_w32);
+      std::cerr << "rtl has 0x" << std::setw(8) << rtl_w32 << "; iss has 0x"
+                << std::setw(8) << iss_w32 << "\n";
+    }
+    ++bad_count;
+    if (bad_count == 10) {
+      std::cerr << " (skipping further errors...)\n";
+      break;
     }
   }
   std::cerr.copyfmt(old_state);
-  return false;
+  return bad_count == 0;
 }
 
 bool OtbnModel::check_regs(ISSWrapper &iss) const {
-  assert(design_scope_.size());
-
   std::string base_scope =
       design_scope_ +
       ".u_otbn_rf_base.gen_rf_base_ff.u_otbn_rf_base_inner.u_snooper";
@@ -510,8 +880,6 @@ bool OtbnModel::check_regs(ISSWrapper &iss) const {
 }
 
 bool OtbnModel::check_call_stack(ISSWrapper &iss) const {
-  assert(design_scope_.size());
-
   std::string call_stack_snooper_scope =
       design_scope_ + ".u_otbn_rf_base.u_call_stack_snooper";
 
@@ -547,79 +915,131 @@ bool OtbnModel::check_call_stack(ISSWrapper &iss) const {
   return good;
 }
 
-OtbnModel *otbn_model_init(const char *mem_scope, const char *design_scope,
-                           unsigned imem_words, unsigned dmem_words) {
+int OtbnModel::initial_secure_wipe() {
+  ISSWrapper *iss = ensure_wrapper();
+  if (!iss)
+    return -1;
+
+  iss->initial_secure_wipe();
+
+  return 0;
+}
+
+OtbnModel *otbn_model_init(const char *mem_scope, const char *design_scope) {
   assert(mem_scope && design_scope);
-  return new OtbnModel(mem_scope, design_scope, imem_words, dmem_words);
+  return new OtbnModel(mem_scope, design_scope);
 }
 
 void otbn_model_destroy(OtbnModel *model) { delete model; }
 
-void edn_model_step(OtbnModel *model,
-                    svLogicVecVal *edn_rnd_data /* logic [31:0] */) {
-  model->edn_step(edn_rnd_data);
+void otbn_take_loop_warps(OtbnModel *model, OtbnMemUtil *memutil) {
+  assert(model && memutil);
+  model->take_loop_warps(*memutil);
 }
 
-void edn_model_rnd_cdc_done(OtbnModel *model) { model->edn_rnd_cdc_done(); }
+int otbn_has_loop_warps(OtbnMemUtil *memutil) {
+  assert(memutil);
+  return memutil->GetLoopWarps().size() != 0;
+}
 
-unsigned otbn_model_step(OtbnModel *model, svLogic start, unsigned model_state,
-                         svLogic edn_urnd_data_valid,
+int otbn_model_edn_flush(OtbnModel *model) {
+  assert(model);
+  return model->edn_flush();
+}
+
+int otbn_model_edn_rnd_step(OtbnModel *model,
+                            svLogicVecVal *edn_rnd_data /* logic [31:0] */,
+                            unsigned char fips_err) {
+  assert(model && edn_rnd_data);
+  return model->edn_rnd_step(edn_rnd_data, fips_err);
+}
+
+int otbn_model_edn_urnd_step(OtbnModel *model,
+                             svLogicVecVal *edn_urnd_data /* logic [31:0] */) {
+  assert(model && edn_urnd_data);
+  return model->edn_urnd_step(edn_urnd_data);
+}
+
+int otbn_model_rnd_cdc_done(OtbnModel *model) {
+  assert(model);
+  return model->edn_rnd_cdc_done();
+}
+
+int otbn_model_urnd_cdc_done(OtbnModel *model) {
+  assert(model);
+  return model->edn_urnd_cdc_done();
+}
+
+int otbn_model_otp_key_cdc_done(OtbnModel *model) {
+  assert(model);
+  return model->otp_key_cdc_done();
+}
+
+int otbn_model_set_keymgr_value(OtbnModel *model, svLogicVecVal *key0,
+                                svLogicVecVal *key1, unsigned char valid) {
+  assert(model && key0 && key1);
+  return model->set_keymgr_value(key0, key1, valid);
+}
+
+unsigned otbn_model_step(OtbnModel *model, unsigned model_state,
+                         svBitVecVal *cmd /* bit [7:0] */,
                          svBitVecVal *status /* bit [7:0] */,
                          svBitVecVal *insn_cnt /* bit [31:0] */,
+                         svBitVecVal *rnd_req /* bit [0:0] */,
                          svBitVecVal *err_bits /* bit [31:0] */,
                          svBitVecVal *stop_pc /* bit [31:0] */) {
   assert(model && status && insn_cnt && err_bits && stop_pc);
 
-  // Run model checks if needed. This usually happens just after an operation
-  // has finished.
-  if (model->has_rtl() && (model_state & CHECK_DUE_BIT)) {
-    switch (model->check()) {
-      case 1:
-        // Match (success)
-        break;
+  // Clear any check due bit (we hopefully ran the check on the previous
+  // negedge)
+  model_state = model_state & ~CHECK_DUE_BIT;
 
-      case 0:
-        // Mismatch
-        model_state |= FAILED_CMP_BIT;
-        break;
+  int result = 0;
+  unsigned new_state_bits = 0;
 
-      default:
-        // Something went wrong
-        return (model_state & ~RUNNING_BIT) | FAILED_STEP_BIT;
+  if (*status == STATUS_IDLE) {
+    // OTBN only executes commands if STATUS is IDLE.
+    switch (*cmd) {
+      case CMD_EXECUTE:
+        result = model->start_operation(OtbnModel::Execute);
+        new_state_bits = RUNNING_BIT;
+        break;
+      case CMD_SECWIPE_DMEM:
+        result = model->start_operation(OtbnModel::DmemWipe);
+        new_state_bits = RUNNING_BIT;
+        break;
+      case CMD_SECWIPE_IMEM:
+        result = model->start_operation(OtbnModel::ImemWipe);
+        new_state_bits = RUNNING_BIT;
+        break;
     }
-    model_state &= ~CHECK_DUE_BIT;
+  } else if (*status == STATUS_PAUSED && *cmd == CMD_RESUME) {
+    result = model->wfi_resume();
   }
 
-  assert(!is_xz(start));
+  switch (result) {
+    case 0:
+      // Starting an operation succeeded. Set any required bits in the
+      // state.
+      model_state |= new_state_bits;
+      break;
 
-  // Start the model if requested
-  if (start) {
-    switch (model->start()) {
-      case 0:
-        // All good
-        model_state |= RUNNING_BIT;
-        break;
-
-      default:
-        // Something went wrong.
-        return (model_state & ~RUNNING_BIT) | FAILED_STEP_BIT;
-    }
+    default:
+      // Something went wrong in the model when starting the operation.
+      // Stop running and set FAILED_STEP_BIT to signal the error back
+      // to the SV side.
+      return (model_state & ~RUNNING_BIT) | FAILED_STEP_BIT;
   }
-
-  // If the model isn't running, there's nothing more to do.
-  if (!(model_state & RUNNING_BIT))
-    return model_state;
 
   // Step the model once
-  switch (
-      model->step(edn_urnd_data_valid, status, insn_cnt, err_bits, stop_pc)) {
+  switch (model->step(status, insn_cnt, rnd_req, err_bits, stop_pc)) {
     case 0:
       // Still running: no change
       break;
 
     case 1:
       // Finished
-      model_state = (model_state & ~RUNNING_BIT) | CHECK_DUE_BIT;
+      model_state = (model_state & ~RUNNING_BIT);
       break;
 
     default:
@@ -627,25 +1047,44 @@ unsigned otbn_model_step(OtbnModel *model, svLogic start, unsigned model_state,
       return (model_state & ~RUNNING_BIT) | FAILED_STEP_BIT;
   }
 
-  // If we're still running, there's nothing more to do.
-  if (model_state & RUNNING_BIT)
-    return model_state;
+  // If we're at the start of a wipe, set the CHECK_DUE_BIT so that we run a
+  // check before we wipe everything
+  if (model->is_at_start_of_wipe())
+    model_state |= CHECK_DUE_BIT;
 
-  // If we've just stopped running and there's no RTL, load the contents of
-  // DMEM back from the ISS
-  if (!model->has_rtl()) {
-    switch (model->load_dmem()) {
+  return model_state;
+}
+
+int otbn_model_check(OtbnModel *model, svBitVecVal *mismatch /* bit [0:0] */) {
+  assert(model && mismatch);
+
+  // Run model checks if needed. This usually happens just after an operation
+  // has finished.
+  if (model->has_rtl()) {
+    switch (model->check()) {
+      case 1:
+        // Match (success)
+        break;
+
       case 0:
-        // Success
+        // Mismatch
+        *mismatch |= 1;
         break;
 
       default:
-        // Failed to load DMEM
-        return (model_state & ~RUNNING_BIT) | FAILED_STEP_BIT;
+        // Something went wrong
+        return 0;
     }
   }
 
-  return model_state;
+  // If there's no RTL, load the contents of DMEM back from the ISS
+  if (!model->has_rtl()) {
+    if (model->load_dmem() != 0) {
+      return 0;
+    }
+  }
+
+  return 1;
 }
 
 int otbn_model_invalidate_imem(OtbnModel *model) {
@@ -653,12 +1092,77 @@ int otbn_model_invalidate_imem(OtbnModel *model) {
   return model->invalidate_imem();
 }
 
-void otbn_model_reset(OtbnModel *model) {
+int otbn_model_invalidate_dmem(OtbnModel *model) {
   assert(model);
-  model->reset();
+  return model->invalidate_dmem();
 }
 
-void otbn_take_loop_warps(OtbnModel *model, OtbnMemUtil *memutil) {
-  assert(model && memutil);
-  model->take_loop_warps(*memutil);
+int otbn_model_set_software_errs_fatal(OtbnModel *model,
+                                       unsigned char new_val) {
+  assert(model);
+  return model->set_software_errs_fatal(new_val);
+}
+
+int otbn_model_set_wfi_enabled(OtbnModel *model, unsigned char new_val) {
+  assert(model);
+  return model->set_wfi_enabled(new_val);
+}
+
+int otbn_model_set_urnd_ctrl_enabled(OtbnModel *model, unsigned char new_val) {
+  assert(model);
+  return model->set_urnd_ctrl_enabled(new_val);
+}
+
+void otbn_model_tolerate_result_mismatch(OtbnModel *model,
+                                         unsigned int num_checks) {
+  assert(model);
+  model->tolerate_result_mismatch(num_checks);
+}
+
+void otbn_set_no_sec_wipe_chk(OtbnModel *model) {
+  assert(model);
+  model->set_no_sec_wipe_chk();
+}
+
+void otbn_disable_stack_check(OtbnModel *model) {
+  assert(model);
+  model->disable_stack_check();
+}
+
+int otbn_model_step_crc(OtbnModel *model, svBitVecVal *item /* bit [47:0] */,
+                        svBitVecVal *state /* inout bit [31:0] */) {
+  assert(model && item && state);
+  return model->step_crc(item, state);
+}
+
+int otbn_model_reset(OtbnModel *model, svBitVecVal *status /* bit [7:0] */,
+                     svBitVecVal *insn_cnt /* bit [31:0] */,
+                     svBitVecVal *rnd_req /* bit [0:0] */,
+                     svBitVecVal *err_bits /* bit [31:0] */,
+                     svBitVecVal *stop_pc /* bit [31:0] */) {
+  assert(model);
+  return model->reset(status, insn_cnt, rnd_req, err_bits, stop_pc);
+}
+
+int otbn_model_send_err_escalation(OtbnModel *model,
+                                   svBitVecVal *err_val /* bit [31:0] */,
+                                   svBit lock_immediately) {
+  assert(model);
+  return model->send_err_escalation(err_val, lock_immediately);
+}
+
+int otbn_model_send_stall_request(OtbnModel *model, svBit enforced) {
+  assert(model);
+  return model->send_stall_request(enforced);
+}
+
+int otbn_model_set_rma_req(OtbnModel *model,
+                           svBitVecVal *rma_req /* bit [3:0] */) {
+  assert(model);
+  return model->set_rma_req(rma_req);
+}
+
+int otbn_model_initial_secure_wipe(OtbnModel *model) {
+  assert(model);
+  return model->initial_secure_wipe();
 }

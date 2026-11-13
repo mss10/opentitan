@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +13,7 @@ gen-weights:
   SmallVal: 0.2
   StraightLineInsn: 1.0
   KnownWDR: 0.05
+  UntakenBranch: 0.05
 
   # Generators that end the program
   ECall: 1
@@ -26,3 +27,4 @@ gen-weights:
   BadGiantLoop: 1
   BadZeroLoop: 1
   MisalignedLoadStore: 1
+  BadIspr: 1

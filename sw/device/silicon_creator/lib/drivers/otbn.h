@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,149 +16,332 @@ extern "C" {
 #endif
 
 /**
- * The size of OTBN's data memory in bytes.
+ * Constants related to OTBN wide words
  */
-extern const size_t kOtbnDMemSizeBytes;
+enum {
+  /* Length of an OTBN wide word in bits */
+  kScOtbnWideWordNumBits = 256,
+  /* Length of an OTBN wide word in words */
+  kScOtbnWideWordNumWords = kScOtbnWideWordNumBits / (sizeof(uint32_t) * 8),
+};
 
 /**
- * The size of OTBN's instruction memory in bytes.
+ * The following constants represent the expected number of sec_mmio register
+ * writes performed by functions in provided in this module. See
+ * `SEC_MMIO_WRITE_INCREMENT()` for more details.
+ *
+ * Example:
+ * ```
+ *  sc_otbn_execute();
+ *  SEC_MMIO_WRITE_INCREMENT(kScOtbnSecMmioExecute);
+ * ```
  */
-extern const size_t kOtbnIMemSizeBytes;
+enum {
+  kScOtbnSecMmioExecute = 1,
+};
 
 /**
  * OTBN commands
+ *
+ * TODO(#16754): replace these with constants from otbn_regs.h
  */
-typedef enum dif_otbn_cmd {
-  kOtbnCmdExecute = 0xd8,
-  kOtbnCmdSecWipeDmem = 0xc3,
-  kOtbnCmdSecWipeImem = 0x1e,
-} otbn_cmd_t;
+typedef enum sc_otbn_cmd {
+  kScOtbnCmdExecute = 0xd8,
+  kScOtbnCmdSecWipeDmem = 0xc3,
+  kScOtbnCmdSecWipeImem = 0x1e,
+} sc_otbn_cmd_t;
 
 /**
  * OTBN status
+ *
+ * TODO(#16754): replace these with constants from otbn_regs.h
  */
-typedef enum otbn_status {
-  kOtbnStatusIdle = 0x00,
-  kOtbnStatusBusyExecute = 0x01,
-  kOtbnStatusBusySecWipeDmem = 0x02,
-  kOtbnStatusBusySecWipeImem = 0x03,
-  kOtbnStatusLocked = 0xFF,
-} otbn_status_t;
+typedef enum sc_otbn_status {
+  kScOtbnStatusIdle = 0x00,
+  kScOtbnStatusBusyExecute = 0x01,
+  kScOtbnStatusBusySecWipeDmem = 0x02,
+  kScOtbnStatusBusySecWipeImem = 0x03,
+  kScOtbnStatusBusySecWipeInt = 0x04,
+  kScOtbnStatusLocked = 0xFF,
+} sc_otbn_status_t;
 
 /**
- * Start the execution of the application loaded into OTBN
+ * The address of an OTBN symbol as seen by OTBN
  *
- * @return `kErrorOtbnInvalidArgument` if `start_addr` is invalid, `kErrorOk`
- *         otherwise.
+ * Use `OTBN_DECLARE_SYMBOL_ADDR()` together with `OTBN_ADDR_T_INIT()` to
+ * initialize this type.
  */
-rom_error_t otbn_execute(void);
+typedef uint32_t sc_otbn_addr_t;
 
 /**
- * Is OTBN busy executing an application?
+ * Information about an embedded OTBN application image.
  *
- * @return OTBN is busy
+ * All pointers reference data in the normal CPU address space.
+ * uint32_t values are addresses in the OTBN address space.
+ *
+ * Use `OTBN_DECLARE_APP_SYMBOLS()` together with `OTBN_APP_T_INIT()` to
+ * initialize this structure.
  */
-bool otbn_is_busy(void);
+typedef struct sc_otbn_app {
+  /**
+   * Start of OTBN instruction memory.
+   */
+  const uint32_t *imem_start;
+  /**
+   * The first word after OTBN instruction memory.
+   *
+   * This address satifies `imem_len = imem_end - imem_start`.
+   */
+  const uint32_t *imem_end;
+  /**
+   * Start of initialized OTBN data.
+   *
+   * Data in between dmem_data_start and dmem_data_end will be copied to OTBN
+   * at app load time.
+   */
+  const uint32_t *dmem_data_start;
+  /**
+   * The first word after initialized OTBN data.
+   *
+   * Should satisfy `dmem_data_start <= dmem_data_end`.
+   */
+  const uint32_t *dmem_data_end;
+  /**
+   * Start of initialized data section in OTBN's DMEM.
+   *
+   * This pointer references OTBN's memory and is used to copy data at app load
+   * time.
+   */
+  const sc_otbn_addr_t dmem_data_start_addr;
+} sc_otbn_app_t;
 
 /**
- * OTBN Errors
+ * Generate the prefix to add to an OTBN symbol name used on the Ibex side
  *
- * OTBN uses a bitfield to indicate which errors have been seen. Multiple errors
- * can be seen at the same time. This enum gives the individual bits that may be
- * set for different errors.
+ * The result is a pointer to Ibex's rodata that should be used to initialise
+ * memory for that symbol.
+ *
+ * This is needed by the OTBN driver to support DMEM/IMEM ranges but
+ * application code shouldn't need to use this. Use the `sc_otbn_addr_t` type
+ * and supporting macros instead.
  */
-typedef enum otbn_err_bits {
-  kOtbnErrBitsNoError = 0,
-  /** A BAD_DATA_ADDR error was observed. */
-  kOtbnErrBitsBadDataAddr = (1 << 0),
-  /** A BAD_INSN_ADDR error was observed. */
-  kOtbnErrBitsBadInsnAddr = (1 << 1),
-  /** A CALL_STACK error was observed. */
-  kOtbnErrBitsCallStack = (1 << 2),
-  /** An ILLEGAL_INSN error was observed. */
-  kOtbnErrBitsIllegalInsn = (1 << 3),
-  /** A LOOP error was observed. */
-  kOtbnErrBitsLoop = (1 << 4),
-  /** A IMEM_INTG_VIOLATION error was observed. */
-  kOtbnErrBitsImemIntgViolation = (1 << 16),
-  /** A DMEM_INTG_VIOLATION error was observed. */
-  kOtbnErrBitsDmemIntgViolation = (1 << 17),
-  /** A REG_INTG_VIOLATION error was observed. */
-  kOtbnErrBitsRegIntgViolation = (1 << 18),
-  /** A BUS_INTG_VIOLATION error was observed. */
-  kOtbnErrBitsBusIntgViolation = (1 << 19),
-  /** An ILLEGAL_BUS_ACCESS error was observed. */
-  kOtbnErrBitsIllegalBusAccess = (1 << 20),
-  /** A LIFECYCLE_ESCALATION error was observed. */
-  kOtbnErrBitsLifecycleEscalation = (1 << 21),
-  /** A FATAL_SOFTWARE error was observed. */
-  kOtbnErrBitsFatalSoftware = (1 << 22),
-} otbn_err_bits_t;
+#define OTBN_SYMBOL_PTR(app_name, sym) _otbn_local_app_##app_name##_##sym
 
 /**
- * Get the error bits set by the device if the operation failed.
+ * Generate the prefix to add to an OTBN symbol name used on the OTBN side
  *
- * @param[out] err_bits The error bits returned by the hardware.
+ * The result is a pointer whose integer value is the address by which the
+ * symbol should be accessed in OTBN memory.
+ *
+ * This is an internal macro used in `OTBN_DECLARE_SYMBOL_ADDR` and
+ * `OTBN_ADDR_T_INIT` but application code shouldn't need to use it directly.
  */
-void otbn_get_err_bits(otbn_err_bits_t *err_bits);
+#define OTBN_SYMBOL_ADDR(app_name, sym) _otbn_remote_app_##app_name##_##sym
 
 /**
- * Write an OTBN application into its instruction memory (IMEM)
+ * Makes a symbol in the OTBN application image available.
  *
- * Only 32b-aligned 32b word accesses are allowed.
- *
- * @param offset_bytes the byte offset in IMEM the first word is written to
- * @param src the main memory location to start reading from.
- * @param len number of words to copy.
- * @return `kErrorOtbnBadOffset` if `offset_bytes` isn't word aligned,
- * `kErrorOtbnBadOffsetLen` if `len` is invalid , `kErrorOk` otherwise.
+ * This is needed by the OTBN driver to support DMEM/IMEM ranges but
+ * application code shouldn't need to use this. To get access to OTBN
+ * addresses, use `OTBN_DECLARE_SYMBOL_ADDR` instead.
  */
-rom_error_t otbn_imem_write(uint32_t offset_bytes, const uint32_t *src,
-                            size_t len);
+#define OTBN_DECLARE_SYMBOL_PTR(app_name, symbol_name) \
+  extern const uint32_t OTBN_SYMBOL_PTR(app_name, symbol_name)[]
 
 /**
- * Write to OTBN's data memory (DMEM)
+ * Makes the OTBN address of a symbol in the OTBN application available.
  *
- * Only 32b-aligned 32b word accesses are allowed.
+ * Symbols are typically function or data pointers, i.e. labels in assembly
+ * code. Unlike OTBN_DECLARE_SYMBOL_PTR, this will work for symbols in the .bss
+ * section (which exist on the OTBN side, even though they don't have backing
+ * data on Ibex).
  *
- * @param offset_bytes the byte offset in DMEM the first word is written to
- * @param src the main memory location to start reading from.
- * @param len number of words to copy.
- * @return `kErrorOtbnBadOffset` if `offset_bytes` isn't word aligned,
- * `kErrorOtbnBadOffsetLen` if `len` is invalid , `kErrorOk` otherwise.
+ * Use this macro instead of manually declaring the symbols as symbol names
+ * might change.
+ *
+ * @param app_name    Name of the application the function is contained in.
+ * @param symbol_name Name of the symbol (function, label).
  */
-rom_error_t otbn_dmem_write(uint32_t offset_bytes, const uint32_t *src,
-                            size_t len);
+#define OTBN_DECLARE_SYMBOL_ADDR(app_name, symbol_name) \
+  extern const uint32_t OTBN_SYMBOL_ADDR(app_name, symbol_name)[]
 
 /**
- * Read from OTBN's data memory (DMEM)
+ * Makes an embedded OTBN application image available for use.
  *
- * Only 32b-aligned 32b word accesses are allowed.
+ * Make symbols available that indicate the start and the end of instruction
+ * and data memory regions, as they are stored in the device memory.
  *
- * @param offset_bytes the byte offset in DMEM the first word is read from
- * @param[out] dest the main memory location to copy the data to (preallocated)
- * @param len number of words to copy.
- * @return `kErrorOtbnBadOffset` if `offset_bytes` isn't word aligned,
- * `kErrorOtbnBadOffsetLen` if `len` is invalid , `kErrorOk` otherwise.
+ * Use this macro instead of manually declaring the symbols as symbol names
+ * might change.
+ *
+ * @param app_name Name of the application to load, which is typically the
+ *                 name of the main (assembly) source file.
  */
-rom_error_t otbn_dmem_read(uint32_t offset_bytes, uint32_t *dest, size_t len);
+#define OTBN_DECLARE_APP_SYMBOLS(app_name)             \
+  OTBN_DECLARE_SYMBOL_PTR(app_name, _imem_start);      \
+  OTBN_DECLARE_SYMBOL_PTR(app_name, _imem_end);        \
+  OTBN_DECLARE_SYMBOL_PTR(app_name, _dmem_data_start); \
+  OTBN_DECLARE_SYMBOL_PTR(app_name, _dmem_data_end);   \
+  OTBN_DECLARE_SYMBOL_ADDR(app_name, _dmem_data_start);
 
 /**
- * Zero out the contents of OTBN's data memory (DMEM).
+ * Initializes the OTBN application information structure.
+ *
+ * After making all required symbols from the application image available
+ * through `OTBN_DECLARE_APP_SYMBOLS()`, use this macro to initialize an
+ * `sc_otbn_app_t` struct with those symbols.
+ *
+ * @param app_name Name of the application to load.
+ * @see OTBN_DECLARE_APP_SYMBOLS()
  */
-void otbn_zero_dmem(void);
+#define OTBN_APP_T_INIT(app_name)                                           \
+  ((sc_otbn_app_t){                                                         \
+      .imem_start = OTBN_SYMBOL_PTR(app_name, _imem_start),                 \
+      .imem_end = OTBN_SYMBOL_PTR(app_name, _imem_end),                     \
+      .dmem_data_start = OTBN_SYMBOL_PTR(app_name, _dmem_data_start),       \
+      .dmem_data_end = OTBN_SYMBOL_PTR(app_name, _dmem_data_end),           \
+      .dmem_data_start_addr = OTBN_ADDR_T_INIT(app_name, _dmem_data_start), \
+  })
 
 /**
- * Sets the software errors are fatal bit in the control register.
- *
- * When set any software error becomes a fatal error. The bit can only be
- * changed when the OTBN status is IDLE.
- *
- * @param enable Enable or disable whether software errors are fatal.
- * @return `kErrorOtbnUnavailable` if the requested change cannot be made or
- * `kErrorOk` otherwise.
+ * Initializes an `sc_otbn_addr_t`.
  */
-rom_error_t otbn_set_ctrl_software_errs_fatal(bool enable);
+#define OTBN_ADDR_T_INIT(app_name, symbol_name) \
+  ((uint32_t)OTBN_SYMBOL_ADDR(app_name, symbol_name))
+
+/**
+ * (Re-)loads an application into OTBN.
+ *
+ * Load the application image with both instruction and data segments into
+ * OTBN. Verifies written memory integrity using the hardware LOAD_CHECKSUM
+ * register.
+ *
+ * @param app The application to load into OTBN.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_load_app(const sc_otbn_app_t app);
+
+/**
+ * Copies data from the CPU memory to OTBN data memory.
+ *
+ * To mitigate SCA, data is written in pseudo-random order starting at a random
+ * word offset. Verifies written data integrity using the hardware LOAD_CHECKSUM
+ * register.
+ *
+ * @param num_words Number of 32b words to copy.
+ * @param src Source of the data to copy.
+ * @param dest Address of the destination in OTBN's data memory.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_dmem_write(size_t num_words, const uint32_t *src,
+                               sc_otbn_addr_t dest);
+
+/**
+ * Copies non-sensitive public data from CPU memory to OTBN data memory.
+ *
+ * Performs linear MMIO store transfers without randomizing the starting offset,
+ * and verifies written data integrity using the hardware LOAD_CHECKSUM
+ * register.
+ *
+ * @param num_words Number of 32b words to copy.
+ * @param src Source of the data to copy.
+ * @param dest Address of the destination in OTBN's data memory.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_dmem_write_public(size_t num_words, const uint32_t *src,
+                                      sc_otbn_addr_t dest);
+
+/**
+ * Copies data from OTBN's data memory to CPU memory.
+ *
+ * @param num_words The number of 32b words to copy.
+ * @param src The address in OTBN data memory to copy from.
+ * @param[out] dest The destination of the copied data in main memory
+ *                  (preallocated).
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_dmem_read(size_t num_words, const sc_otbn_addr_t src,
+                              uint32_t *dest);
+
+/**
+ * Execute the application loaded into OTBN.
+ *
+ * This function blocks until OTBN is idle and waits for the OTBN application to
+ * finish.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_execute(void);
+
+/**
+ * Start execution of the application loaded into OTBN.
+ *
+ * This function blocks until OTBN is idle and then starts the OTBN application.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_execute_start(void);
+
+/**
+ * Wait for the OTBN application to finish execution.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_execute_finish(void);
+
+/**
+ * Blocks until OTBN is idle.
+ *
+ * If OTBN is or becomes locked, an error will occur.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_busy_wait_for_done(void);
+
+/**
+ * Read OTBN's instruction count register.
+ *
+ * OTBN automatically calculates how many instructions are executed in a given
+ * program and writes the result to this register. Software can read it to
+ * verify that instructions were not unexpectedly skipped or added (for
+ * instance, due to fault injection attacks).
+ *
+ * Note that the OTBN hardware resets the instruction count register to 0 when
+ * the EXECUTE command is issued, so there is no need for software to reset the
+ * counter between programs.
+ *
+ * @return count the value from the instruction count register
+ */
+OT_WARN_UNUSED_RESULT
+uint32_t sc_otbn_instruction_count_get(void);
+
+/**
+ * Wipe IMEM securely.
+ *
+ * This function blocks until OTBN is idle.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_imem_sec_wipe(void);
+
+/**
+ * Wipe DMEM securely.
+ *
+ * This function blocks until OTBN is idle.
+ *
+ * @return Result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+rom_error_t sc_otbn_dmem_sec_wipe(void);
 
 #ifdef __cplusplus
 }

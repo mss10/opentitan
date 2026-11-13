@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -25,7 +25,9 @@ endif
 
 do_build: pre_build
 	@echo "[make]: do_build"
-	cd ${sv_flist_gen_dir} && ${build_cmd} ${build_opts} 2>&1 | tee ${build_log}
+	cd ${sv_flist_gen_dir} && \
+	  set -o pipefail && \
+	  ${build_cmd} ${build_opts} 2>&1 | tee ${build_log}
 
 post_build: do_build
 	@echo "[make]: post_build"

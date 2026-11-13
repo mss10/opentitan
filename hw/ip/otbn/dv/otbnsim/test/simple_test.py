@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,15 +12,29 @@ called <name>.s, and the expected results are in a file called <name>.exp.
 
 import os
 import py
-import re
 import subprocess
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 from testutil import asm_and_link_one_file, SIM_DIR
+from shared.reg_dump import parse_reg_dump
 
-_REG_RE = re.compile(r'\s*([a-zA-Z0-9_]+)\s*=\s*((:?0x[0-9a-f]+)|([0-9]+))$')
-_STR_RE = re.compile(r'[^|]*\|[^|]*\|\s*\[([^\]]*)\]$')
-_SPLIT_RE = re.compile(r'([a-zA-Z_.0-9]*) ([|=]+) (0x[0-9a-f]+)')
+BN_SIMD_DIR_NAME = 'bn-simd-generated'
+BN_SIMD_GENERATOR_SCRIPT = 'generate_bn_simd_tests.py'
+
+
+def generate_bn_simd_tests() -> None:
+    '''Generate most of the BN SIMD tests by calling the generator script.'''
+
+    script_path = os.path.join(os.path.dirname(__file__), BN_SIMD_GENERATOR_SCRIPT)
+    output_dir = os.path.join(os.path.dirname(__file__), 'simple', BN_SIMD_DIR_NAME)
+
+    # Delete and re-create the output directory
+    if os.path.exists(output_dir):
+        subprocess.run(['rm', '-rf', output_dir], check=True)
+    os.makedirs(output_dir)
+
+    cmd = ['python3', script_path, '-o', output_dir]
+    subprocess.run(cmd, check=True)
 
 
 def find_simple_tests() -> List[Tuple[str, str]]:
@@ -79,72 +93,6 @@ def find_simple_tests() -> List[Tuple[str, str]]:
     return ret
 
 
-def get_reg_dump(stdout: str) -> Dict[str, int]:
-    '''Parse the output from a simple test ending in print_regs
-
-    Returns a dictionary keyed by register name and with value equal to the
-    value that register ended up with.
-
-    '''
-
-    ret = {}
-    for line in stdout.split('\n'):
-        if not line:
-            continue
-        if '|' in line:
-            m = _STR_RE.match(line)
-            if m is None:
-                raise RuntimeError('Bad format of register dump')
-            raw_str = m.group(1)
-            if raw_str:
-                for each in raw_str.split(', '):
-                    m = _SPLIT_RE.match(each)
-                    if m is None:
-                        continue
-                    name, operator, value = m.groups()
-                    if name in ['otbn.ERR_BITS', 'otbn.INSN_CNT']:
-                        assert operator == '='
-                        ret[name[5:]] = int(value, 0)
-        else:
-            m = _REG_RE.match(line)
-            if not m:
-                raise RuntimeError('Failed to parse line after dump_regs ({!r}).'
-                                   .format(line))
-
-            ret[m.group(1)] = int(m.group(2), 0)
-
-    return ret
-
-
-def get_reg_expected(exp_path: str) -> Dict[str, int]:
-    '''Read expected.txt
-
-    Returns same format as get_reg_dump, assuming any unspecified registers
-    should be zero (except for INSN_CNT, which always needs specifying)
-
-    '''
-    ret = {}
-    ret['ERR_BITS'] = 0
-    for idx in range(32):
-        ret['x{}'.format(idx)] = 0
-        ret['w{}'.format(idx)] = 0
-
-    with open(exp_path) as exp_file:
-        for idx, line in enumerate(exp_file):
-            # Comments with '#'; ignore blank lines
-            line = line.split('#', 1)[0].strip()
-            if not line:
-                continue
-
-            m = _REG_RE.match(line)
-            if m is None:
-                raise RuntimeError('{}:{}: Bad format for line in expected.txt.'
-                                   .format(exp_path, idx + 1))
-            ret[m.group(1)] = int(m.group(2), 0)
-
-    return ret
-
-
 def test_count(tmpdir: py.path.local,
                asm_file: str,
                expected_file: str) -> None:
@@ -153,18 +101,27 @@ def test_count(tmpdir: py.path.local,
 
     # Run the simulation. We can just pass a list of commands to stdin, and
     # don't need to do anything clever to track what's going on.
-    standalone_py = os.path.join(SIM_DIR, 'standalone.py')
-    sim_proc = subprocess.run([standalone_py, '--dump-regs', '-', '-v', elf_file], check=True,
+    cmd = [os.path.join(SIM_DIR, 'standalone.py'),
+           '--dump-regs', '-', elf_file]
+    sim_proc = subprocess.run(cmd, check=True,
                               stdout=subprocess.PIPE, universal_newlines=True)
 
-    regs_seen = get_reg_dump(sim_proc.stdout)
-    regs_expected = get_reg_expected(expected_file)
+    regs_seen = parse_reg_dump(sim_proc.stdout)
+    with open(expected_file) as exp_file:
+        regs_expected = parse_reg_dump(exp_file.read())
 
-    assert regs_seen == regs_expected
+    # If a register does not appear in the expected registers, then its value
+    # is not constrained; set the expected value to match the actual value.
+    for reg in regs_seen:
+        if reg not in regs_expected:
+            regs_expected[reg] = regs_seen[reg]
+
+    assert regs_expected == regs_seen
 
 
 def pytest_generate_tests(metafunc: Any) -> None:
     if metafunc.function is test_count:
+        generate_bn_simd_tests()
         tests = find_simple_tests()
         test_ids = [os.path.basename(e[0]) for e in tests]
         metafunc.parametrize("asm_file,expected_file", tests, ids=test_ids)

@@ -1,18 +1,16 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:hmac:0.1"
-description: "HMAC-SHA256 engine"
+description: "HMAC- with SHA-2 engine 256/384/512-bit (MultimodeEn=1)"
 filesets:
   files_rtl:
     depend:
       - lowrisc:prim:all
       - lowrisc:ip:tlul
+      - lowrisc:ip:keymgr_dpe_pkg
     files:
-      - rtl/hmac_pkg.sv
-      - rtl/sha2.sv
-      - rtl/sha2_pad.sv
       - rtl/hmac_reg_pkg.sv
       - rtl/hmac_reg_top.sv
       - rtl/hmac_core.sv
@@ -43,11 +41,16 @@ filesets:
       - lowrisc:lint:common
       - lowrisc:lint:comportable
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
+
 parameters:
   SYNTHESIS:
     datatype: bool
     paramtype: vlogdefine
-
 
 targets:
   default: &default_target
@@ -55,6 +58,7 @@ targets:
       - tool_verilator   ? (files_verilator_waiver)
       - tool_ascentlint  ? (files_ascentlint_waiver)
       - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_slang       ? (files_slang_waiver)
       - files_rtl
     toplevel: hmac
 
@@ -68,3 +72,12 @@ targets:
         mode: lint-only
         verilator_options:
           - "-Wall"
+
+  syn:
+    <<: *default_target
+    # TODO: set default to DC once
+    # this option is available
+    # olofk/edalize#89
+    default_tool: icarus
+    parameters:
+      - SYNTHESIS=true

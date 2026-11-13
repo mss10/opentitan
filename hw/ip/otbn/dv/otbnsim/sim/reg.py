@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,14 +8,17 @@ from .trace import Trace
 
 
 class TraceRegister(Trace):
-    def __init__(self, name: str, width: int, new_value: int):
+    def __init__(self, name: str, width: int, new_value: Optional[int]):
         self.name = name
         self.width = width
         self.new_value = new_value
 
     def trace(self) -> str:
-        fmt_str = '{{}} = 0x{{:0{}x}}'.format(self.width // 4)
-        return fmt_str.format(self.name, self.new_value)
+        if self.new_value is not None:
+            fmt_str = '{{}} = 0x{{:0{}x}}'.format(self.width // 4)
+            return fmt_str.format(self.name, self.new_value)
+        else:
+            return '0x' + 'x' * (self.width // 4)
 
     def rtl_trace(self) -> str:
         return '> {}: {}'.format(self.name,
@@ -36,16 +39,19 @@ class Reg:
         self._width = width
 
         self._uval = uval
-        self._next_uval = None  # type: Optional[int]
+        self._next_uval: Optional[int] = None
 
     def read_unsigned(self, backdoor: bool = False) -> int:
         return self._uval
 
+    def _mark_written(self) -> None:
+        if self._parent is not None:
+            self._parent.mark_written(self._idx)
+
     def write_unsigned(self, uval: int) -> None:
         assert 0 <= uval < (1 << self._width)
         self._next_uval = uval
-        if self._parent is not None:
-            self._parent.mark_written(self._idx)
+        self._mark_written()
 
     def read_next(self) -> Optional[int]:
         return self._next_uval
@@ -62,6 +68,10 @@ class Reg:
         assert -(1 << (self._width - 1)) <= ival < (1 << (self._width - 1))
         uval = (1 << self._width) + ival if ival < 0 else ival
         self.write_unsigned(uval)
+
+    def write_invalid(self) -> None:
+        self._next_uval = None
+        self._mark_written()
 
     def commit(self) -> None:
         if self._next_uval is not None:
@@ -89,7 +99,7 @@ class RegFile:
         self._name_pfx = name_pfx
         self._width = width
         self._registers = [Reg(self, i, width, 0) for i in range(depth)]
-        self._pending_writes = set()  # type: Set[int]
+        self._pending_writes: Set[int] = set()
 
     def mark_written(self, idx: int) -> None:
         '''Mark a register as having been written'''
@@ -105,7 +115,6 @@ class RegFile:
         for idx in sorted(self._pending_writes):
             assert 0 <= idx < len(self._registers)
             next_val = self.get_reg(idx).read_next()
-            assert next_val is not None
             ret.append(TraceRegister('{}{:02}'.format(self._name_pfx, idx),
                                      self._width,
                                      next_val))
@@ -126,3 +135,7 @@ class RegFile:
     def peek_unsigned_values(self) -> List[int]:
         '''Get a list of the (unsigned) values of the registers'''
         return [reg.read_unsigned(backdoor=True) for reg in self._registers]
+
+    def wipe(self) -> None:
+        for r in self._registers:
+            r.write_invalid()

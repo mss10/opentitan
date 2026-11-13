@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,64 +8,103 @@ class lc_ctrl_smoke_vseq extends lc_ctrl_base_vseq;
 
   `uvm_object_new
 
-  rand bit clk_byp_error_rsp, flash_rma_error_rsp;
-  rand bit otp_prog_err, token_mismatch_err;
+  rand bit otp_prog_err;
   dec_lc_state_e next_lc_state;
+  rand lc_token_t token_scramble;
 
-  constraint no_err_rsps_c {
-    clk_byp_error_rsp   == 0;
-    flash_rma_error_rsp == 0;
-  }
-
-  constraint otp_prog_err_c {
-    otp_prog_err == 0;
-  }
-
-  constraint token_mismatch_err_c {
-    token_mismatch_err == 0;
-  }
+  constraint otp_prog_err_c {otp_prog_err == 0;}
 
   virtual task pre_start();
     super.pre_start();
     add_otp_prog_err_bit();
+    cfg.set_test_phase(LcCtrlTestInit);
+    cfg.err_inj = 0;
+  endtask
+
+  virtual task post_start();
+    // Kill sub processes
+    disable run_clk_byp_rsp;
+    disable run_nvm_rma_rsp;
+    super.post_start();
   endtask
 
   task body();
-    run_clk_byp_rsp_nonblocking(clk_byp_error_rsp);
-    run_flash_rma_rsp_nonblocking(flash_rma_error_rsp);
+
+    fork
+      run_clk_byp_rsp(1'b0);
+      run_nvm_rma_rsp(1'b0);
+    join_none
+
+    //
+    // Check OTP read only regs (static ones)
+    //
+    read_otp_csrs();
 
     for (int i = 1; i <= num_trans; i++) begin
-      if (i != 1) dut_init();
+      cfg.set_test_phase(LcCtrlIterStart);
+      if (i != 1) begin
+        dut_init();
+        // We expect initialized to be set to 1 after dut_init
+        csr_rd_check(.ptr(ral.status.initialized), .compare_value(1));
+      end
       `DV_CHECK_RANDOMIZE_FATAL(this)
-      `uvm_info(`gfn, $sformatf("starting seq %0d/%0d, init LC_state is %0s, LC_cnt is %0s",
-                                i, num_trans, lc_state.name, lc_cnt.name), UVM_MEDIUM)
+      `uvm_info(`gfn, $sformatf(
+                "starting seq %0d/%0d, init LC_state is %0s, LC_cnt is %0s",
+                i,
+                num_trans,
+                lc_state.name,
+                lc_cnt.name
+                ), UVM_MEDIUM)
 
-      if ($urandom_range(0, 1)) begin
-        csr_rd_check(.ptr(ral.status.ready), .compare_value(1));
+      if ($urandom_range(0, 1) && valid_state_for_trans(lc_state)) begin
+        if (valid_state_for_trans(lc_state)) begin
+          // We expect ready to be 1 when a non transition state is driven
+          csr_rd_check(.ptr(ral.status.ready), .compare_value(1));
+        end else begin
+          // We expect ready to be 0 when a non transition state is driven
+          csr_rd_check(.ptr(ral.status.ready), .compare_value(0));
+        end
         rd_lc_state_and_cnt_csrs();
       end
 
+      cfg.set_test_phase(LcCtrlDutReady);
+
       // SW transition request
-      if (valid_state_for_trans(lc_state) && lc_cnt != LcCnt24) begin
+      if (valid_state_for_trans(lc_state)) begin
         lc_ctrl_state_pkg::lc_token_t token_val = get_random_token();
         randomize_next_lc_state(dec_lc_state(lc_state));
-        `uvm_info(`gfn, $sformatf("next_LC_state is %0s, input token is %0h", next_lc_state.name,
-                                  token_val), UVM_HIGH)
+        `uvm_info(`gfn, $sformatf(
+                  "next_LC_state is %0s, input token is %0h", next_lc_state.name, token_val),
+                  UVM_HIGH)
 
         set_hashed_token();
+        cfg.set_test_phase(LcCtrlWaitTransition);
         sw_transition_req(next_lc_state, token_val);
+        cfg.set_test_phase(LcCtrlTransitionComplete);
       end else begin
+        // Test items that do not need a LC transition
+        csr_wr(ral.claim_transition_if, CLAIM_TRANS_VAL);
+        csr_wr(ral.transition_ctrl, $urandom_range(0, 1));
+        cfg.set_test_phase(LcCtrlBadNextState);
         // wait at least two clks for scb to finish checking lc outputs
         cfg.clk_rst_vif.wait_clks($urandom_range(2, 10));
       end
+
+      // Sample coverage if enabled
+      sample_cov();
+
     end
+
   endtask : body
 
   // smoke test will always return valid next_lc_state
   // need to randomize here because associative array's index cannot be a rand input in constraint
   virtual function void randomize_next_lc_state(dec_lc_state_e curr_lc_state);
     `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(next_lc_state,
-        next_lc_state inside {VALID_NEXT_STATES[curr_lc_state]};)
+                                       next_lc_state inside {VALID_NEXT_STATES[curr_lc_state]};
+                                       // The only valid transition when the counter is maxed is
+                                       // a transition into scrap.
+                                       if (lc_cnt == LcCnt24) next_lc_state == DecLcStScrap;)
   endfunction
 
   // This function add otp_program_i's error bit field from the otp_prog_pull_agent device driver.
@@ -80,30 +119,24 @@ class lc_ctrl_smoke_vseq extends lc_ctrl_base_vseq;
 
   virtual function void set_hashed_token();
     lc_ctrl_pkg::token_idx_e token_idx = get_exp_token(dec_lc_state(lc_state), next_lc_state);
-
+    kmac_pkg::rsp_digest_t kmac_digest;
     // No token for InvalidTokenIdx
-    lc_ctrl_state_pkg::lc_token_t tokens_a [NumTokens-1];
-    tokens_a[ZeroTokenIdx]       = 0;
-    tokens_a[RawUnlockTokenIdx]  = lc_ctrl_state_pkg::RndCnstRawUnlockTokenHashed;
+    lc_ctrl_state_pkg::lc_token_t tokens_a[NumTokens-1];
+    tokens_a[ZeroTokenIdx]       = lc_ctrl_token_pkg::AllZeroTokenHashed;
+    tokens_a[RawUnlockTokenIdx]  = lc_ctrl_token_pkg::RndCnstRawUnlockTokenHashed;
     tokens_a[TestUnlockTokenIdx] = cfg.lc_ctrl_vif.otp_i.test_unlock_token;
     tokens_a[TestExitTokenIdx]   = cfg.lc_ctrl_vif.otp_i.test_exit_token;
     tokens_a[RmaTokenIdx]        = cfg.lc_ctrl_vif.otp_i.rma_token;
 
-    `DV_CHECK_NE(token_idx, InvalidTokenIdx,
-                 $sformatf("curr_state: %0s, next_state %0s, does not expect InvalidToken",
-                           lc_state.name, next_lc_state.name))
+    `DV_CHECK_NE(token_idx, InvalidTokenIdx, $sformatf(
+                 "curr_state: %0s, next_state %0s, does not expect InvalidToken",
+                 lc_state.name,
+                 next_lc_state.name
+                 ))
 
-    // Clear the user_data_q here cause previous data might not be used due to some other lc_ctrl
-    // error: for example: lc_program error
-    cfg.m_otp_token_pull_agent_cfg.clear_d_user_data();
-    if (!token_mismatch_err) begin
-      cfg.m_otp_token_pull_agent_cfg.add_d_user_data(tokens_a[token_idx]);
-    end else begin
-      // 50% chance to input other token data, 50% chance let push-pull agent drive random data
-      if ($urandom_range(0, 1)) begin
-        token_idx = token_idx_e'($urandom_range(0, TokenIdxWidth-2));
-        cfg.m_otp_token_pull_agent_cfg.add_d_user_data(tokens_a[token_idx]);
-      end
-    end
+    kmac_digest = token_to_kmac_digest(tokens_a[token_idx], token_scramble);
+    clear_kmac_user_digest_share();
+    cfg.m_kmac_app_agent_cfg.add_user_digest(kmac_digest);
   endfunction
+
 endclass : lc_ctrl_smoke_vseq

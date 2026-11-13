@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,7 +8,7 @@ module clkgen_xil7series # (
 ) (
   input  clk_i,
   input  rst_ni,
-  input  jtag_srst_ni,
+  input  srst_ni,
   output clk_main_o,
   output clk_48MHz_o,
   output clk_aon_o,
@@ -17,8 +17,8 @@ module clkgen_xil7series # (
   logic locked_pll;
   logic io_clk_buf;
   logic io_rst_buf_n;
-  logic clk_10_buf;
-  logic clk_10_unbuf;
+  logic clk_main_buf;
+  logic clk_main_unbuf;
   logic clk_fb_buf;
   logic clk_fb_unbuf;
   logic clk_48_buf;
@@ -26,31 +26,41 @@ module clkgen_xil7series # (
   logic clk_aon_buf;
   logic clk_aon_unbuf;
 
-  PLLE2_ADV #(
+  MMCME2_ADV #(
     .BANDWIDTH            ("OPTIMIZED"),
     .COMPENSATION         ("ZHOLD"),
     .STARTUP_WAIT         ("FALSE"),
-    .DIVCLK_DIVIDE        (1),
-    .CLKFBOUT_MULT        (12),
+    .CLKIN1_PERIOD        (10.000), // f_CLKIN = 100 MHz
+    .DIVCLK_DIVIDE        (1),      // f_PFD = 100 MHz
+    .CLKFBOUT_MULT_F      (12.000), // f_VCO = 1200 MHz
     .CLKFBOUT_PHASE       (0.000),
-    .CLKOUT0_DIVIDE       (120),
+    .CLKOUT0_DIVIDE_F     (50.0),   // f_main = 24 MHz
     .CLKOUT0_PHASE        (0.000),
     .CLKOUT0_DUTY_CYCLE   (0.500),
     .CLKOUT1_DIVIDE       (25),
     .CLKOUT1_PHASE        (0.000),
     .CLKOUT1_DUTY_CYCLE   (0.500),
-    .CLKOUT2_DIVIDE       (128),
-    .CLKOUT2_PHASE        (0.000),
-    .CLKOUT2_DUTY_CYCLE   (0.500),
-    .CLKIN1_PERIOD        (10.000)
+    // With CLKOUT4_CASCADE, CLKOUT6's divider is an input to CLKOUT4's
+    // divider. The effective ratio is a multiplication of the two.
+    .CLKOUT4_DIVIDE       (40),
+    .CLKOUT4_PHASE        (0.000),
+    .CLKOUT4_DUTY_CYCLE   (0.500),
+    .CLKOUT4_CASCADE      ("TRUE"),
+    .CLKOUT6_DIVIDE       (120)
   ) pll (
     .CLKFBOUT            (clk_fb_unbuf),
-    .CLKOUT0             (clk_10_unbuf),
+    .CLKFBOUTB           (),
+    .CLKOUT0             (clk_main_unbuf),
+    .CLKOUT0B            (),
     .CLKOUT1             (clk_48_unbuf),
-    .CLKOUT2             (clk_aon_unbuf),
+    .CLKOUT1B            (),
+    .CLKOUT2             (),
+    .CLKOUT2B            (),
     .CLKOUT3             (),
-    .CLKOUT4             (),
+    .CLKOUT3B            (),
+    .CLKOUT4             (clk_aon_unbuf),
     .CLKOUT5             (),
+    .CLKOUT6             (),
      // Input clock control
     .CLKFBIN             (clk_fb_buf),
     .CLKIN1              (clk_i),
@@ -65,10 +75,17 @@ module clkgen_xil7series # (
     .DO                  (),
     .DRDY                (),
     .DWE                 (1'b0),
+    // Phase shift signals
+    .PSCLK               (1'b0),
+    .PSEN                (1'b0),
+    .PSINCDEC            (1'b0),
+    .PSDONE              (),
     // Other control and status signals
+    .CLKFBSTOPPED        (),
+    .CLKINSTOPPED        (),
     .LOCKED              (locked_pll),
     .PWRDWN              (1'b0),
-    // Do not reset PLL on external reset, otherwise ILA disconnects at a reset
+    // Do not reset MMCM on external reset, otherwise ILA disconnects at a reset
     .RST                 (1'b0));
 
   // output buffering
@@ -83,9 +100,9 @@ module clkgen_xil7series # (
   );
 
   if (AddClkBuf == 1) begin : gen_clk_bufs
-    BUFG clk_10_bufg (
-      .I (clk_10_unbuf),
-      .O (clk_10_buf)
+    BUFG clk_main_bufg (
+      .I (clk_main_unbuf),
+      .O (clk_main_buf)
     );
 
     BUFG clk_48_bufg (
@@ -94,16 +111,16 @@ module clkgen_xil7series # (
     );
   end else begin : gen_no_clk_bufs
     // BUFGs added by downstream modules, no need to add here
-    assign clk_10_buf = clk_10_unbuf;
+    assign clk_main_buf = clk_main_unbuf;
     assign clk_48_buf = clk_48_unbuf;
   end
 
   // outputs
   // clock
-  assign clk_main_o = clk_10_buf;
+  assign clk_main_o = clk_main_buf;
   assign clk_48MHz_o = clk_48_buf;
   assign clk_aon_o = clk_aon_buf;
 
   // reset
-  assign rst_no = locked_pll & rst_ni & jtag_srst_ni;
+  assign rst_no = locked_pll & rst_ni & srst_ni;
 endmodule

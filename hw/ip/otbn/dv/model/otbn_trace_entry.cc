@@ -1,18 +1,72 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "otbn_trace_entry.h"
 
-#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <regex>
 #include <sstream>
 
-void OtbnTraceEntry::from_rtl_trace(const std::string &trace) {
+bool OtbnTraceBodyLine::fill_from_string(const std::string &src,
+                                         const std::string &line) {
+  // A valid line matches the following regex
+  std::regex re("(.) ([^:]+): (.+)");
+  std::smatch match;
+
+  if (!std::regex_match(line, match, re)) {
+    std::cerr << "OTBN trace body line from " << src
+              << " does not have expected format. Saw: `" << line << "'.\n";
+    return false;
+  }
+
+  assert(match.size() == 4);
+
+  raw_ = line;
+  type_ = match[1].str()[0];
+  loc_ = match[2].str();
+  value_ = match[3].str();
+  return true;
+}
+
+bool OtbnTraceBodyLine::operator==(const OtbnTraceBodyLine &other) const {
+  // If the raw lines are identical, the two objects are identical and no
+  // further checks are required.
+  if (raw_ == other.raw_) {
+    return true;
+  }
+
+  // If the raw lines are not identical, the two objects can be identical if one
+  // of them contains unknown values.
+
+  // Type and location have to be identical, though.
+  if (type_ != other.type_ || loc_ != other.loc_) {
+    return false;
+  }
+
+  // The values have to be of identical length.
+  if (value_.size() != other.value_.size()) {
+    return false;
+  }
+
+  // Compare values digit by digit and treat `x` as unknown value, which is
+  // identical to any other value.
+  std::string::const_iterator other_it = other.value_.begin();
+  for (std::string::const_iterator it = value_.begin(); it != value_.end();
+       it++) {
+    if (*it != *other_it && !(*it == 'x' || *other_it == 'x')) {
+      return false;
+    }
+    other_it++;
+  }
+  return true;
+}
+
+bool OtbnTraceEntry::from_rtl_trace(const std::string &trace) {
   size_t eol = trace.find('\n');
   hdr_ = trace.substr(0, eol);
+  trace_type_ = hdr_to_trace_type(hdr_);
 
   while (eol != std::string::npos) {
     size_t bol = eol + 1;
@@ -20,41 +74,84 @@ void OtbnTraceEntry::from_rtl_trace(const std::string &trace) {
     size_t line_len =
         (eol == std::string::npos) ? std::string::npos : eol - bol;
     std::string line = trace.substr(bol, line_len);
-    if (line.size() > 0 && line[0] == '>')
-      writes_.push_back(line);
+
+    // We're only interested in register writes
+    if (!(line.size() > 0 && line[0] == '>'))
+      continue;
+
+    OtbnTraceBodyLine parsed_line;
+    if (!parsed_line.fill_from_string("RTL", line)) {
+      return false;
+    }
+    writes_[parsed_line.get_loc()].push_back(parsed_line);
   }
-  std::sort(writes_.begin(), writes_.end());
-  auto last = std::unique(writes_.begin(), writes_.end());
-  writes_.erase(last, writes_.end());
+  return true;
 }
 
-bool OtbnTraceEntry::operator==(const OtbnTraceEntry &other) const {
-  return hdr_ == other.hdr_ && writes_ == other.writes_;
+bool OtbnTraceEntry::compare_rtl_iss_entries(const OtbnTraceEntry &other,
+                                             bool no_sec_wipe_data_chk,
+                                             std::string *err_desc) const {
+  assert(err_desc);
+
+  if (hdr_ != other.hdr_) {
+    *err_desc = "Headers don't match.";
+    return false;
+  }
+
+  for (const auto &rtlptr : writes_) {
+    auto isskey = other.writes_.find(rtlptr.first);
+    if (isskey == other.writes_.end()) {
+      std::ostringstream oss;
+      oss << "RTL had a write to `" << rtlptr.first
+          << "', but the ISS doesn't have a write to that location.";
+      *err_desc = oss.str();
+      return false;
+    }
+    // compare rtlptr.second and isskey.second
+    if (!check_entries_compatible(trace_type_, rtlptr.first, rtlptr.second,
+                                  isskey->second, no_sec_wipe_data_chk,
+                                  err_desc))
+      return false;
+  }
+
+  if (writes_.size() != other.writes_.size()) {
+    std::ostringstream oss;
+    oss << "RTL wrote to " << writes_.size() << " locations; the ISS wrote to "
+        << other.writes_.size() << ".";
+    *err_desc = oss.str();
+    return false;
+  }
+
+  return true;
 }
 
 void OtbnTraceEntry::print(const std::string &indent, std::ostream &os) const {
   os << indent << hdr_ << "\n";
-  for (const std::string &write : writes_) {
-    os << indent << write << "\n";
-  }
-}
-
-void OtbnTraceEntry::take_writes(const OtbnTraceEntry &other) {
-  if (!other.writes_.empty()) {
-    for (const std::string &write : other.writes_) {
-      writes_.push_back(write);
+  for (const auto &pr : writes_) {
+    for (const auto &line : pr.second) {
+      os << indent << line.get_string() << "\n";
     }
-    std::sort(writes_.begin(), writes_.end());
-    auto last = std::unique(writes_.begin(), writes_.end());
-    writes_.erase(last, writes_.end());
   }
 }
 
-bool OtbnTraceEntry::empty() const { return hdr_.empty(); }
-
-bool OtbnTraceEntry::is_stall() const { return !empty() && hdr_[0] == 'S'; }
-
-bool OtbnTraceEntry::is_exec() const { return !empty() && hdr_[0] == 'E'; }
+void OtbnTraceEntry::take_writes(const OtbnTraceEntry &other,
+                                 bool other_first) {
+  for (const auto &pr : other.writes_) {
+    std::vector<OtbnTraceBodyLine> &so_far = writes_[pr.first];
+    if (other_first) {
+      // If other_first is true, we should prepend the writes from other. We do
+      // so by creating a temporary vector (with a copy of the writes from
+      // other) and then appending any writes we had before.
+      std::vector<OtbnTraceBodyLine> tmp(pr.second);
+      tmp.insert(tmp.end(), so_far.begin(), so_far.end());
+      writes_[pr.first] = tmp;
+    } else {
+      // If other_first is false, we should append the writes from other. We
+      // can do that with just a call to insert.
+      so_far.insert(so_far.end(), pr.second.begin(), pr.second.end());
+    }
+  }
+}
 
 bool OtbnTraceEntry::is_compatible(const OtbnTraceEntry &prev) const {
   // Two entries are compatible if they might both come from the multi-cycle
@@ -67,6 +164,8 @@ bool OtbnTraceEntry::is_compatible(const OtbnTraceEntry &prev) const {
   // which show an instruction at 0x10 stalling for a cycle and then managing
   // to execute.
   //
+  // Similarly, you might expect to see U followed by U or V.
+  //
   // As an added complication, if we see an IMEM fetch error, the entry will
   // become
   //
@@ -74,6 +173,7 @@ bool OtbnTraceEntry::is_compatible(const OtbnTraceEntry &prev) const {
   //
   // and that's fine. So the rule is:
   //
+  //   - Check the types are compatible (S then S or E; U then U or V)
   //   - Compare the two lines from character 1 onwards.
   //   - If they match: accept.
   //   - Otherwise, if the second line has no '?' then reject.
@@ -83,6 +183,20 @@ bool OtbnTraceEntry::is_compatible(const OtbnTraceEntry &prev) const {
   // (This wrongly accepts some malformed examples, but that's fine: it's just
   // meant as a quick check to make sure our trace machinery isn't dropping
   // entries)
+  bool matching_types;
+  switch (prev.trace_type()) {
+    case Stall:
+      matching_types = (trace_type_ == Stall || trace_type_ == Exec);
+      break;
+    case WipeInProgress:
+      matching_types =
+          (trace_type_ == WipeInProgress || trace_type_ == WipeComplete);
+      break;
+    default:
+      matching_types = false;
+  }
+  if (!matching_types)
+    return false;
 
   bool exact_match =
       0 == hdr_.compare(1, std::string::npos, prev.hdr_, 1, std::string::npos);
@@ -94,6 +208,90 @@ bool OtbnTraceEntry::is_compatible(const OtbnTraceEntry &prev) const {
     return false;
 
   return 0 == hdr_.compare(1, first_qm - 1, prev.hdr_, 1, first_qm - 1);
+}
+
+bool OtbnTraceEntry::is_partial() const {
+  return ((trace_type_ == OtbnTraceEntry::Stall) ||
+          (trace_type_ == OtbnTraceEntry::WipeInProgress));
+}
+
+bool OtbnTraceEntry::is_final() const {
+  return ((trace_type_ == OtbnTraceEntry::Exec) ||
+          (trace_type_ == OtbnTraceEntry::WipeComplete) ||
+          (trace_type_ == OtbnTraceEntry::Stray));
+}
+
+bool OtbnTraceEntry::check_entries_compatible(
+    trace_type_t type, const std::string &key,
+    const std::vector<OtbnTraceBodyLine> &rtl_lines,
+    const std::vector<OtbnTraceBodyLine> &iss_lines, bool no_sec_wipe_data_chk,
+    std::string *err_desc) {
+  assert(rtl_lines.size() && iss_lines.size());
+  assert(type == WipeComplete || type == Exec);
+  assert(err_desc);
+
+  if (type == WipeComplete && key != "FLAGS0" && key != "FLAGS1") {
+    // As a quick check: make sure that there are at least 2 lines for
+    // the key. We will also check that they are different, but
+    // debugging is probably easier if the error message comments that
+    // there aren't two lines *to* be different.
+    if (rtl_lines.size() < 2) {
+      std::ostringstream oss;
+      oss << "There are " << rtl_lines.size() << " RTL lines for key `" << key
+          << "'; we expected at least 2.";
+      *err_desc = oss.str();
+      return false;
+    }
+
+    // Make sure that the multiple writes to key actually contain
+    // different values. This checks that we don't (e.g.) just write
+    // zero to the key many times.
+    bool seen_change = false;
+    for (size_t i = 1; i < rtl_lines.size(); i++) {
+      if (!(rtl_lines[i] == rtl_lines[0])) {
+        seen_change = true;
+        break;
+      }
+    }
+
+    if (!seen_change && !no_sec_wipe_data_chk) {
+      std::ostringstream oss;
+      oss << "All RTL lines for key `" << key << "' are identical.";
+      *err_desc = oss.str();
+      return false;
+    }
+  }
+
+  if (!(rtl_lines.back() == iss_lines.back())) {
+    std::ostringstream oss;
+    oss << "Final values of ISS and RTL don't match for key `" << key << "'.";
+    *err_desc = oss.str();
+    return false;
+  }
+
+  return true;
+}
+
+OtbnTraceEntry::trace_type_t OtbnTraceEntry::hdr_to_trace_type(
+    const std::string &hdr) {
+  if (hdr.empty()) {
+    return Invalid;
+  }
+
+  switch (hdr[0]) {
+    case 'S':
+      return Stall;
+    case 'E':
+      return Exec;
+    case 'U':
+      return WipeInProgress;
+    case 'V':
+      return WipeComplete;
+    case 'Z':
+      return Stray;
+    default:
+      return Invalid;
+  }
 }
 
 bool OtbnIssTraceEntry::from_iss_trace(const std::vector<std::string> &lines) {
@@ -108,6 +306,7 @@ bool OtbnIssTraceEntry::from_iss_trace(const std::vector<std::string> &lines) {
     switch (state) {
       case 0:
         hdr_ = line;
+        trace_type_ = hdr_to_trace_type(hdr_);
         state = (!line.empty() && line[0] == 'E') ? 1 : 2;
         break;
 
@@ -137,7 +336,11 @@ bool OtbnIssTraceEntry::from_iss_trace(const std::vector<std::string> &lines) {
         // external register changes, not tracked by the RTL core simulation)
         bool is_bang = (line.size() > 0 && line[0] == '!');
         if (!is_bang) {
-          writes_.push_back(line);
+          OtbnTraceBodyLine parsed_line;
+          if (!parsed_line.fill_from_string("ISS", line)) {
+            return false;
+          }
+          writes_[parsed_line.get_loc()].push_back(parsed_line);
         }
         break;
       }
@@ -152,6 +355,5 @@ bool OtbnIssTraceEntry::from_iss_trace(const std::vector<std::string> &lines) {
     return false;
   }
 
-  std::sort(writes_.begin(), writes_.end());
   return true;
 }

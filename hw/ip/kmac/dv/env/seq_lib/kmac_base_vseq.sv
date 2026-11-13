@@ -1,7 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+// This base sequence consists of common kmac tasks and functions.
+// In this sequence, when it uses a plain `csr_rd` without checking, the read value should be
+// predicted and checked in the kmac scoreboard.
 class kmac_base_vseq extends cip_base_vseq #(
     .RAL_T               (kmac_reg_block),
     .CFG_T               (kmac_env_cfg),
@@ -54,8 +57,8 @@ class kmac_base_vseq extends cip_base_vseq #(
   // does not control whether the cfg.sideload field is set.
   rand bit provide_sideload_key;
 
-  // Controls whether to actually enable sideloading functionality
-  rand bit en_sideload;
+  // Controls whether to actually enable sideloading functionality via cfg_shadowed register.
+  rand bit reg_en_sideload;
 
   // entropy mode
   rand kmac_pkg::entropy_mode_e entropy_mode = EntropyModeSw;
@@ -70,6 +73,12 @@ class kmac_base_vseq extends cip_base_vseq #(
 
   // entropy ready
   rand bit entropy_ready;
+
+  // process the digest when mode strength does not match
+  rand bit en_unsupported_modestrength;
+
+  // Message masking
+  rand bit msg_mask;
 
   // output length in bytes.
   rand int unsigned output_len;
@@ -103,13 +112,20 @@ class kmac_base_vseq extends cip_base_vseq #(
   rand bit [TL_DBW-1:0] data_mask;
 
   // Error control fields
-  rand bit en_kmac_err;
   rand kmac_pkg::err_code_e kmac_err_type;
   // When creating errors by issue the wrong SW command, we need to have access
   // to what operational state to send an erroneous command in,
   // as well as the proper random incorrect command to send.
   rand sha3_pkg::sha3_st_e err_sw_cmd_seq_st;
   rand kmac_pkg::kmac_cmd_e err_sw_cmd_seq_cmd;
+
+  // Entropy related variables
+  rand bit [9:0] hash_threshold;
+  rand bit hash_cnt_clr;
+  rand bit entropy_req;
+  rand bit entropy_timer_en;
+  rand bit [EntropyPeriodReserved-1:0] prescaler_val;
+  rand bit [TL_DW-KmacWaitTimer-1:0] entropy_wait_timer;
 
   // array to store `right_encode(output_len)`
   bit [7:0] output_len_enc[];
@@ -121,12 +137,20 @@ class kmac_base_vseq extends cip_base_vseq #(
     (!kmac_en) -> (xof_en == 1'b0);
   }
 
-  // KMAC HWIP only uses CSHAKE mode for KMAC hashing
+  // The keyed MAC is only available if the full KMAC is enabled.
+  constraint kmac_en_c {
+    kmac_en -> cfg.enable_full_kmac;
+  }
+
+  // KMAC HWIP only uses CSHAKE mode for KMAC hashing. Without the keyed MAC, cSHAKE is just
+  // another hash mode and can be selected freely.
   constraint hash_mode_c {
-    if (kmac_en) {
-      hash_mode == sha3_pkg::CShake;
-    } else {
-      hash_mode != sha3_pkg::CShake;
+    if (cfg.enable_full_kmac) {
+      if (kmac_en) {
+        hash_mode == sha3_pkg::CShake;
+      } else {
+        hash_mode != sha3_pkg::CShake;
+      }
     }
   }
 
@@ -161,7 +185,7 @@ class kmac_base_vseq extends cip_base_vseq #(
   }
 
   constraint key_len_c {
-    (en_sideload) -> key_len == Key256;
+    (reg_en_sideload) -> key_len == Key256;
   }
 
   constraint entropy_mode_c {
@@ -189,7 +213,7 @@ class kmac_base_vseq extends cip_base_vseq #(
   // Create an appropriate incorrect command based on what state to send an error in
   constraint err_sw_cmd_seq_c {
     solve err_sw_cmd_seq_st before err_sw_cmd_seq_cmd;
-    if (en_kmac_err && kmac_err_type == kmac_pkg::ErrSwCmdSequence) {
+    if (kmac_err_type == kmac_pkg::ErrSwCmdSequence) {
       if (err_sw_cmd_seq_st == sha3_pkg::StIdle) {
         err_sw_cmd_seq_cmd inside {CmdProcess, CmdManualRun, CmdDone};
       } else if (err_sw_cmd_seq_st == sha3_pkg::StAbsorb) {
@@ -244,14 +268,28 @@ class kmac_base_vseq extends cip_base_vseq #(
     }
   }
 
+  constraint entropy_period_c {
+    if (entropy_mode == EntropyModeEdn && cfg.enable_masking) {
+      if (entropy_timer_en) {
+        (prescaler_val + 1) * entropy_wait_timer >
+          // If zero delay case, the max delay is 0.
+          // Kmac requests 4 EDN entropies, and add 10 cycles as extra buffer for domain crossing.
+          (cfg.m_edn_pull_agent_cfgs[0].device_delay_max * 4 + 10) *
+          (cfg.edn_clk_freq_mhz / cfg.clk_freq_mhz + 1);
+      } else {
+        entropy_wait_timer == 0;
+      }
+    }
+    solve entropy_mode before prescaler_val, entropy_wait_timer;
+  }
+
   virtual task dut_init(string reset_kind = "HARD");
+    // KMAC has dut and edn reset. If assign kmac_vif_init() values after `super.dut_init()`,
+    // and if dut reset deasserts earlier than edn reset, some KMAC outputs might remain X or Z
+    // when dut clock is running.
+    kmac_vif_init();
     super.dut_init();
     if (do_kmac_init) kmac_init();
-  endtask
-
-  virtual task dut_shutdown();
-    // check for pending kmac operations and wait for them to complete
-    // TODO
   endtask
 
   virtual task pre_start();
@@ -260,49 +298,84 @@ class kmac_base_vseq extends cip_base_vseq #(
         static_entropy_mode inside {EntropyModeSw, EntropyModeEdn};)
   endtask
 
+  virtual task kmac_vif_init();
+    // Any value that is not `lc_ctrl_pkg::On` is considered `lc_ctrl_pkg::Off`.
+    cfg.kmac_vif.drive_lc_escalate(lc_ctrl_pkg::Off);
+  endtask
+
   // setup basic kmac features
-  virtual task kmac_init();
+  virtual task kmac_init(bit wait_init = 1, bit keymgr_app_intf = 0);
     // Wait for KMAC to reach idle state
-    wait (cfg.idle_vif.pins == 1);
-    `uvm_info(`gfn, "reached idle state", UVM_HIGH)
+    if (wait_init) begin
+      wait (cfg.kmac_vif.idle_o == prim_mubi_pkg::MuBi4True);
+      `uvm_info(`gfn, "reached idle state", UVM_HIGH)
+    end
 
     // set interrupts
     cfg_interrupts(.interrupts(enable_intr));
+    // For error cases that does not support in scb, predict its value so can be used in
+    // `check_err` task.
+    if (cfg.en_scb == 0) void'(ral.intr_enable.predict(enable_intr));
     `uvm_info(`gfn, $sformatf("intr[KmacDone] = %0b", enable_intr[KmacDone]), UVM_HIGH)
     `uvm_info(`gfn, $sformatf("intr[KmacFifoEmpty] = %0b", enable_intr[KmacFifoEmpty]), UVM_HIGH)
     `uvm_info(`gfn, $sformatf("intr[KmacErr] = %0b", enable_intr[KmacErr]), UVM_HIGH)
 
+    if (kmac_err_type == ErrWaitTimerExpired && entropy_mode == EntropyModeEdn &&
+        cfg.enable_masking) begin
+      csr_wr(.ptr(ral.entropy_period), .value(1'b1 << KmacWaitTimer));
+    end else begin
+      csr_wr(.ptr(ral.entropy_period.wait_timer), .value(entropy_wait_timer));
+      csr_wr(.ptr(ral.entropy_period.prescaler), .value(prescaler_val));
+    end
+
+    csr_wr(.ptr(ral.entropy_refresh_threshold_shadowed), .value(hash_threshold));
+    wr_hash_cnt_clear_cmd();
+    wr_entropy_req_cmd();
+
     // setup CFG csr with default random values
-    ral.cfg.kmac_en.set(kmac_en);
-    ral.cfg.kstrength.set(strength);
-    ral.cfg.mode.set(hash_mode);
-    ral.cfg.msg_endianness.set(msg_endian);
-    ral.cfg.state_endianness.set(state_endian);
-    ral.cfg.sideload.set(en_sideload);
-    ral.cfg.entropy_mode.set(entropy_mode);
-    ral.cfg.entropy_fast_process.set(entropy_fast_process);
-    ral.cfg.entropy_ready.set(entropy_ready);
-    ral.cfg.err_processed.set(1'b0);
-    csr_update(.csr(ral.cfg));
+    ral.cfg_shadowed.kmac_en.set(kmac_en);
+    ral.cfg_shadowed.kstrength.set(strength);
+    ral.cfg_shadowed.mode.set(hash_mode);
+    ral.cfg_shadowed.msg_endianness.set(msg_endian);
+    ral.cfg_shadowed.state_endianness.set(state_endian);
+    ral.cfg_shadowed.entropy_mode.set(entropy_mode);
+    ral.cfg_shadowed.entropy_fast_process.set(entropy_fast_process);
+    ral.cfg_shadowed.entropy_ready.set(entropy_ready);
+    ral.cfg_shadowed.msg_mask.set(msg_mask);
+    ral.cfg_shadowed.en_unsupported_modestrength.set(en_unsupported_modestrength);
+    ral.cfg_shadowed.sideload.set(reg_en_sideload);
+
+    csr_update(.csr(ral.cfg_shadowed));
 
     // setup KEY_LEN csr
-    csr_wr(.ptr(ral.key_len), .value(key_len));
+    // The key length will be override to 256 bits if design uses keymgr app interface or the
+    // sideload is enabled.
+    if (!reg_en_sideload || $urandom_range(0, 1)) csr_wr(.ptr(ral.key_len), .value(key_len));
 
     // print debug info
     `uvm_info(`gfn, $sformatf("KMAC INITIALIZATION INFO:\n%0s", convert2string()), UVM_HIGH)
+  endtask
+
+  virtual task read_regwen_and_rand_write_locked_regs();
+    bit [TL_DW-1:0] data;
+    csr_rd(.ptr(ral.cfg_regwen), .value(data));
+    // Randomly write locked registers only if the cfg_regwen is locked.
+    if (data == 0) begin
+      csr_wr(.ptr(ral.entropy_period), .value($urandom_range(0, 32'hFFFF_FFFF)));
+    end
   endtask
 
   // This task reads out the STATUS and INTR_STATE csrs so scb can check the status
   virtual task check_state();
     bit [TL_DW-1:0] data;
 
+    csr_rd(.ptr(ral.status), .value(data));
+
     csr_rd(.ptr(ral.intr_state), .value(data));
     csr_wr(.ptr(ral.intr_state), .value(data));
-
-    csr_rd(.ptr(ral.status), .value(data));
   endtask
 
-  virtual task check_err(clear_err = 1'b1);
+  virtual task check_err(bit clear_err = 1'b1);
     bit [TL_DW-1:0] err_data;
     // wait for several cycles to allow interrupt to propagate
     cfg.clk_rst_vif.wait_clks(10);
@@ -328,19 +401,11 @@ class kmac_base_vseq extends cip_base_vseq #(
         kmac_err_type inside {kmac_pkg::ErrIncorrectEntropyMode,
                               kmac_pkg::ErrWaitTimerExpired}) begin
       cfg.clk_rst_vif.wait_clks($urandom_range(10, 50));
-      ral.cfg.err_processed.set(1);
-      if (kmac_err_type == kmac_pkg::ErrIncorrectEntropyMode) begin
-        `DV_CHECK_MEMBER_RANDOMIZE_FATAL(entropy_mode)
-        ral.cfg.entropy_mode.set(entropy_mode);
-      end
-      csr_update(.csr(ral.cfg));
-
-      // Need to pulse `entropy_ready` once we signal that SW has finished processing
-      // the entropy-related errors, otherwise FSM will be infinitely looping in Reset state
-      csr_wr(.ptr(ral.cfg.entropy_ready), .value(1'b1));
+      // After entropy related errors, cannot set `err_processed` and `entropy_ready` together.
+      // Otherwise design will ignore the `entropy_ready` field.
+      csr_wr(.ptr(ral.cmd.err_processed), .value(1));
     end else if (kmac_err_type == kmac_pkg::ErrKeyNotValid) begin
-      ral.cfg.err_processed.set(1);
-      csr_update(.csr(ral.cfg));
+      csr_wr(.ptr(ral.cmd.err_processed), .value(1));
     end
     `uvm_info(`gfn, "Finished checking error", UVM_HIGH)
   endtask
@@ -359,7 +424,7 @@ class kmac_base_vseq extends cip_base_vseq #(
             $sformatf("output_len %0d\n", output_len),
             $sformatf("msg_endian: %0b\n", msg_endian),
             $sformatf("state_endian: %0b\n", state_endian),
-            $sformatf("en_sideload: %0b\n", en_sideload),
+            $sformatf("en_sideload: %0b\n", reg_en_sideload),
             $sformatf("provide_sideload_key: %0b\n", provide_sideload_key),
             $sformatf("fname_arr: %0p\n", fname_arr),
             $sformatf("fname: %0s\n", str_utils_pkg::bytes_to_str(fname_arr)),
@@ -367,7 +432,8 @@ class kmac_base_vseq extends cip_base_vseq #(
             $sformatf("custom_str: %0s\n", str_utils_pkg::bytes_to_str(custom_str_arr)),
             $sformatf("entropy_mode: %0s\n", entropy_mode.name()),
             $sformatf("entropy_fast_process: %0b\n", entropy_fast_process),
-            $sformatf("entropy_ready: %0b\n", entropy_ready)};
+            $sformatf("entropy_ready: %0b\n", entropy_ready),
+            $sformatf("en_unsupported_modestrength %0b\n", en_unsupported_modestrength)};
   endfunction
 
   // This function implements the bulk of integer encoding specified by NIST.SP.800-185
@@ -456,9 +522,6 @@ class kmac_base_vseq extends cip_base_vseq #(
     // stream into chunks of 32-bits (size of the PREFIX csr)
     prefix_bytes = {encoded_fname, encoded_custom_str};
     for (int i = 0; i < (fname_len + custom_str_len) / 4 + 2 ; i++) begin
-      // TODO - Xcelium currently does not support `with` operator,
-      //        workaround needs to be used.
-      //prefix_arr[i] = {<< byte {prefix_bytes with [i*4 +: 4]}};
       bit [7:0] prefix_word_arr[] = new[4];
       for (int j = i*4; (j < i*4 + 4) && (j < prefix_bytes.size()); j++) begin
         prefix_word_arr[j % 4] = prefix_bytes[j];
@@ -512,17 +575,23 @@ class kmac_base_vseq extends cip_base_vseq #(
   endtask
 
   virtual task provide_sw_entropy();
-    csr_wr(.ptr(ral.entropy_seed_lower), .value($urandom()));
-    csr_wr(.ptr(ral.entropy_seed_upper), .value($urandom()));
+    for (int i = 0; i < kmac_reg_pkg::NumSeedsEntropy; i++) begin
+      csr_wr(.ptr(ral.entropy_seed), .value($urandom()));
+    end
   endtask
 
   // Call this task to initiate a KMAC_APP hashing operation
-  virtual task send_kmac_app_req(kmac_app_e mode);
-    kmac_app_host_seq kmac_app_seq;
-    `uvm_create_on(kmac_app_seq, p_sequencer.kmac_app_sequencer_h[mode]);
-    `DV_CHECK_RANDOMIZE_FATAL(kmac_app_seq)
-    kmac_app_seq.msg_size_bytes = msg.size();
-    `uvm_send(kmac_app_seq)
+  task send_kmac_app_req(kmac_app_e mode);
+    kmac_app_host_seq kmac_app_seq = kmac_app_host_seq::type_id::create("kmac_app_seq");
+
+    if (!kmac_app_seq.randomize()) begin
+      `uvm_fatal(get_full_name(), "Failed to randomize kmac_app_seq")
+    end
+
+    kmac_app_seq.msg_size_bytes           = msg.size();
+    kmac_app_seq.m_using_masked_interface = cfg.m_kmac_app_agent_cfg[mode].has_masking;
+
+    kmac_app_seq.start(p_sequencer.kmac_app_sequencer_h[mode]);
   endtask
 
   // This task writes a generic byte array into the msg_fifo
@@ -561,7 +630,9 @@ class kmac_base_vseq extends cip_base_vseq #(
   //
   // - Perform a TLUL access to the msgfifo with the random data/addr/mask, relying on tl_agent
   //   to correctly align the final address and data size
-  virtual task write_msg(bit [7:0] msg_arr[], bit blocking = $urandom_range(0, 1));
+  virtual task write_msg(bit [7:0] msg_arr[],
+                         bit blocking = $urandom_range(0, 1),
+                         bit wait_for_fifo_has_capacity = 1);
 
     bit [TL_DW-1:0] data_word;
     bit [7:0] msg_q[$];
@@ -577,8 +648,10 @@ class kmac_base_vseq extends cip_base_vseq #(
 
     // iterate through the message queue and pop off bytes to write to msgfifo
     while (msg_q.size() > 0) begin
-      // check that there is actually room in the fifo before we start writing anything
-      wait_fifo_has_capacity();
+
+      // Check that there is actually room in the fifo before we start writing anything.
+      // Will skip this check if it is used in error case, where the fifo full is forced to high.
+      if (wait_for_fifo_has_capacity) wait_fifo_has_capacity();
 
       `DV_CHECK_MEMBER_RANDOMIZE_FATAL(fifo_addr)
 
@@ -619,8 +692,6 @@ class kmac_base_vseq extends cip_base_vseq #(
       `uvm_info(`gfn, $sformatf("data_mask = 0x%0x", data_mask), UVM_HIGH)
 
       // Write to the msgfifo
-      //
-      // TODO: randomize non/blocking?
       tl_access(.addr(ral.get_addr_from_offset(fifo_addr)),
                 .write(1),
                 .data(data_word),
@@ -723,7 +794,7 @@ class kmac_base_vseq extends cip_base_vseq #(
       if (cfg.enable_masking) begin
         // If masked, wait for some time past the max latency of the EDN agent in case
         // an EDN request is sent right as CmdProcess is seen by the KMAC.
-        cfg.edn_clk_rst_vif.wait_clks(2 * cfg.m_edn_pull_agent_cfg.device_delay_max);
+        cfg.edn_clk_rst_vif.wait_clks(2 * cfg.m_edn_pull_agent_cfgs[0].device_delay_max);
         cfg.clk_rst_vif.wait_clks(1000);
       end else begin
         cfg.clk_rst_vif.wait_clks(150);
@@ -827,6 +898,8 @@ class kmac_base_vseq extends cip_base_vseq #(
         end
 
         squeeze_digest();
+        wr_hash_cnt_clear_cmd();
+        wr_entropy_req_cmd();
       end
 
       `uvm_info(`gfn, $sformatf("remaining_output_len: %0d", remaining_output_len), UVM_HIGH)
@@ -834,4 +907,79 @@ class kmac_base_vseq extends cip_base_vseq #(
 
   endtask
 
+  virtual task check_hash_cnt();
+    bit [TL_DW-1:0] val;
+    csr_rd(.ptr(ral.entropy_refresh_hash_cnt), .value(val));
+  endtask
+
+  // The hash_cnt_clr is `r0w1c` field.
+  // If user wants to set `hash_cnt_clr`, this task will always write 1 to the register.
+  // If user do not want to set `hash_cnt_clr`, this task has 10% possibility to write 0 to the
+  // register.
+  virtual task wr_hash_cnt_clear_cmd();
+    if (hash_cnt_clr || $urandom_range(0, 9) == 9) begin
+      csr_wr(.ptr(ral.cmd.hash_cnt_clr), .value(hash_cnt_clr));
+    end
+  endtask
+
+  // The entropy_req is `r0w1c` field.
+  // If user wants to set `entropy_req`, this task will always write 1 to the register.
+  // If user do not want to set `entropy_req`, this task has 10% possibility to write 0 to the
+  // register.
+  virtual task wr_entropy_req_cmd();
+    if (entropy_req || $urandom_range(0, 9) == 9) begin
+      csr_wr(.ptr(ral.cmd.entropy_req), .value(entropy_req));
+    end
+  endtask
+
+  // This task checks after a local or global escalation, the KMAC is locked and cannot process any
+  // more kmac SW operation.
+  virtual task kmac_sw_lock_check();
+    kmac_pkg::kmac_cmd_e rand_cmd;
+    bit [7:0] share[];
+    `DV_CHECK_STD_RANDOMIZE_FATAL(rand_cmd)
+    `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(msg, msg.size() inside {[1:100]};)
+
+    kmac_init(0);
+    set_prefix();
+    write_key_shares();
+    provide_sw_entropy();
+    issue_cmd(rand_cmd);
+    write_msg(msg, .wait_for_fifo_has_capacity(0));
+    read_digest_chunk(KMAC_STATE_SHARE0_BASE, keccak_block_size, share);
+    foreach (share[i]) `DV_CHECK_EQ_FATAL(share[i], '0)
+    read_digest_chunk(KMAC_STATE_SHARE1_BASE, keccak_block_size, share);
+    foreach (share[i]) `DV_CHECK_EQ_FATAL(share[i], '0)
+  endtask
+
+  // This task send requests to all app interfaces and expect none of them to response until reset.
+  virtual task kmac_app_lock_check();
+    kmac_app_e mode = mode.first;
+
+    do begin
+      `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(msg, msg.size() inside {[1:100]};)
+      fork begin
+        automatic kmac_app_e kmac_app_mode = mode;
+        fork
+          send_kmac_app_req(kmac_app_mode);
+          wait (cfg.under_reset);
+        join_any
+        p_sequencer.kmac_app_sequencer_h[kmac_app_mode].stop_sequences();
+        disable fork;
+        `DV_CHECK_EQ_FATAL(cfg.under_reset, 1,
+            $sformatf("App interface %0s should not response during fatal error", mode.name))
+      end join_none
+       // Add #0 to ensure that this thread starts executing before any subsequent call
+      #0;
+     mode = mode.next;
+    end while (mode != mode.first);
+
+    // Wait to make sure no valid data comes back.
+    cfg.clk_rst_vif.wait_clks($urandom_range(100, 2000));
+  endtask
+
+  // overriding timeout on outstanding accesses for the kmac_stress_test_all_with_rand_reset test
+  virtual function int wait_cycles_with_no_outstanding_accesses();
+    return 100_000;
+  endfunction
 endclass : kmac_base_vseq

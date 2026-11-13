@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -26,8 +26,9 @@ module lc_ctrl_kmac_if
   input                         token_hash_req_i,
   // Used for gating assertions inside CDC primitives.
   input                         token_hash_req_chk_i,
-  output                        token_hash_ack_o,
-  output                        token_hash_err_o,
+  output logic                  token_hash_ack_o,
+  output logic                  token_hash_err_o,
+  output logic                  token_if_fsm_err_o,
   output lc_token_t             hashed_token_o
 );
 
@@ -35,33 +36,19 @@ module lc_ctrl_kmac_if
   // Data and Handshake Synchronizers //
   //////////////////////////////////////
 
-  logic kmac_req, kmac_ack;
-  lc_token_t kmac_transition_token;
-  logic token_hash_req;
 
   // The transition_token_i register is guaranteed to remain stable once a life cycle
   // transition has been initiated.
   // Hence no further synchronization registers are required on the outgoing data.
-  // We just instantiate this synchronizer instance to facilitate CDC tooling (i.e., we
-  // make sure the CDC paths go through a prim_sync_reqack_data instance).
-  prim_sync_reqack_data #(
-    .Width(LcTokenWidth),
-    .DataSrc2Dst(1'b1)
-  ) u_prim_sync_reqack_data_out (
-    .clk_src_i  ( clk_i                 ),
-    .rst_src_ni ( rst_ni                ),
-    .clk_dst_i  ( clk_kmac_i            ),
-    .rst_dst_ni ( rst_kmac_ni           ),
-    .req_chk_i  ( token_hash_req_chk_i  ),
-    .src_req_i  ( token_hash_req        ),
-    .src_ack_o  (                       ), // not connected
-    .dst_req_o  (                       ), // not connected
-    .dst_ack_i  ( kmac_ack              ),
-    .data_i     ( transition_token_i    ),
-    .data_o     ( kmac_transition_token )
-  );
+  lc_token_t kmac_transition_token;
+  assign kmac_transition_token = transition_token_i;
+
+  // SRC domain cannot change data while waiting for ACK.
+  `ASSERT(DataStable_A, token_hash_req_i && !token_hash_ack_o |-> $stable(transition_token_i))
 
   // Second synchronizer instance for handshake and return data synchronization.
+  logic kmac_req, kmac_ack;
+  logic token_hash_req;
   logic token_hash_ack_d, token_hash_ack_q;
   logic token_hash_err_q, token_hash_err_d;
   lc_token_t hashed_token_q, hashed_token_d;
@@ -84,16 +71,18 @@ module lc_ctrl_kmac_if
     .dst_ack_i  ( kmac_ack             ),
     // Truncate hash to 128bit and remove masking (not required here).
     .data_i     ( {kmac_data_i.error,
-                   kmac_data_i.digest_share0[LcTokenWidth-1:0] ^
-                   kmac_data_i.digest_share1[LcTokenWidth-1:0]} ),
+                   kmac_data_i.digest_s0[LcTokenWidth-1:0] ^
+                   kmac_data_i.digest_s1[LcTokenWidth-1:0]} ),
     .data_o     ( {token_hash_err_d,
                    hashed_token_d}     )
   );
 
   logic unused_sigs;
   assign unused_sigs = ^{
-    kmac_data_i.digest_share0[LcTokenWidth +: (kmac_pkg::AppDigestW - LcTokenWidth)],
-    kmac_data_i.digest_share1[LcTokenWidth +: (kmac_pkg::AppDigestW - LcTokenWidth)]
+    kmac_data_i.digest_s0[LcTokenWidth +: (kmac_pkg::AppDigestW - LcTokenWidth)],
+    kmac_data_i.digest_s1[LcTokenWidth +: (kmac_pkg::AppDigestW - LcTokenWidth)],
+    // A static interface has no finish response.
+    kmac_data_i.rsp_finish
   };
 
   // Hashed Token Register Running on LC Clock
@@ -119,10 +108,23 @@ module lc_ctrl_kmac_if
   // Stop requesting tokens upon latching on LC side.
   assign token_hash_req = token_hash_req_i & ~token_hash_ack_q;
 
+  // Need to synchronize this error signal separately.
+  logic kmac_fsm_err_d, kmac_fsm_err_q;
+  prim_flop_2sync #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_prim_flop_2sync (
+    .clk_i,
+    .rst_ni,
+    .d_i(kmac_fsm_err_q),
+    .q_o(token_if_fsm_err_o)
+  );
+
   /////////////////////////////////////////////
   // Serialization FSM Running on KMAC Clock //
   /////////////////////////////////////////////
 
+  // SEC_CM: KMAC.FSM.SPARSE
   // Encoding generated with:
   // $ ./util/design/sparse-fsm-encode.py -d 5 -m 4 -n 8 \
   //      -s 3343913945 --language=sv
@@ -141,15 +143,15 @@ module lc_ctrl_kmac_if
   //
   // Minimum Hamming distance: 5
   // Maximum Hamming distance: 6
-  // Minimum Hamming weight: 1
+  // Minimum Hamming weight: 2
   // Maximum Hamming weight: 6
   //
   localparam int StateWidth = 8;
   typedef enum logic [StateWidth-1:0] {
-    FirstSt  = 8'b00000001,
-    SecondSt = 8'b11110011,
-    WaitSt   = 8'b10111100,
-    DoneSt   = 8'b01001110
+    FirstSt  = 8'b01011011,
+    SecondSt = 8'b10010100,
+    WaitSt   = 8'b11100111,
+    DoneSt   = 8'b00101000
   } state_e;
 
   state_e state_d, state_q;
@@ -157,35 +159,40 @@ module lc_ctrl_kmac_if
   // Serialize the 128bit token into two 64bit beats.
   always_comb begin : p_kmac
     state_d = state_q;
-    kmac_data_o = '0;
     kmac_ack = 1'b0;
+    kmac_fsm_err_d = 1'b0;
+
+    // LC ctrl operates on unshared data and accepts digest responses immediately.
+    kmac_data_o           = '0;
+    kmac_data_o.data_s1   = '0;
+    kmac_data_o.rsp_ready = 1'b1;
 
     unique case (state_q)
       // Wait for request and transfer first half of
       // LC token.
       FirstSt: begin
         if (kmac_req) begin
-          kmac_data_o.valid = 1'b1;
-          kmac_data_o.strb  = 8'hFF;
-          kmac_data_o.data  = kmac_transition_token[0 +: 64];
-          if (kmac_data_i.ready) begin
+          kmac_data_o.req_valid = 1'b1;
+          kmac_data_o.strb      = 8'hFF;
+          kmac_data_o.data_s0   = kmac_transition_token[0 +: 64];
+          if (kmac_data_i.req_ready) begin
             state_d = SecondSt;
           end
         end
       end
       // Transfer second half of LC token.
       SecondSt: begin
-        kmac_data_o.valid = 1'b1;
-        kmac_data_o.strb  = 8'hFF;
-        kmac_data_o.last = 1'b1;
-        kmac_data_o.data  = kmac_transition_token[64 +: 64];
-        if (kmac_data_i.ready) begin
+        kmac_data_o.req_valid = 1'b1;
+        kmac_data_o.strb      = 8'hFF;
+        kmac_data_o.req_last  = 1'b1;
+        kmac_data_o.data_s0   = kmac_transition_token[64 +: 64];
+        if (kmac_data_i.req_ready) begin
           state_d = WaitSt;
         end
       end
       // Wait for hashed token response and go to terminal state.
       WaitSt: begin
-        if (kmac_data_i.done) begin
+        if (kmac_data_i.rsp_valid) begin
           kmac_ack = 1'b1;
           state_d = DoneSt;
         end
@@ -193,22 +200,20 @@ module lc_ctrl_kmac_if
       // Terminal state (by design we can only perform
       // one token hashing operation per reset cycle).
       DoneSt: ;
-      default: state_d = DoneSt;
+      default: begin
+        kmac_fsm_err_d = 1'b1;
+      end
     endcase // state_q
   end
 
-  // This primitive is used to place a size-only constraint on the
-  // flops in order to prevent FSM state encoding optimizations.
-  logic [StateWidth-1:0] state_raw_q;
-  assign state_q = state_e'(state_raw_q);
-  prim_flop #(
-    .Width(StateWidth),
-    .ResetValue(StateWidth'(FirstSt))
-  ) u_state_regs (
-    .clk_i  ( clk_kmac_i  ),
-    .rst_ni ( rst_kmac_ni ),
-    .d_i    ( state_d     ),
-    .q_o    ( state_raw_q )
-  );
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, state_e, FirstSt, clk_kmac_i, rst_kmac_ni)
+
+  always_ff @(posedge clk_kmac_i or negedge rst_kmac_ni) begin : p_kmac_fsm_err
+    if (!rst_kmac_ni) begin
+      kmac_fsm_err_q <= 1'b0;
+    end else begin
+      kmac_fsm_err_q <= kmac_fsm_err_d;
+    end
+  end
 
 endmodule : lc_ctrl_kmac_if

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -81,11 +81,11 @@ class VerilatedTracer {
  */
 class VerilatedTracer {
  public:
-  VerilatedTracer(){};
+  VerilatedTracer() {};
   ~VerilatedTracer() {}
   bool isOpen() const { return false; };
-  void open(const char *filename){};
-  void close(){};
+  void open(const char *filename) {};
+  void close() {};
   void dump(vluint64_t timeui) {}
 };
 #endif  // VM_TRACE == 1
@@ -115,8 +115,8 @@ class TOPLEVEL_NAME;
  */
 class VerilatedToplevel {
  public:
-  VerilatedToplevel(){};
-  virtual ~VerilatedToplevel(){};
+  VerilatedToplevel() {};
+  virtual ~VerilatedToplevel() {};
 
   virtual void eval() = 0;
   virtual void final() = 0;

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -13,3 +13,6 @@ source "$RI_INSTALL/../Ascent/Lint/lib/policies/lowRISC/LRLR-v1.0.policy"
 set ri_max_total_range_bits 32768
 set ri_max_single_range_bits 32768
 
+# Increase the maximum loop to 3200 (KmacStateW X 2)
+# this is a temporary fix for non-ASCII character in AscentLint log
+set ri_max_loop_unroll 3200

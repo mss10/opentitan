@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -26,7 +26,7 @@ set -o pipefail
 git diff --name-only --diff-filter=ACMRTUXB "$merge_base" -- \
   "*.h" ':!*/vendor/*' | \
     xargs -r util/fix_include_guard.py --dry-run || {
-    echo -n "##vso[task.logissue type=error]"
+    echo -n "::error::"
     echo "Include guard check failed. Please run util/fix_include_guard.py on the above files."
     exit 1
 }

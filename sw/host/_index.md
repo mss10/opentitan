@@ -1,3 +1,0 @@
----
-title: "OpenTitan Host Software"
----

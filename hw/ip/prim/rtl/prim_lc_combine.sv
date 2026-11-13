@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -19,7 +19,7 @@ module prim_lc_combine #(
 
   // Determine whether which multibit value is considered "active" for the
   // purpose of the logical function below.
-  parameter lc_ctrl_pkg::lc_tx_t ActiveValue = (ActiveLow) ? lc_ctrl_pkg::Off : lc_ctrl_pkg::On;
+  localparam lc_ctrl_pkg::lc_tx_t ActiveValue = (ActiveLow) ? lc_ctrl_pkg::Off : lc_ctrl_pkg::On;
   // Truth tables:
   //
   // ActiveLow: 0, CombineMode: 0 (active-high "OR")

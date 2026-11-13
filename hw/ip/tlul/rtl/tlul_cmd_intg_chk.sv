@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,7 +21,7 @@ module tlul_cmd_intg_chk import tlul_pkg::*; (
   tl_h2d_cmd_intg_t cmd;
   assign cmd = extract_h2d_cmd_intg(tl_i);
 
-  prim_secded_64_57_dec u_chk (
+  prim_secded_inv_64_57_dec u_chk (
     .data_i({tl_i.a_user.cmd_intg, H2DCmdMaxWidth'(cmd)}),
     .data_o(),
     .syndrome_o(),
@@ -35,13 +35,15 @@ module tlul_cmd_intg_chk import tlul_pkg::*; (
 
   // error output is transactional, it is up to the instantiating module
   // to determine if a permanent latch is feasible
-  logic wr_txn;
-  assign wr_txn = tl_i.a_valid &
-                  (tl_i.a_opcode == PutFullData | tl_i.a_opcode == PutPartialData);
-
-  assign err_o = tl_i.a_valid & |err |
-                 wr_txn & |data_err;
-
+  // [LOWRISC] err and data_err is unknown when a_valid is low, so we can't cover
+  // the condition coverage - (|err | (|data_err)) == 0/1, when a_valid = 0, which is
+  // fine as driving unknown is better. `err_o` is used as a condition in other places,
+  // which needs to be covered with 0 and 1, so it's OK to disable the entire coverage.
+  //VCS coverage off
+  // pragma coverage off
+  assign err_o = tl_i.a_valid & (|err | (|data_err));
+  //VCS coverage on
+  // pragma coverage on
 
   logic unused_tl;
   assign unused_tl = |tl_i;

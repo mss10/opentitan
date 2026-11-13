@@ -1,15 +1,19 @@
-/* Copyright lowRISC contributors. */
+/* Copyright lowRISC contributors (OpenTitan project). */
 /* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
 /* SPDX-License-Identifier: Apache-2.0 */
 
 /* Test access to randomness from OTBN. */
 
 .section .text.start
-/* Test entry point, no arguments need to be passed in nor results returned */
+/* Test entry point, no arguments need to be passed in nor results returned. */
 .globl main
 main:
+  /* Init all-zero reg. */
+  bn.xor    w31, w31, w31
+
   jal x1, test_rnd
   jal x1, test_urnd
+  jal x1, consume_entropy
 
   jal x0, exit_success
 
@@ -35,10 +39,10 @@ main:
  */
 test_rnd:
   /* Initial read. */
-  csrrs x2, 0xfc0 /* RND */, x0
+  csrrs x2, RND, x0
 
   /* Read again, should block for a while. */
-  csrrs x3, 0xfc0 /* RND */, x0
+  csrrs x3, RND, x0
 
   /* If two consecutive reads return the same random number that's most likely
      a bug. (But it doesn't have to be a bug! Re-run the test if it fails.) */
@@ -46,7 +50,7 @@ test_rnd:
   beq x2, x3, exit_fail
 
   /* Request a RND value from the EDN by writing to RND_PREFETCH. */
-  csrrw x0, 0x7d8 /* RND_PREFETCH */, x0
+  csrrw x0, RND_PREFETCH, x0
 
   /* Give the prefetch a while to complete. */
   /* An EDN request for a random number can take up to around 5 ms. Do not
@@ -55,7 +59,7 @@ test_rnd:
     nop
 
   /* Read RND again, should block less. */
-  csrrs x2, 0xFC0 /* RND */, x0
+  csrrs x2, RND, x0
 
   /* Compare to previous value again to detect RND getting stuck. */
   addi x31, x0, 2
@@ -63,22 +67,16 @@ test_rnd:
 
 
   /* Read the RND WSR. */
-  bn.wsrr w0, 0x1 /* RND */
+  bn.wsrr w0, RND
 
   /* Write w0 to DMEM. */
   la x11, rnd_out
   bn.sid x0, 0(x11)
 
   /* Read the RND WSR again. */
-  bn.wsrr w1, 0x1 /* RND */
+  bn.wsrr w1, RND
 
-  /* Fail the test if the two numbers read from RND are equal. */
-  bn.cmp w0, w1
-  csrrs x2, 0x7c0 /* FG0 */, x0
-  andi x2, x2, 8 /* filter out Z (zero) bit */
-  addi x31, x0, 3
-  bne x2, x0, exit_fail
-
+  jal x1, error_checking
   ret
 
 /**
@@ -90,10 +88,10 @@ test_rnd:
  */
 test_urnd:
   /* Read the URND CSR. */
-  csrrs x2, 0xfc1 /* URND */, x0
+  csrrs x2, URND, x0
 
   /* Read again. */
-  csrrs x3, 0xfc1 /* URND */, x0
+  csrrs x3, URND, x0
 
   /* If two consecutive reads return the same random number that's most likely
      a bug. (But it doesn't have to be a bug! Re-run the test if it fails.) */
@@ -102,20 +100,65 @@ test_urnd:
 
 
   /* Read the URND WSR. */
-  bn.wsrr w0, 0x2 /* URND */
+  bn.wsrr w0, URND
 
   /* Write w0 to DMEM. */
   la x11, urnd_out
   bn.sid x0, 0(x11)
 
   /* Read the URND WSR again. */
-  bn.wsrr w1, 0x2 /* URND */
+  bn.wsrr w1, URND
 
-  /* Fail the test if the two numbers read from URND are equal. */
+  jal x1, error_checking
+  ret
+
+/**
+ * Subroutine that consumes entropy (RND).
+ *
+ * This subroutine consumes entropy to stress test the entropy complex.
+ * It consumes data from RND for a given number of iterations.
+ */
+consume_entropy:
+  /* Read number of iterations. */
+  la x11, iterations
+  lw x10, 0(x11)
+  beq x0, x10, skip_loops
+
+  loop x10, 1
+    /* Read the RND CSR. */
+    csrrs x2, RND, x0
+
+skip_loops:
+  ret
+
+/**
+ * This subroutine performs the following checks:
+ *
+ *  `w0 != w1` The two random numbers read shall be different.
+ *  `w0 != 0 ` The random numbers shall not have all bits equal to zero.
+ *  `w0 != ~0` The random numbers shall not have all bits equal to one.
+ */
+error_checking:
+  /* Fail the test if the two numbers read from RND are equal. */
   bn.cmp w0, w1
-  csrrs x2, 0x7c0 /* FG0 */, x0
-  andi x2, x2, 8 /* filter out Z (zero) bit */
-  addi x31, x0, 33
+  csrrs x2, FG0, x0
+  andi x2, x2, 8 /* Extract Z (zero) bit.*/
+  addi x31, x31, 1
+  bne x2, x0, exit_fail
+
+  /* Fail the test if all the bits are zero.*/
+  bn.cmp w0, w31
+  csrrs x2, FG0, x0
+  andi x2, x2, 8 /* Extract Z (zero) bit.*/
+  addi x31, x31, 1
+  bne x2, x0, exit_fail
+
+  /* Fail the test if all the bits are one. */
+  bn.not w2, w31 /*`w2 = ~0`*/
+  bn.cmp w0, w2
+  csrrs x2, FG0, x0
+  andi x2, x2, 8 /* Extract Z (zero) bit.*/
+  addi x31, x31, 1
   bne x2, x0, exit_fail
 
   ret
@@ -139,6 +182,12 @@ exit_fail:
   ecall
 
 .data
+/* #iterations per round of entropy generation. */
+.globl iterations
+.balign 4
+iterations:
+  .word 0x0
+
 /* Return value. */
 .globl rv
 .balign 4

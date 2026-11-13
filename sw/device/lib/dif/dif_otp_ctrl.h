@@ -1,13 +1,13 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
-
 #ifndef OPENTITAN_SW_DEVICE_LIB_DIF_DIF_OTP_CTRL_H_
 #define OPENTITAN_SW_DEVICE_LIB_DIF_DIF_OTP_CTRL_H_
 
 /**
  * @file
- * @brief <a href="/hw/ip/otp_ctrl/doc/">OTP</a> Device Interface Functions
+ * @brief <a href="/hw/top_earlgrey/ip_autogen/otp_ctrl/doc/">
+ * OTP Controller</a> Device Interface Functions
  */
 
 #include <stdint.h>
@@ -28,49 +28,216 @@ extern "C" {
  */
 typedef enum dif_otp_ctrl_partition {
   /**
-   * The vendor test area.
+   * Vendor test partition.
    *
-   * This partition is reserved for macro-specific smoke tests.
+   * This is reserved for manufacturing smoke checks. The OTP wrapper
+   * control logic inside prim_otp is allowed to read/write to this
+   * region. ECC uncorrectable errors seen on the functional prim_otp
+   * interface will not lead to an alert for this partition.
+   * Instead, such errors will be reported as correctable ECC errors.
    */
   kDifOtpCtrlPartitionVendorTest,
   /**
-   * The creator software configuration area.
+   * Software configuration partition.
    *
-   * This partition contains device-specific calibration data.
+   * This is for device-specific calibration data, e.g, clock, LDO, RNG,
+   * and configuration settings set by the ROM.
    */
   kDifOtpCtrlPartitionCreatorSwCfg,
   /**
-   * The owner software configuration area.
+   * Software configuration partition.
    *
-   * This partition contains data to e.g. enable ROM hardening features.
+   * This contains data that changes software behavior in the ROM, for
+   * example enabling defensive features in ROM or selecting failure
+   * modes if verification fails.
    */
   kDifOtpCtrlPartitionOwnerSwCfg,
+#if defined(OPENTITAN_IS_EARLGREY)
   /**
-   * The hardware configuration area.
-   */
-  kDifOtpCtrlPartitionHwCfg,
-  /**
-   * The device lifecycle area.
-   */
-  kDifOtpCtrlPartitionLifeCycle,
-  /**
-   * Scrambled partition 0.
+   * This OTP partition is used to store four P-256 keys and four Sphincs+ keys.
    *
-   * This paritition contains TEST lifecycle state unlock tokens.
+   * The partition requires 464
+   * bytes of software visible storage. The partition is
+   * locked at manufacturing time to protect against
+   * malicious write attempts.
+   */
+  kDifOtpCtrlPartitionRotCreatorAuthCodesign,
+  /**
+   * This OTP partition is used to capture the state of each key slot.
+   *
+   * Each key can be in one of the
+   * following states: BLANK, ENABLED, DISABLED. The
+   * encoded values are such that transitions between
+   * BLANK -> ENABLED ->  DISABLED are possible without
+   * causing ECC errors (this is a mechanism similar to
+   * how we manage life cycle state transitions). The
+   * partition is left unlocked to allow STATE updates in
+   * the field. The ROM_EXT is required to lock access to
+   * the OTP Direct Access Interface to prevent DoS
+   * attacks from malicious code executing on Silicon
+   * Owner partitions. DAI write locking is available in
+   * EarlGrey.
+   */
+  kDifOtpCtrlPartitionRotCreatorAuthState,
+#elif defined(OPENTITAN_IS_DARJEELING)
+  /**
+   * SW managed asset ownership states partition.
+   *
+   * Multibit enable value for the tracking the asset ownership states.
+   * Note that the states can be written multiple times in a device lifetime.
+   * The values to be written are engineered in the same way as the LC_CTRL
+   * state encoding words so that the ECC encoding remains valid even after
+   * updating the values.
+   *
+   * The constants can be found in the lc_ctrl_state_pkg.sv package.
+   *
+   * The programming order has to adhere to:
+   *
+   * OWNERSHIP_ST_RAW (factory all-zero state) ->
+   * OWNERSHIP_ST_LOCKED0 ->
+   * OWNERSHIP_ST_RELEASED0 ->
+   * ...
+   * OWNERSHIP_ST_SCRAPPED
+   *
+   * Note that if there are less than 4 slots available the higher slot states
+   * become logically equivalent to OWNERSHIP_SCRAPPED (firmware has to handle
+   * this correctly).
+   */
+  kDifOtpCtrlPartitionOwnershipSlotState,
+  /**
+   * Software managed creator partition.
+   *
+   */
+  kDifOtpCtrlPartitionRotCreatorAuth,
+  /**
+   * Software managed owner slot 0 partition.
+   *
+   */
+  kDifOtpCtrlPartitionRotOwnerAuthSlot0,
+  /**
+   * Software managed owner slot 1 partition.
+   *
+   */
+  kDifOtpCtrlPartitionRotOwnerAuthSlot1,
+  /**
+   * Software managed platform integrator slot 0 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatIntegAuthSlot0,
+  /**
+   * Software managed platform integrator slot 1 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatIntegAuthSlot1,
+  /**
+   * Software managed platform owner slot 0 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatOwnerAuthSlot0,
+  /**
+   * Software managed platform owner slot 1 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatOwnerAuthSlot1,
+  /**
+   * Software managed platform owner slot 2 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatOwnerAuthSlot2,
+  /**
+   * Software managed platform owner slot 3 partition.
+   *
+   */
+  kDifOtpCtrlPartitionPlatOwnerAuthSlot3,
+  /**
+   * Anti-replay protection Strike Counters partition.
+   *
+   */
+  kDifOtpCtrlPartitionExtNvm,
+  /**
+   * ROM Patch Code section.
+   *
+   * May contain multiple signed ROM2 patches.
+   */
+  kDifOtpCtrlPartitionRomPatch,
+#else
+#error "dif_otp_ctrl does not support this top"
+#endif
+  /**
+   * Hardware configuration 0 partition.
+   *
+   * This contains a device identifier and manufacturing state.
+   */
+  kDifOtpCtrlPartitionHwCfg0,
+  /**
+   * Hardware configuration 1 partition.
+   *
+   * This contains several hardware feature switches.
+   */
+  kDifOtpCtrlPartitionHwCfg1,
+  /**
+   * Secret partition 0.
+   *
+   * This contains TEST lifecycle unlock tokens.
    */
   kDifOtpCtrlPartitionSecret0,
   /**
-   * Scrambled partition 1.
+   * Secret partition 1.
    *
-   * This partition contains SRAM and flash scrambling keys.
+   * This contains SRAM and flash scrambling keys.
    */
   kDifOtpCtrlPartitionSecret1,
   /**
-   * Scrambled partition 2.
+   * Secret partition 2.
    *
-   * This partition contains the RMA unlock token and the CreatorRootKey.
+   * This contains RMA unlock token, creator root key, and creator seed.
    */
   kDifOtpCtrlPartitionSecret2,
+#if defined(OPENTITAN_IS_DARJEELING)
+  /**
+   * Secret partition 3.
+   *
+   * This contains the owner seed.
+   */
+  kDifOtpCtrlPartitionSecret3,
+#elif defined(OPENTITAN_IS_EARLGREY)
+// Earlgrey only has 3 secret partitions.
+#else
+#error "dif_otp_ctrl does not support this top"
+#endif
+  /**
+   * Lifecycle partition.
+   *
+   * This contains lifecycle transition count and state. This partition
+   * cannot be locked since the life cycle state needs to advance to RMA
+   * in-field. Note that while this partition is not marked secret, it
+   * is not readable nor writeable via the DAI. Only the LC controller
+   * can access this partition, and even via the LC controller it is not
+   * possible to read the raw manufacturing life cycle state in encoded
+   * form, since that encoding is considered a netlist secret. The LC
+   * controller only exposes a decoded version of this state.
+   */
+  kDifOtpCtrlPartitionLifeCycle,
+
+  /**
+   * This is not a partition; rather, it represents the total number of
+   * partitions.
+   */
+  kDifOtpCtrlNumberOfPartitions,
+
+  /**
+   * The following two are not partitions; rather they represent error codes
+   * that have a corresponding entry in dif_otp_ctrl_status_t.causes.
+   */
+  kDifOtpCtrlPartitionDaiError = kDifOtpCtrlNumberOfPartitions,
+  kDifOtpCtrlPartitionLciError,
+
+  /**
+   * This is not a partition; rather, it represents the total number of entries
+   * in dif_otp_ctrl_status_t.causes.
+   */
+  kDifOtpCtrlNumberOfCauses,
+
 } dif_otp_ctrl_partition_t;
 
 /**
@@ -114,44 +281,12 @@ typedef struct dif_otp_ctrl_config {
  * A hardware-level status code.
  */
 typedef enum dif_otp_ctrl_status_code {
-  // NOTE: This enum's API *requires* that all "error"-like codes (that is,
-  // those which have associated cause registers) be a prefix of the enum
-  // values.
-  //
-  // Note furthermore that these enum variants are intended as bit indices, so
+  // Note that these enum variants are intended as bit indices, so
   // their values should not be randomized.
   /**
-   * Indicates an error occurred in the `VendorTest` partition.
+   * Indicates that at least one partition raised an error.
    */
-  kDifOtpCtrlStatusCodeVendorTestError = 0,
-  /**
-   * Indicates an error occurred in the `CreatorSwCfg` partition.
-   */
-  kDifOtpCtrlStatusCodeCreatorSwCfgError,
-  /**
-   * Indicates an error occurred in the `OwnerSwCfg` partition.
-   */
-  kDifOtpCtrlStatusCodeOwnerSwCfgError,
-  /**
-   * Indicates an error occurred in the `HwCfg` partition.
-   */
-  kDifOtpCtrlStatusCodeHwCfgError,
-  /**
-   * Indicates an error occurred in the `LifeCycle` partition.
-   */
-  kDifOtpCtrlStatusCodeLifeCycleError,
-  /**
-   * Indicates an error occurred in the `Secret0` partition.
-   */
-  kDifOtpCtrlStatusCodeSecret0Error,
-  /**
-   * Indicates an error occurred in the `Secret1` partition.
-   */
-  kDifOtpCtrlStatusCodeSecret1Error,
-  /**
-   * Indicates an error occurred in the `Secret2` partition.
-   */
-  kDifOtpCtrlStatusCodeSecret2Error,
+  kDifOtpCtrlStatusCodePartitionError = 0,
   /**
    * Indicates an error occurred in the direct access interface.
    */
@@ -160,13 +295,6 @@ typedef enum dif_otp_ctrl_status_code {
    * Indicates an error occurred in the lifecycle interface.
    */
   kDifOtpCtrlStatusCodeLciError,
-  /**
-   * This is not a status code; rather, it represents the last error code which
-   * has a corresponding "cause" register.
-   *
-   * See `dif_otp_ctrl_status_t` for information on how to use this.
-   */
-  kDifOtpCtrlStatusCodeHasCauseLast = kDifOtpCtrlStatusCodeLciError,
   /**
    * Indicates that an integrity or consistency check has timed out.
    *
@@ -277,16 +405,15 @@ typedef struct dif_otp_ctrl_status {
    * error-free by writing
    *
    *   bool is_ok = status.codes == (1 << kDifOtpStatusCodeDaiIdle);
+   *
+   * Note this mapes to the "status" hw register.
    */
   uint32_t codes;
   /**
-   * A list of root causes for each error status code.
-   *
-   * If the error status code `error` is present in `codes`, and
-   * `error <= kDifOtpCtrlStatusHasCauseLast`, then `causes[error]`
-   * will contain its root cause.
+   * A list of root causes for each partition as well as for DAI and LCI.
+   * dif_otp_ctrl_partition_t can be used for indexing.
    */
-  dif_otp_ctrl_error_t causes[kDifOtpCtrlStatusCodeHasCauseLast + 1];
+  dif_otp_ctrl_error_t causes[kDifOtpCtrlNumberOfCauses];
 } dif_otp_ctrl_status_t;
 
 /**
@@ -328,11 +455,38 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_otp_ctrl_check_consistency(const dif_otp_ctrl_t *otp);
 
 /**
- * Locks out `dif_otp_ctrl_configure()` and the
- * `dif_otp_ctrl_check_*()` functions.
+ * Locks out access to the direct access interface registers.
  *
- * This function is reentrant: calling it while functionality is locked will
- * have no effect and return `kDifOtpCtrlOk`.
+ * This function is idempotent: calling it while functionality is locked will
+ * have no effect and return `kDifOk`.
+ *
+ * @param otp An OTP handle.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_dai_lock(const dif_otp_ctrl_t *otp);
+
+/**
+ * Checks whether access to the direct access interface is locked.
+ *
+ * Note that besides locking the DAI out until the next reset using the
+ * dif_otp_ctrl_dai_lock function, the DAI is also temporarily locked by the
+ * HW itself when it is busy processing a DAI command. In such a case, the
+ * kDifOtpCtrlStatusCodeDaiIdle status bit will be set to 0 as well.
+ *
+ * @param otp An OTP handle.
+ * @param[out] is_locked Out-param for the locked state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_dai_is_locked(const dif_otp_ctrl_t *otp,
+                                        bool *is_locked);
+
+/**
+ * Locks out `dif_otp_ctrl_configure()` function.
+ *
+ * This function is idempotent: calling it while functionality is locked will
+ * have no effect and return `kDifOk`.
  *
  * @param otp An OTP handle.
  * @return The result of the operation.
@@ -341,8 +495,7 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_otp_ctrl_lock_config(const dif_otp_ctrl_t *otp);
 
 /**
- * Checks whether `dif_otp_ctrl_configure()` and the `dif_otp_ctrl_check_*()`
- * functions are locked-out.
+ * Checks whether `dif_otp_ctrl_configure()` function is locked-out.
  *
  * @param otp An OTP handle.
  * @param[out] is_locked Out-param for the locked state.
@@ -351,6 +504,29 @@ dif_result_t dif_otp_ctrl_lock_config(const dif_otp_ctrl_t *otp);
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_otp_ctrl_config_is_locked(const dif_otp_ctrl_t *otp,
                                            bool *is_locked);
+
+/**
+ * Locks out `dif_otp_ctrl_check_*()` functions.
+ *
+ * This function is idempotent: calling it while functionality is locked will
+ * have no effect and return `kDifOk`.
+ *
+ * @param otp An OTP handle.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_lock_check_trigger(const dif_otp_ctrl_t *otp);
+
+/**
+ * Checks whether the `dif_otp_ctrl_check_*()` functions are locked-out.
+ *
+ * @param otp An OTP handle.
+ * @param[out] is_locked Out-param for the locked state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_check_trigger_is_locked(const dif_otp_ctrl_t *otp,
+                                                  bool *is_locked);
 
 /**
  * Locks out reads to a SW partition.
@@ -362,8 +538,8 @@ dif_result_t dif_otp_ctrl_config_is_locked(const dif_otp_ctrl_t *otp,
  * `dif_otp_ctrl_dai_digest()`. In particular, the effects of this function will
  * not persist past a system reset.
  *
- * This function is reentrant: calling it while functionality is locked will
- * have no effect and return `kDifOtpCtrlOk`.
+ * This function is idempotent: calling it while functionality is locked will
+ * have no effect and return `kDifOk`.
  *
  * @param otp An OTP handle.
  * @param partition The SW partition to lock.
@@ -401,6 +577,22 @@ dif_result_t dif_otp_ctrl_get_status(const dif_otp_ctrl_t *otp,
                                      dif_otp_ctrl_status_t *status);
 
 /**
+ * Calculates a `relative_address` with respect to a `partition` start
+ * address.
+ *
+ * @param partition The partition to use to calculate the reference start
+ * address.
+ * @param abs_address Input address relative to the OTP memory start address.
+ * @param[out] relative_address The result relative address with respect to the
+ * `partition` start address.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_relative_address(dif_otp_ctrl_partition_t partition,
+                                           uint32_t abs_address,
+                                           uint32_t *relative_address);
+
+/**
  * Schedules a read on the Direct Access Interface.
  *
  * Reads are performed relative to a partition; `address` should be given
@@ -408,7 +600,7 @@ dif_result_t dif_otp_ctrl_get_status(const dif_otp_ctrl_t *otp,
  * access.
  *
  * Furthermore, `address` must be well-aligned: it must be four-byte aligned for
- * normal paritions and eight-byte-aligned for secret partitions. An error is
+ * normal partitions and eight-byte-aligned for secret partitions. An error is
  * returned for unaligned access.
  *
  * @param otp An OTP handle.
@@ -518,6 +710,24 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_otp_ctrl_dai_digest(const dif_otp_ctrl_t *otp,
                                      dif_otp_ctrl_partition_t partition,
                                      uint64_t digest);
+
+/**
+ * Checks if the digest value for the given partition has been computed. Once a
+ * digest has been computed for a partition, the partition is write-locked
+ * (additionally, read-locked if the partition is secret).
+ *
+ * The lifecycle partition does not have a digest, and checking if this region
+ * has a computed digest will return an error.
+ *
+ * @param otp An OTP handle.
+ * @param partition The partition to check the digest of.
+ * @param[out] is_computed Indicates if the digest has been computed.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_otp_ctrl_is_digest_computed(const dif_otp_ctrl_t *otp,
+                                             dif_otp_ctrl_partition_t partition,
+                                             bool *is_computed);
 
 /**
  * Gets the buffered digest value for the given partition.

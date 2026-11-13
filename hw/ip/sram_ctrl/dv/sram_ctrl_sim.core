@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:dv:sram_ctrl_sim:0.1"
@@ -13,11 +13,12 @@ filesets:
 
   files_dv:
     depend:
-      - lowrisc:dv:mem_bkdr_util
+      - lowrisc:dv:sram_ctrl_bkdr_util
       - lowrisc:dv:sram_ctrl_test
       - lowrisc:dv:sram_ctrl_sva
     files:
       - tb.sv
+      - cov/sram_ctrl_cov_bind.sv
     file_type: systemVerilogSource
 
 targets:
@@ -28,6 +29,5 @@ targets:
       - files_dv
     default_tool: vcs
 
-  # TODO: add a lint check cfg in `hw/top_earlgrey/lint/top_earlgrey_dv_lint_cfgs.hjson`
   lint:
     <<: *sim_target

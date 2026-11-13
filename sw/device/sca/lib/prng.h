@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -32,6 +32,16 @@ extern "C" {
  * @param seed Seed to initalize with.
  */
 void prng_seed(uint32_t seed);
+
+/**
+ * Generates a random uint32_t.
+ *
+ * The behavior of this function matches the behavior of `random.randint(0,
+ * 0xFFFFFFFF)` in python.
+ *
+ * @return A random uint32_t.
+ */
+uint32_t prng_rand_uint32(void);
 
 /**
  * Generates a random byte.

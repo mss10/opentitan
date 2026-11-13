@@ -1,14 +1,12 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-class sram_ctrl_virtual_sequencer extends cip_base_virtual_sequencer #(
-    .CFG_T(sram_ctrl_env_cfg),
-    .COV_T(sram_ctrl_env_cov)
+class sram_ctrl_virtual_sequencer #(parameter int MemDepth = 10) extends cip_base_virtual_sequencer
+  #(.CFG_T(sram_ctrl_env_cfg#(MemDepth)),
+    .COV_T(sram_ctrl_env_cov#(MemDepth))
   );
-  `uvm_component_utils(sram_ctrl_virtual_sequencer)
-
-  tl_sequencer sram_tl_sequencer_h;
+  `uvm_component_param_utils(sram_ctrl_virtual_sequencer#(MemDepth))
 
   `uvm_component_new
 

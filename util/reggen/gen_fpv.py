@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 # # Lint as: python3
@@ -12,15 +12,17 @@ import os.path
 import yaml
 from mako import exceptions  # type: ignore
 from mako.template import Template  # type: ignore
-from pkg_resources import resource_filename
+import importlib.resources
 
-from .ip_block import IpBlock
+from reggen.ip_block import IpBlock
 
 
 def gen_fpv(block: IpBlock, outdir: str) -> int:
     # Read Register templates
     fpv_csr_tpl = Template(
-        filename=resource_filename('reggen', 'fpv_csr.sv.tpl'))
+        filename=str(importlib.resources.files('reggen') / "fpv_csr.sv.tpl"))
+
+    device_hier_paths = block.bus_interfaces.device_hier_paths
 
     # Generate a module with CSR assertions for each device interface. For a
     # device interface with no name, we generate <block>_csr_assert_fpv. For a
@@ -32,21 +34,23 @@ def gen_fpv(block: IpBlock, outdir: str) -> int:
             # No registers to check!
             continue
 
-        if if_name is None:
-            mod_base = lblock
-        else:
-            mod_base = lblock + '_' + if_name.lower()
+        hier_path = device_hier_paths[if_name]
+        if_suffix = '' if if_name is None else '_' + if_name.lower()
+        reg_block_path = hier_path + if_suffix
 
+        mod_base = lblock + if_suffix
         mod_name = mod_base + '_csr_assert_fpv'
         filename = mod_name + '.sv'
         generated.append(filename)
         reg_top_path = os.path.join(outdir, filename)
         with open(reg_top_path, 'w', encoding='UTF-8') as fout:
             try:
-                fout.write(fpv_csr_tpl.render(block=block,
-                                              mod_base=mod_base,
-                                              if_name=if_name,
-                                              rb=rb))
+                fout.write(
+                    fpv_csr_tpl.render(block=block,
+                                       reg_block_path=reg_block_path,
+                                       mod_base=mod_base,
+                                       if_name=if_name,
+                                       rb=rb))
             except:  # noqa F722 for template Exception handling
                 log.error(exceptions.text_error_template().render())
                 return 1

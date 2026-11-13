@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,7 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/aon_timer/doc/">Always-On Timer</a> Device Interface
+ * @brief <a href="/book/hw/ip/aon_timer/">Always-On Timer</a> Device Interface
  * Functions
  */
 
@@ -39,7 +39,7 @@ extern "C" {
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_aon_timer_wakeup_start(const dif_aon_timer_t *aon,
-                                        uint32_t threshold, uint32_t prescaler);
+                                        uint64_t threshold, uint32_t prescaler);
 
 /** Stops Always-On Timer (wake-up timer).
  *
@@ -62,6 +62,37 @@ dif_result_t dif_aon_timer_wakeup_stop(const dif_aon_timer_t *aon);
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_aon_timer_wakeup_restart(const dif_aon_timer_t *aon);
 
+/**
+ * Checks whether this Always-On Timer (wake-up timer) is enabled.
+ *
+ * @param aon An Always-On Timer handle.
+ * @param[out] is_enabled Out-param for the enabled state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aon_timer_wakeup_is_enabled(const dif_aon_timer_t *aon,
+                                             bool *is_enabled);
+/**
+ * Gets the wakeup cause.
+ *
+ * @param aon An Always-On Timer handle.
+ * @param[out] cause The current cause state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aon_timer_get_wakeup_cause(const dif_aon_timer_t *aon,
+                                            bool *cause);
+
+/** Clear Always-On Timer wakeup cause
+ *
+ * Clears WKUP_CAUSE register
+ *
+ * @param aon An Always-On Timer handle.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aon_timer_clear_wakeup_cause(const dif_aon_timer_t *aon);
+
 /** Retrieves Always-On Timer (wake-up timer) tick count.
  *
  * @param aon An Always-On Timer handle.
@@ -70,7 +101,7 @@ dif_result_t dif_aon_timer_wakeup_restart(const dif_aon_timer_t *aon);
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_aon_timer_wakeup_get_count(const dif_aon_timer_t *aon,
-                                            uint32_t *count);
+                                            uint64_t *count);
 
 /** Starts Always-On Timer (watchdog timer).
  *
@@ -112,6 +143,17 @@ dif_result_t dif_aon_timer_watchdog_stop(const dif_aon_timer_t *aon);
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_aon_timer_watchdog_restart(const dif_aon_timer_t *aon);
+
+/**
+ * Checks whether this Always-On Timer (watchdog timer) is enabled.
+ *
+ * @param aon An Always-On Timer handle.
+ * @param[out] is_enabled Out-param for the enabled state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aon_timer_watchdog_is_enabled(const dif_aon_timer_t *aon,
+                                               bool *is_enabled);
 
 /** Retrieves Always-On Timer (watchdog timer) tick count.
  *

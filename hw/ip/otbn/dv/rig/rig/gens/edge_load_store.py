@@ -1,11 +1,10 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 import random
 from typing import Optional
 
-from shared.operand import ImmOperandType, RegOperandType, OptionOperandType
 from shared.insn_yaml import Insn, InsnsFile
 
 from ..config import Config
@@ -28,42 +27,7 @@ class EdgeLoadStore(SnippetGen):
         self.weights = []
 
         self.sw = self._get_named_insn(insns_file, 'sw')
-
-        # SW Instruction Checks
-        # SW has three operands: grs1, offset, grs2
-        if not (len(self.sw.operands) == 3 and
-                isinstance(self.sw.operands[0].op_type, RegOperandType) and
-                self.sw.operands[0].op_type.reg_type == 'gpr' and
-                not self.sw.operands[0].op_type.is_dest() and
-                isinstance(self.sw.operands[1].op_type, ImmOperandType) and
-                isinstance(self.sw.operands[2].op_type, RegOperandType) and
-                self.sw.operands[2].op_type.reg_type == 'gpr' and
-                not self.sw.operands[2].op_type.is_dest()):
-            raise RuntimeError('SW instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
-
         self.bnsid = self._get_named_insn(insns_file, 'bn.sid')
-
-        # BN.SID Instruction Checks
-        # bn.sid expects the operands: grs1, grs2, offset, grs1_inc,
-        # grs2_inc20512
-        if len(self.bnsid.operands) != 5:
-            raise RuntimeError('Unexpected number of operands for bn.sid')
-
-        if not (isinstance(self.bnsid.operands[0].op_type, RegOperandType) and
-                self.bnsid.operands[0].op_type.reg_type == 'gpr' and
-                not self.bnsid.operands[0].op_type.is_dest() and
-                isinstance(self.bnsid.operands[1].op_type, RegOperandType) and
-                self.bnsid.operands[1].op_type.reg_type == 'gpr' and
-                not self.bnsid.operands[1].op_type.is_dest() and
-                isinstance(self.bnsid.operands[2].op_type, ImmOperandType) and
-                self.bnsid.operands[2].op_type.signed and
-                isinstance(self.bnsid.operands[3].op_type, OptionOperandType) and
-                isinstance(self.bnsid.operands[4].op_type, OptionOperandType)):
-            raise RuntimeError('BN.LID instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
 
         for insn in [self.sw, self.bnsid]:
             weight = cfg.insn_weights.get(insn.mnemonic)
@@ -97,7 +61,7 @@ class EdgeLoadStore(SnippetGen):
         snippet.insert_into_program(program)
         model.update_for_insn(prog_insn)
         model.pc += 4
-        return (snippet, False, model)
+        return (snippet, model)
 
     def fill_insn(self, insn: Insn, model: Model) -> Optional[ProgInsn]:
         '''Try to pick one of BN.SID or SW instructions
@@ -132,13 +96,14 @@ class EdgeLoadStore(SnippetGen):
 
         for reg_idx, u_reg_val in known_regs:
             reg_val = u_reg_val - (1 << 32) if u_reg_val >> 31 else u_reg_val
-            if model.dmem_size - reg_val - 4 in range(min_offset, max_offset + 1):
+            off_to_top = model.dmem_size - reg_val - 4
+            if off_to_top in range(min_offset, max_offset + 1):
                 base.append((reg_idx, reg_val))
 
         if not base:
             return None
 
-        # Pick a random register among known registers that are constrained above
+        # Pick a random known register that can reach the top of memory
         idx, value = random.choice(base)
 
         imm_val = model.dmem_size - 4 - value

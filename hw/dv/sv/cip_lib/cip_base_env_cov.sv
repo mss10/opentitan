@@ -1,8 +1,8 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// put these covergoups outside the class in order to create them anywhere after get cfg object
+// put these covergroups outside the class in order to create them anywhere after get cfg object
 // if more than one interrupt/alert registers, these can be reused
 // in extended cov class, better to have the covergroup inside the class and create in new function
 covergroup intr_cg (uint num_interrupts) with function sample(uint intr,
@@ -88,7 +88,9 @@ class tl_errors_cg_wrap;
                            bit mem_byte_access_err,
                            bit mem_wo_err,
                            bit mem_ro_err,
-                           bit tl_protocol_err);
+                           bit tl_protocol_err,
+                           bit write_w_instr_type_err,
+                           bit instr_type_err);
     option.per_instance = 1;
     option.name = name;
 
@@ -101,7 +103,13 @@ class tl_errors_cg_wrap;
 
     // we don't enumerate the various kinds of TL protocol errors here because there is a covergroup
     // in tl_agent, which covers those
-    cp_tl_protocol_err: coverpoint tl_protocol_err;
+    // No need to cover the case of 0, as protocol error may be the only error and 0 never happens.
+    cp_tl_protocol_err: coverpoint tl_protocol_err {
+      bins covered = {1};
+    }
+
+    cp_write_w_instr_type_err: coverpoint write_w_instr_type_err;
+    cp_instr_type_err: coverpoint instr_type_err;
   endgroup
 
   // Function: new
@@ -115,9 +123,11 @@ class tl_errors_cg_wrap;
                        bit mem_byte_access_err,
                        bit mem_wo_err,
                        bit mem_ro_err,
-                       bit tl_protocol_err);
-    tl_errors_cg.sample(unmapped_err, csr_size_err, mem_byte_access_err,
-                        mem_wo_err, mem_ro_err, tl_protocol_err);
+                       bit tl_protocol_err,
+                       bit write_w_instr_type_err,
+                       bit instr_type_err);
+    tl_errors_cg.sample(unmapped_err, csr_size_err, mem_byte_access_err, mem_wo_err,
+                        mem_ro_err, tl_protocol_err, write_w_instr_type_err, instr_type_err);
   endfunction : sample
 
 endclass
@@ -125,20 +135,15 @@ endclass
 class tl_intg_err_cg_wrap;
   // This covergroup sampled all kinds of TL integrity error and numbers of error bits.
   covergroup tl_intg_err_cg (string name) with function sample(tl_intg_err_e tl_intg_err_type,
-                                                                   uint          num_cmd_err_bits,
-                                                                   uint          num_data_err_bits,
-                                                                   bit           is_mem);
+                                                               logic         cmd_intg_err,
+                                                               logic         data_intg_err,
+                                                               bit           is_mem);
     option.per_instance = 1;
     option.name = name;
 
     cp_tl_intg_err_type: coverpoint tl_intg_err_type;
-
-    cp_num_cmd_err_bits: coverpoint num_cmd_err_bits {
-      bins values[] = {[0:MAX_TL_ECC_ERRORS]};
-    }
-    cp_num_data_err_bits: coverpoint num_data_err_bits {
-      bins values[] = {[0:MAX_TL_ECC_ERRORS]};
-    }
+    cp_cmd_intg_err: coverpoint cmd_intg_err;
+    cp_data_intg_err: coverpoint data_intg_err;
     cp_is_mem: coverpoint is_mem;
   endgroup
 
@@ -169,7 +174,8 @@ class tl_intg_err_mem_subword_cg_wrap;
     cp_tl_intg_err_type: coverpoint tl_intg_err_type;
 
     cp_num_num_enable_bytes: coverpoint num_enable_bytes {
-      bins values[] = {[0:BUS_DW/8]};
+      bins full_word = {BUS_DW / 8};
+      bins partial   = {[0 : BUS_DW / 8 - 1]};
     }
     cp_write: coverpoint write;
 
@@ -210,7 +216,7 @@ class cip_base_env_cov #(type CFG_T = cip_base_env_cfg) extends dv_base_env_cov 
       intr_test_cg = new(cfg.num_interrupts);
       intr_pins_cg = new(cfg.num_interrupts);
     end
-    if (cfg.has_edn) resets_cg = new("dut_and_edn_rsts");
+    if (cfg.num_edn) resets_cg = new("dut_and_edn_rsts");
   endfunction
 
 endclass

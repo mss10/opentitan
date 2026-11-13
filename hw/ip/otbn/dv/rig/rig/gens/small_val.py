@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -39,7 +39,7 @@ class SmallVal(SnippetGen):
                 self.insn.operands[1].op_type.reg_type == 'gpr' and
                 isinstance(self.insn.operands[2].op_type, ImmOperandType) and
                 self.insn.operands[2].op_type.signed):
-            raise RuntimeError('ADDI instruction from instructions file is not '
+            raise RuntimeError('ADDI instruction from instructions file not '
                                'the shape expected by the SmallVal generator.')
 
         self.grd_op_type = self.insn.operands[0].op_type
@@ -103,4 +103,4 @@ class SmallVal(SnippetGen):
         model.update_for_insn(prog_insn)
         model.pc += 4
 
-        return (snippet, False, model)
+        return (snippet, model)

@@ -1,7 +1,30 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
-{ name: "csrng",
+{ name:               "csrng",
+  human_name:         "Cryptographically Secure Random Number Generator",
+  one_line_desc:      "Takes entropy bits to produce cryptographically secure random numbers for consumption by hardware blocks and by software",
+  one_paragraph_desc: '''
+  Cryptographically Secure Random Number Generator (CSRNG) consumes random seeds from Entropy Source and generates random numbers for separate application interface contexts, such as multiple entropy distribution networks and software.
+  When used in fully deterministic mode, the random numbers are generated just based on seeds provided by the application input.
+  CSRNG targets compliance with [BSI's AIS31 recommendations for Common Criteria (CC)][bsi-ais31] as well as NIST's [SP 800-90A][nist-sp-800-90a] and [SP 800-90C][nist-sp-800-90c].
+  Internally, it uses the CTR_DRBG construction with a security strength of 256 bits as specified by [SP 800-90A][nist-sp-800-90a].
+
+  [bsi-ais31]: https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/Zertifizierung/Interpretationen/AIS_31_Functionality_classes_for_random_number_generators_e.pdf
+  [nist-sp-800-90a]: https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-90Ar1.pdf
+  [nist-sp-800-90c]: https://csrc.nist.gov/CSRC/media/Publications/sp/800-90c/draft/documents/sp800_90c_second_draft.pdf
+  '''
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "5",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_csrng",
+  version:            "3.0.0",
+  life_stage:         "L1",
+  design_stage:       "D1",
+  verification_stage: "V1",
+  dif_stage:          "S2",
   clocking: [{clock: "clk_i", reset: "rst_ni"}],
   bus_interfaces: [
     { protocol: "tlul", direction: "device" }
@@ -28,10 +51,18 @@
       local: "false",
       expose: "true"
     },
+    # Note: All parameters below are local, they are not actually configurable.
+    # Selecting values different from the default values below might cause undefined behavior.
+    { name:    "NumApps",
+      type:    "int",
+      default: "3",
+      desc:    "Number of application interfaces",
+      local:   "true"
+    },
   ],
   interrupt_list: [
     { name: "cs_cmd_req_done"
-      desc: "Asserted when a command request is completed."}
+      desc: "Asserted when a command request is completed, or when a CSRNG instance halted via INT_STATE_HALT has quiesced."}
     { name: "cs_entropy_req"
       desc: "Asserted when a request for entropy has been made."}
     { name: "cs_hw_inst_exc"
@@ -65,24 +96,129 @@
       act:     "req"
       package: "entropy_src_pkg"
     }
-    { struct:  "cs_aes_halt"
-      type:    "req_rsp",
-      name:    "cs_aes_halt"
-      act:     "rsp"
-      package: "entropy_src_pkg"
-    }
-    { struct:  "mubi8"
-      type:    "uni"
-      name:    "otp_en_csrng_sw_app_read"
-      act:     "rcv"
-      package: "prim_mubi_pkg"
-    }
     { struct:  "lc_tx"
       type:    "uni"
       name:    "lc_hw_debug_en"
       act:     "rcv"
       default: "lc_ctrl_pkg::Off"
       package: "lc_ctrl_pkg"
+    }
+  ],
+  features: [
+    {
+      name: "CSRNG.INTERFACE.SOFTWARE",
+      desc: '''
+            CSRNG has an application interface for the software to interact with.
+
+            Note that for software to actually retrieve random numbers from this interface, !!CTRL.SW_APP_ENABLE needs to be set to `kMultiBitBool4True`.
+            Otherwise the !!GENBITS register always reads 0.
+            '''
+    }
+    {
+      name: "CSRNG.INTERFACE.HARDWARE0",
+      desc: "CSRNG has an application interface intended for hardware; this interface is labelled zero."
+    }
+    {
+      name: "CSRNG.INTERFACE.HARDWARE1",
+      desc: "CSRNG has an application interface intended for hardware; this interface is labelled one."
+    }
+    {
+      name: "CSRNG.MODE.DETERMINISTIC",
+      desc: "CSRNG can be set up to deterministically generate the same sequence of random values by using a fixed seed."
+    }
+    {
+      name: "CSRNG.MODE.NONDETERMINISTIC",
+      desc: "CSRNG can be set up to generate non-deterministic random values by using a random seed from the entropy source."
+    }
+    {
+      name: "CSRNG.SAVE_AND_RESTORE",
+      desc: '''
+            CSRNG allows the internal state of a selected instance to be read out or overwritten via !!INT_STATE_VAL.
+            This is useful for debugging and validation testing, as well as for context save/restore.
+            '''
+    }
+    {
+      name: "CSRNG.LIFECYCLE.DEBUGENABLE",
+      desc: '''
+            CSRNG has a debug enable signal, which allows for seed diversification.
+            Depending on this value it will use the non-production seed constant or the production seed constant.
+            This state is controlled by the life-cycle controller and so debug is enabled only in test mode.
+            '''
+    }
+  ],
+  countermeasures: [
+    { name: "CONFIG.REGWEN"
+      desc: "Registers are protected from writes."
+    }
+    { name: "CONFIG.MUBI"
+      desc: "Registers have multi-bit encoded fields."
+    }
+    { name: "CMD_STAGE.FSM.SPARSE"
+      desc: "The CSRNG command stage state machines use a sparse state encoding."
+    }
+    { name: "MAIN_SM.FSM.SPARSE"
+      desc: "The CSRNG main state machine uses a sparse state encoding."
+    }
+    { name: "CTR_DRBG.FSM.SPARSE"
+      desc: "The CTR DRBG state machine uses a sparse state encoding."
+    }
+    { name: "CTR_DRBG.CTR.REDUN"
+      desc: "The ctr_drbg algorithm uses a counter that is protected by a second counter that counts in the opposite direction."
+    }
+    { name: "STATE_DB.CTR.REDUN"
+      desc: "The !!INT_STATE_VAL word pointer uses a counter that is protected by a second counter that counts in the opposite direction."
+    }
+    { name: "CTRL.MUBI"
+      desc: "Multi-bit field used for selection control."
+    }
+    { name: "MAIN_SM.CTR.LOCAL_ESC"
+      desc: "A mismatch detected inside any CSRNG counter moves the  main state machine into a terminal error state."
+    }
+    { name: "CONSTANTS.LC_GATED"
+      desc: "Seed diversification based on the lifecycle state."
+    }
+    { name: "SW_GENBITS.BUS.CONSISTENCY"
+      desc: "Comparison on successive bus values for genbits returned on the software channel."
+    }
+    { name: "TILE_LINK.BUS.INTEGRITY"
+      desc: "Tilelink end-to-end bus integrity scheme."
+    }
+    { name: "AES_CIPHER.FSM.SPARSE",
+      desc: '''
+        The AES cipher core FSM uses a sparse state encoding.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
+    }
+    { name: "AES_CIPHER.FSM.REDUN",
+      desc: '''
+        The AES cipher core FSM uses multiple, independent logic rails.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
+    }
+    { name: "AES_CIPHER.CTRL.SPARSE",
+      desc: '''
+        Critical control signals for the AES cipher core such as handshake and MUX control signals use sparse encodings.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
+    }
+    { name: "AES_CIPHER.FSM.LOCAL_ESC",
+      desc: '''
+        The AES cipher core FSM moves to a terminal error state upon local escalation.
+        Can be triggered by AES_CIPHER.FSM.SPARSE, AES_CIPHER.FSM.REDUN, AES_CIPHER.CTR.REDUN and AES_CIPHER.CTRL.SPARSE.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
+    }
+    { name: "AES_CIPHER.CTR.REDUN",
+      desc: '''
+        The AES round counter inside the AES cipher core FSM is protected with multiple, independent logic rails.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
+    }
+    { name: "AES_CIPHER.DATA_REG.LOCAL_ESC",
+      desc: '''
+        Upon local escalation, the AES cipher core doesn't output intermediate state.
+        See the AES module documentation for AES-specific countermeasures.
+      '''
     }
   ],
   regwidth: "32",
@@ -106,7 +242,7 @@
       swaccess: "rw",
       hwaccess: "hro",
       regwen: "REGWEN",
-      tags: [// Internal HW can modify status register
+      tags: [// Keep HW from affecting other registers.
                  "excl:CsrAllTests:CsrExclWrite"]
       fields: [
         {
@@ -114,7 +250,9 @@
             name: "ENABLE",
             mubi: true
             desc: '''
-                  Setting this field to kMuBi4True will enable the CSRNG module.
+                  Setting this field to kMultiBitBool4True will enable the CSRNG module. The modules
+                  of the entropy complex may only be enabled and disabled in a specific order, see
+                  Programmers Guide for details.
                   '''
           resval: false
         },
@@ -123,9 +261,7 @@
             name: "SW_APP_ENABLE",
             mubi: true
             desc: '''
-                  Setting this field to kMuBi4True will enable reading from the !!GENBITS register.
-                  This application interface for software (register based) will be enabled
-                  only if the efuse_sw_app_enable input is set.
+                  Setting this field to kMultiBitBool4True will enable reading from the !!GENBITS register.
                   '''
           resval: false
         },
@@ -134,10 +270,27 @@
             name: "READ_INT_STATE",
             mubi: true
             desc: '''
-                  Setting this field to kMuBi4True will enable reading from the INT_STATE_VAL register.
-                  Reading the internal state of the enable instances will be enabled
-                  only if the efuse_sw_app_enable input is set.
+                  Setting this field to kMultiBitBool4True will enable reading the internal state via !!INT_STATE_VAL.
+                  Also, the !!INT_STATE_READ_ENABLE bit of the selected instance needs to be set to true for this to work.
                   '''
+          resval: false
+        },
+        {
+            bits: "15:12",
+            name: "WRITE_INT_STATE",
+            mubi: true
+            desc: '''
+                  Setting this field to kMultiBitBool4True will enable writing the internal state via !!INT_STATE_VAL.
+                  Also, the !!INT_STATE_WRITE_ENABLE bit of the selected instance needs to be set to true for this to work.
+                  '''
+          resval: false
+        },
+        { bits: "19:16",
+          name: "FIPS_FORCE_ENABLE",
+          mubi: true
+          desc: '''
+                Setting this field to kMultiBitBool4True enables forcing the FIPS/CC compliance flag to true via the !!FIPS_FORCE register.
+                '''
           resval: false
         },
       ]
@@ -155,32 +308,142 @@
                 Writing this request with defined CSRNG commands will initiate all
                 possible CSRNG actions. The application interface must wait for the
                 "ack" to return before issuing new commands.
+                Before writing each word of a command, !!SW_CMD_STS.CMD_RDY needs to be polled.
                 '''
         }
       ]
+    },
+    { name: "RESEED_INTERVAL",
+      desc: "CSRNG maximum number of generate requests allowed between reseeds register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      hwqe: "true",
+      fields: [
+        { bits: "31:0",
+          name: "RESEED_INTERVAL",
+          desc: '''
+                Setting this field will set the number of generate requests that can be
+                made to CSRNG before a reseed request needs to be made.
+                This register supports a maximum of 2^32 requests between reseeds.
+                This register will be compared to a counter, which counts the number of
+                generate commands between reseed or instantiate commands.
+                If the counter reaches the value of this register, the violating command
+                will be acknowledged with a status error.
+                If the violating command was issued by a HW instance, an interrupt will
+                be triggered.
+                '''
+          resval: 0xffff_ffff
+        }
+      ]
+    },
+    { multireg: {
+      name: "RESEED_COUNTER",
+      desc: '''
+        Reseed counter.
+
+        The per-instance reseed counter indicates the number of Generate requests that have been completed since new entropy input has been obtained with an Instantiate or a Reseed command.
+      '''
+      count: "NumApps",
+      cname: "RESEED_COUNTER",
+      swaccess: "ro",
+      hwaccess: "hwo",
+      hwext:    "true",
+      fields: [
+        { bits: "31:0",
+          name: "RESEED_COUNTER",
+          desc: "Reseed Counter indicating the number of completed Generate requests since the last Instantiate or Reseed command."
+          resval: "0",
+        }
+      ],
+      },
     },
     {
       name: "SW_CMD_STS",
       desc: "Application interface command status register",
       swaccess: "ro",
       hwaccess: "hwo",
+      tags: [// Internal HW can modify status register
+                 "excl:CsrNonInitTests:CsrExclCheck"]
       fields: [
-        { bits: "0",
-          name: "CMD_RDY",
-          desc: '''This bit indicates when the command interface is ready to accept commands.
-                '''
-          resval: "1"
-        }
         { bits: "1",
-          name: "CMD_STS",
+          name: "CMD_RDY",
           desc: '''
-                This one bit field is the status code returned with the application command ack.
-                It is updated each time a command ack is asserted on the internal application
-                interface for software use.
-                0b0: Request completed successfully
-                0b1: Request completed with an error
+                This bit indicates when the command interface is ready to accept the next command word.
+                Before writing each word of a command to !!CMD_REQ, this field needs to be polled.
+                Words written while this field is low are dropped.
+                0b0: CSRNG is not ready to accept the next command word or the last command hasn't been acked yet.
+                0b1: CSRNG is ready to accept the next command word.
                 '''
           resval: "0"
+        }
+        { bits: "2",
+          name: "CMD_ACK",
+          desc: '''
+                This one bit field indicates when a SW command has been acknowledged by the CSRNG.
+                It is set to low each time a new command is written to !!CMD_REQ.
+                The field is set to high once a SW command request has been acknowledged by the CSRNG.
+                0b0: The last SW command has not been acknowledged yet.
+                0b1: The last SW command has been acknowledged.
+                In case of a generate command the acknowledgement goes high after all of the requested entropy is consumed.
+                '''
+          resval: "0"
+        }
+        { bits: "5:3",
+          name: "CMD_STS",
+          desc: '''
+                This field represents the status code returned with the application command ack.
+                It is updated each time a command ack is asserted on the internal application
+                interface for software use.
+                To check whether a command was successful, wait for !!INTR_STATE.CS_CMD_REQ_DONE or
+                !!SW_CMD_STS.CMD_ACK to be high and then check the value of this field.
+                '''
+          resval: "0"
+          enum: [
+            { value: "0",
+              name: "SUCCESS",
+              desc: '''
+                    Request completed successfully.
+                    '''
+            },
+            { value: "1",
+              name: "INVALID_ACMD",
+              desc: '''
+                    Request completed with an invalid application command error.
+                    This error indicates that the issued application command doesn't represent a valid operation.
+                    '''
+            },
+            { value: "2",
+              name: "INVALID_GEN_CMD",
+              desc: '''
+                    Request completed with an invalid Generate command error.
+                    This error indicates that a Generate command was issued with a `glen` field of zero.
+                    The command is ignored and no entropy is generated.
+                    '''
+            },
+            { value: "3",
+              name: "INVALID_CMD_SEQ",
+              desc: '''
+                    This error indicates that the last command was issued out of sequence.
+                    This happens when a command other than Instantiate was issued without sending an Instantiate command first.
+                    This can also happen when an Uninstantiate command is sent without instantiating first.
+                    '''
+            },
+            { value: "4",
+              name: "RESEED_CNT_EXCEEDED",
+              desc: '''
+                    This error indicates that the number of generate requests between reseeds exceeded the maximum number allowed (see !!RESEED_INTERVAL).
+                    This happens only for Generate commands.
+                    '''
+            },
+            { value: "5",
+              name: "GEN_ABORTED",
+              desc: '''
+                    This bit indicates that a Generate command for this instance was aborted via !!GEN_ABORT before returning all requested genbits.
+                    The instance has been uninstantiated as a result and must be instantiated again before further commands will succeed.
+                    This happens only for Generate commands.
+                    '''
+            },
+          ]
         }
       ]
     },
@@ -193,7 +456,7 @@
       fields: [
         { bits: "0",
           name: "GENBITS_VLD",
-          desc: "This bit is set when genbits are available on this application interface."
+          desc: "This bit is set when genbits are available on this application interface after a generate command has been issued."
         }
         { bits: "1",
           name: "GENBITS_FIPS",
@@ -213,11 +476,48 @@
           name: "GENBITS",
           desc: '''
                 Reading this register will get the generated bits that were requested with
-                the generate request. This register must be four times for each request
-                number made. For example, a application command generate request with
-                a `creq` value of 4 requires this register to be read 16 times to get all
+                the generate request. This register must be read four times for each request
+                made. For example, an application command generate request with
+                a `clen` value of 4 requires this register to be read 16 times to get all
                 of the data out of the FIFO path.
+                Note that for !!GENBITS to be able to deliver random numbers, also !!CTRL.SW_APP_ENABLE needs to be set to `kMultiBitBool4True`.
+                Otherwise, the register reads as 0.
                 '''
+        }
+      ]
+    },
+    {
+      name: "INT_STATE_READ_ENABLE_REGWEN",
+      desc: "Internal state read enable REGWEN register",
+      swaccess: "rw0c",
+      hwaccess: "none",
+      fields: [
+        { bits: "0",
+          desc: '''
+                INT_STATE_READ_ENABLE register configuration enable bit.
+                If this is cleared to 0, the INT_STATE_READ_ENABLE register cannot be written anymore.
+                '''
+          resval: 1,
+        }
+      ]
+    },
+    {
+      name: "INT_STATE_READ_ENABLE",
+      desc: "Internal state read enable register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      regwen: "INT_STATE_READ_ENABLE_REGWEN",
+      fields: [
+        { bits: "2:0",
+          name: "INT_STATE_READ_ENABLE",
+          desc: '''
+                Per-instance internal state read enable.
+                Defines whether the internal state of the corresponding instance can be read via !!INT_STATE_VAL.
+                Reads for an instance whose bit is cleared return 0.
+                Clearing the bit of the selected instance while reading it resets the !!INT_STATE_VAL word pointer.
+                Note that reading additionally requires !!CTRL.READ_INT_STATE to be set to `kMultiBitBool4True`.
+                '''
+          resval: 0x7
         }
       ]
     },
@@ -231,41 +531,132 @@
             bits: "3:0",
             name: "INT_STATE_NUM",
             desc: '''
-                  Setting this field will set the number for which internal state can be
-                  selected for a read access. Up to 16 internal state values can be chosen
-                  from this register. The actual number of valid internal state fields
-                  is set by parameter NHwApps plus 1 software app. For those selections that point
-                  to reserved locations (greater than NHwApps plus 1), the returned value
-                  will be zero. Writing this register will also reset the internal read
-                  pointer for the !!INT_STATE_VAL register.
-                  Note: This register should be read back after being written to ensure
-                  that the !!INT_STATE_VAL read back is accurate.
+                  Index of the CSRNG instance whose internal state is targeted via !!INT_STATE_VAL.
+                  Valid indices are 0 to NumApps-1 (number of HW interfaces plus one for the SW interface).
+                  Selecting a larger index makes !!INT_STATE_VAL read as 0.
+                  Writing this register also resets the read/write pointer of !!INT_STATE_VAL to the first word of the selected state.
+                  This field also selects the instance targeted by !!INT_STATE_HALT and !!INT_STATE_STS.
                   '''
         },
       ]
     },
     {
       name: "INT_STATE_VAL",
-      desc: "Internal state read access register",
-      swaccess: "ro",
+      desc: "Internal state read/write access register",
+      swaccess: "rw",
       hwaccess: "hrw",
       hwext: "true",
       hwre: "true",
+      hwqe: "true",
+      tags: [// Reads return the internal state and advance the word pointer, so they are not
+             // predictable by the CSR tests.
+             "excl:CsrNonInitTests:CsrExclCheck"]
       fields: [
         { bits: "31:0",
           name: "INT_STATE_VAL",
           desc: '''
-                Reading this register will dump out the contents of the selected internal state field.
-                Since the internal state field is 448 bits wide, it will require 14 reads from this
-                register to gather the entire field. Once 14 reads have been done, the internal read
-                pointer (selects 32 bits of the 448 bit field) will reset to zero. The !!INT_STATE_NUM
-                can be re-written at this time (internal read pointer is also reset), and then
-                another internal state field can be read.
-                Also, the life cycle state must be one where the signal "lc_hw_debug_en" is asserted
-                in order to read any internal state field.
+                Reading this register will dump out the contents of the selected instance's internal state.
+                Writing this register overwrites the state word by word as the writes arrive.
+                The internal state comprises the CTR_DRBG state (key/V/reseed counter/fips/instantiated) as well as the state of a Generate command paused mid-sequence (remaining block count, Generate flag and additional data).
+                Since this field is 816 bits wide, it will require 26 reads or writes of this register to access the entire field.
+                Every read and every write advances the internal read/write pointer (selects 32 bits of the 816 bit field), which wraps around to zero after 26 accesses.
+                Writing !!INT_STATE_NUM resets the pointer to zero.
+                A read following a write, or a write following a read, restarts the sequence at the first word.
+                Disabling read access while reading, or write access while writing, also resets the pointer to zero.
+
+                Reserved bits are ignored on writes and read as 0.
+
+                If the state is internally updated while an access sequence is in progress, !!RECOV_ALERT_STS.INT_STATE_OVERWRITE_ALERT is raised.
+                To get a consistent snapshot, halt the instance via !!INT_STATE_HALT first.
+
+                Note that for !!INT_STATE_VAL to provide read access to the internal state, !!CTRL.READ_INT_STATE needs to be set to `kMultiBitBool4True` and the !!INT_STATE_READ_ENABLE bit of the selected instance needs to be set.
+                For write access, !!CTRL.WRITE_INT_STATE needs to be set to `kMultiBitBool4True` and the !!INT_STATE_WRITE_ENABLE bit of the selected instance needs to be set.
+                Otherwise, the register reads as 0, writes are dropped and the pointer does not advance.
                 '''
         }
       ]
+    },
+    {
+      name: "FIPS_FORCE",
+      desc: "FIPS/CC compliance flag forcing register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      regwen: "REGWEN",
+      fields: [
+        { bits: "2:0",
+          name: "FIPS_FORCE",
+          desc: '''
+                Force the FIPS/CC compliance flag of individual instances to true.
+                This allows CSRNG to set the output FIPS/CC compliance flag to true despite running in fully deterministic mode (flag0 being true).
+                This can be useful e.g. for known-answer testing through entropy consumers accepting FIPS/CC compliant entropy only, or when firmware is used to derive FIPS/CC compliant entropy seeds.
+                After setting a particular bit to 1, the FIPS/CC compliance flag of the corresponding instance will be forced to true upon the next Instantiate or Reseed command.
+
+                Note that for this to work, !!CTRL.FIPS_FORCE_ENABLE needs to be set to kMultiBitBool4True.
+                '''
+        }
+      ]
+    },
+    { name: "GEN_ABORT_REGWEN",
+      desc: "Register write enable for !!GEN_ABORT",
+      swaccess: "rw0c",
+      hwaccess: "none",
+      fields: [
+        { bits: "0",
+          desc: '''
+                When true, the !!GEN_ABORT register can be written.
+                When false, it becomes read-only until the next reset.
+                '''
+          resval: 1
+        }
+      ]
+    },
+    { multireg: {
+      name: "GEN_ABORT",
+      desc: "Generate command abort request register",
+      count: "NumApps",
+      cname: "GEN_ABORT",
+      compact: false,
+      swaccess: "rw1s",
+      hwaccess: "hrw",
+      regwen: "GEN_ABORT_REGWEN",
+      tags: [// This register self-clears every cycle and a write can affect RECOV_ALERT_STS.
+                 "excl:CsrAllTests:CsrExclWrite"]
+      fields: [
+        { bits: "3:0",
+          name: "GEN_ABORT",
+          mubi: true,
+          resval: false,
+          desc: '''
+                Setting this field to kMultiBitBool4True requests aborting a Generate command that is currently in progress for this instance.
+                The instance is zeroed as a result.
+                It must be instantiated again before further Reseed, Update, or Generate commands can succeed.
+
+                This request is only accepted while a Generate command is actually in progress for this instance.
+                If no Generate command is in progress, the write is ignored and !!RECOV_ALERT_STS.GEN_ABORT_INVALID_ALERT is set instead.
+                '''
+        }
+      ]
+      }
+    },
+    { multireg: {
+      name: "GEN_ABORT_STATUS",
+      desc: "Generate command abort completion status register",
+      count: "NumApps",
+      cname: "GEN_ABORT_STATUS",
+      compact: false,
+      swaccess: "rw1c",
+      hwaccess: "hwo",
+      fields: [
+        { bits: "0",
+          name: "GEN_ABORT_STATUS",
+          resval: false,
+          desc: '''
+                This bit is set when a Generate command abort requested via !!GEN_ABORT for this instance has completed.
+                Write 1 to clear.
+                '''
+        }
+      ]
+      }
     },
     {
       name: "HW_EXC_STS",
@@ -273,14 +664,14 @@
       swaccess: "rw0c",
       hwaccess: "hwo",
       fields: [
-        { bits: "14:0",
+        { bits: "15:0",
           name: "HW_EXC_STS",
           desc: '''
                 Reading this register indicates whether one of the CSRNG HW instances has
                 encountered an exception.  Each bit corresponds to a particular hardware
                 instance, with bit 0 corresponding to instance HW0, bit 1 corresponding
                 to instance HW1, and so forth. (To monitor the status of requests made
-                to the SW instance, check the CMD_STS register). Writing a zero to this register
+                to the SW instance, check the !!SW_CMD_STS register). Writing a zero to this register
                 resets the status bits.
                 '''
         }
@@ -296,7 +687,7 @@
           name: "ENABLE_FIELD_ALERT",
           desc: '''
                 This bit is set when the ENABLE field in the !!CTRL register is set to
-                a value other than 0x5 or 0xA.
+                a value other than kMultiBitBool4True or kMultiBitBool4False.
                 Writing a zero resets this status bit.
                 '''
         }
@@ -304,7 +695,7 @@
           name: "SW_APP_ENABLE_FIELD_ALERT",
           desc: '''
                 This bit is set when the SW_APP_ENABLE field in the !!CTRL register is set to
-                a value other than 0x5 or 0xA.
+                a value other than kMultiBitBool4True or kMultiBitBool4False.
                 Writing a zero resets this status bit.
                 '''
         }
@@ -312,7 +703,107 @@
           name: "READ_INT_STATE_FIELD_ALERT",
           desc: '''
                 This bit is set when the READ_INT_STATE field in the !!CTRL register is set to
-                a value other than 0x5 or 0xA.
+                a value other than kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "3",
+          name: "WRITE_INT_STATE_FIELD_ALERT",
+          desc: '''
+                This bit is set when the WRITE_INT_STATE field in the !!CTRL register is set to
+                a value other than kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "4",
+          name: "FIPS_FORCE_ENABLE_FIELD_ALERT",
+          desc: '''
+                This bit is set when the FIPS_FORCE_ENABLE field in the !!CTRL register is set to a value other than kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "5",
+          name: "ACMD_FLAG0_FIELD_ALERT",
+          desc: '''
+                This bit is set when the FLAG0 field in the Application Command is set to
+                a value other than kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "6",
+          name: "GEN_ABORT_INVALID_ALERT",
+          desc: '''
+                This bit is set when a field of the !!GEN_ABORT register is set to kMultiBitBool4True for an instance that does not currently have a Generate command in progress.
+                The write is ignored and CSRNG continues to operate.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "7",
+          name: "GEN_ABORT_FIELD_ALERT",
+          desc: '''
+                This bit is set when a field of the !!GEN_ABORT register is set to a value other than kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "8",
+          name: "INT_STATE_HALT_FIELD_ALERT",
+          desc: '''
+                This bit is set when the !!INT_STATE_HALT register is set to a value other than
+                kMultiBitBool4True or kMultiBitBool4False.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "9",
+          name: "INT_STATE_OVERWRITE_ALERT",
+          desc: '''
+                This bit is set when CSRNG internally updates the state of the instance selected by !!INT_STATE_NUM while an access sequence via !!INT_STATE_VAL is in progress.
+                A sequence starts with the first access to !!INT_STATE_VAL and ends with the 26th access, or earlier when it is aborted, e.g., when !!INT_STATE_NUM is written.
+                The words read or written in that sequence may therefore be inconsistent.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "12",
+          name: "CS_BUS_CMP_ALERT",
+          desc: '''
+                This bit is set when the software application port genbits bus value is equal
+                to the prior valid value on the bus, indicating a possible attack.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "13",
+          name: "CMD_STAGE_INVALID_ACMD_ALERT",
+          desc: '''
+                This bit is set when an unsupported/illegal CSRNG command is received by the
+                main state machine.
+                The invalid command is ignored and CSRNG continues to operate.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "14",
+          name: "CMD_STAGE_INVALID_GEN_CMD_ALERT",
+          desc: '''
+                This bit is set when a Generate command is received with a `glen` field of zero.
+                The invalid command is ignored and CSRNG continues to operate.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "15",
+          name: "CMD_STAGE_INVALID_CMD_SEQ_ALERT",
+          desc: '''
+                This bit is set when an out of order command is received by the main state machine.
+                This happens when an instantiate command is sent for a state that was already
+                instantiated or when any command other than instantiate is sent for a state that
+                wasn't instantiated yet.
+                The invalid command is ignored and CSRNG continues to operate.
+                Writing a zero resets this status bit.
+                '''
+        }
+        { bits: "16",
+          name: "CMD_STAGE_RESEED_CNT_ALERT",
+          desc: '''
+                This bit is set when the maximum number of generate requests between reseeds is
+                exceeded.
+                The invalid generate command is ignored and CSRNG continues to operate.
                 Writing a zero resets this status bit.
                 '''
         }
@@ -323,8 +814,6 @@
       desc: "Hardware detection of error conditions status register",
       swaccess: "ro",
       hwaccess: "hwo",
-      tags: [ // The internal HW can modify the error code registers
-              "excl:CsrAllTests:CsrExclCheck"],
       fields: [
         { bits: "0",
           name: "SFIFO_CMD_ERR",
@@ -332,7 +821,8 @@
                 This bit will be set to one when an error has been detected for the
                 command stage command FIFO. The type of error is reflected in the type status
                 bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
+                This includes words written to !!CMD_REQ while !!SW_CMD_STS.CMD_RDY is low.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "1",
@@ -341,133 +831,7 @@
                 This bit will be set to one when an error has been detected for the
                 command stage genbits FIFO. The type of error is reflected in the type status
                 bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "2",
-          name: "SFIFO_CMDREQ_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                cmdreq FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "3",
-          name: "SFIFO_RCSTAGE_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                rcstage FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "4",
-          name: "SFIFO_KEYVRC_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                keyvrc FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "5",
-          name: "SFIFO_UPDREQ_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                updreq FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "6",
-          name: "SFIFO_BENCREQ_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                bencreq FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "7",
-          name: "SFIFO_BENCACK_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                bencack FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "8",
-          name: "SFIFO_PDATA_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                pdata FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "9",
-          name: "SFIFO_FINAL_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                final FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "10",
-          name: "SFIFO_GBENCACK_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                gbencack FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "11",
-          name: "SFIFO_GRCSTAGE_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                grcstage FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "12",
-          name: "SFIFO_GGENREQ_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                ggenreq FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "13",
-          name: "SFIFO_GADSTAGE_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                gadstage FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "14",
-          name: "SFIFO_GGENBITS_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                ggenbits FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "15",
-          name: "SFIFO_BLKENC_ERR",
-          desc: '''
-                This bit will be set to one when an error has been detected for the
-                blkenc FIFO. The type of error is reflected in the type status
-                bits (bits 28 through 30 of this register).
-                This bit will stay set until firmware clears it.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "20",
@@ -476,7 +840,7 @@
                 This bit will be set to one when an illegal state has been detected for the
                 command stage state machine. This error will signal a fatal alert, and also
                 an interrupt if enabled.
-                This bit will stay set until firmware clears it.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "21",
@@ -485,43 +849,33 @@
                 This bit will be set to one when an illegal state has been detected for the
                 main state machine. This error will signal a fatal alert, and also
                 an interrupt if enabled.
-                This bit will stay set until firmware clears it.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "22",
-          name: "DRBG_GEN_SM_ERR",
+          name: "CTR_DRBG_SM_ERR",
           desc: '''
                 This bit will be set to one when an illegal state has been detected for the
-                ctr_dbrg gen state machine. This error will signal a fatal alert, and also
+                ctr_drbg state machine. This error will signal a fatal alert, and also
                 an interrupt if enabled.
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "23",
-          name: "DRBG_UPDBE_SM_ERR",
-          desc: '''
-                This bit will be set to one when an illegal state has been detected for the
-                ctr_dbrg update block encode state machine. This error will signal a fatal alert, and also
-                an interrupt if enabled.
-                This bit will stay set until firmware clears it.
-                '''
-        }
-        { bits: "24",
-          name: "DRBG_UPDOB_SM_ERR",
-          desc: '''
-                This bit will be set to one when an illegal state has been detected for the
-                ctr_dbrg update out block state machine. This error will signal a fatal alert, and also
-                an interrupt if enabled.
-                This bit will stay set until firmware clears it.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "25",
           name: "AES_CIPHER_SM_ERR",
           desc: '''
                 This bit will be set to one when an AES fatal error has been detected.
-                This error will signal a fatal alert, and also
-                an interrupt if enabled.
-                This bit will stay set until firmware clears it.
+                This error will signal a fatal alert, and also an interrupt if enabled.
+                This bit will stay set until the next reset.
+                '''
+        }
+        { bits: "26",
+          name: "CTR_ERR",
+          desc: '''
+                This bit will be set to one when a mismatch in any of the hardened counters
+                has been detected.
+                This error will signal a fatal alert, and also an interrupt if enabled.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "28",
@@ -529,8 +883,9 @@
           desc: '''
                 This bit will be set to one when any of the source bits (bits 0 through 15 of this
                 this register) are asserted as a result of an error pulse generated from
-                any full FIFO that has been recieved a write pulse.
-                This bit will stay set until firmware clears it.
+                any full FIFO that has received a write pulse, or from a word written to
+                !!CMD_REQ while !!SW_CMD_STS.CMD_RDY is low.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "29",
@@ -538,8 +893,8 @@
           desc: '''
                 This bit will be set to one when any of the source bits (bits 0 through 15 of this
                 this register) are asserted as a result of an error pulse generated from
-                any empty FIFO that has recieved a read pulse.
-                This bit will stay set until firmware clears it.
+                any empty FIFO that has received a read pulse.
+                This bit will stay set until the next reset.
                 '''
         }
         { bits: "30",
@@ -548,7 +903,7 @@
                 This bit will be set to one when any of the source bits (bits 0 through 15 of this
                 this register) are asserted as a result of an error pulse generated from
                 any FIFO where both the empty and full status bits are set.
-                This bit will stay set until firmware clears it.
+                This bit will stay set until the next reset.
                 '''
         }
       ]
@@ -559,6 +914,8 @@
       hwaccess: "hro",
       hwqe: "true",
       regwen: "REGWEN",
+      tags: [// Keep HW from affecting other registers.
+                "excl:CsrAllTests:CsrExclWrite"]
       fields: [
         {
             bits: "4:0",
@@ -574,84 +931,128 @@
         },
       ]
     },
-    { name: "SEL_TRACKING_SM",
-      desc: "Select debug tracking state machine register",
-      swaccess: "wo",
-      hwaccess: "hro",
-      fields: [
-        {
-            bits: "1:0",
-            name: "SEL_TRACKING_SM",
-            desc: '''
-                  These encoded bits will select one of four groups of
-                  state machine tracking registers. Each tracking debug field is 8 bits
-                  wide, so up to four debug fields can be observed at one time.
-                  Each tracking field will follow a per instance csrng application command
-                  through the csrng design unit.
-                  '''
-        },
-      ]
-    },
-    { name: "TRACKING_SM_OBS",
-      desc: "CSRNG application command tracking state machine observation register",
+    { name: "MAIN_SM_STATE",
+      desc: "Main state machine state debug register",
       swaccess: "ro",
       hwaccess: "hwo",
       fields: [
-        { bits: "7:0",
-          name: "TRACKING_SM_OBS0",
-          desc: '''
-                This field will hold csrng command tracking state machine status,
-                This field holds tracking information for instance 0 if the
-                !!SEL_TRACKING_SM register is set to 0.
-                If more than 4 instances are active, then the selection register
-                can be programmed to select up to 3 other groups.
-                The life cycle state must be set to debug state to read this field.
+        { bits: "5:0",
+          name: "MAIN_SM_STATE",
+          desc: '''This is the state of the CSRNG main state machine.
+                See the RTL file `csrng_main_sm` for the meaning of the values.
                 '''
-          tags: [// Internal HW can modify status register
-                 "excl:CsrAllTests:CsrExclCheck"]
-          resval: "0"
+          resval: 0x37
         }
-        { bits: "15:8",
-          name: "TRACKING_SM_OBS1",
+      ]
+    },
+    {
+      name: "INT_STATE_WRITE_ENABLE_REGWEN",
+      desc: "Internal state write enable REGWEN register",
+      swaccess: "rw0c",
+      hwaccess: "none",
+      fields: [
+        { bits: "0",
           desc: '''
-                This field will hold csrng command tracking state machine status,
-                This field holds tracking information for instance 1 if the
-                !!SEL_TRACKING_SM register is set to 0.
-                If more than 4 instances are active, then the selection register
-                can be programmed to select up to 3 other groups.
-                The life cycle state must be set to debug state to read this field.
+                INT_STATE_WRITE_ENABLE register configuration enable bit.
+                If this is cleared to 0, the INT_STATE_WRITE_ENABLE register cannot be written anymore.
                 '''
-          tags: [// Internal HW can modify status register
-                 "excl:CsrAllTests:CsrExclCheck"]
-          resval: "0"
+          resval: 1,
         }
-        { bits: "23:16",
-          name: "TRACKING_SM_OBS2",
+      ]
+    },
+    {
+      name: "INT_STATE_WRITE_ENABLE",
+      desc: "Internal state write enable register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      regwen: "INT_STATE_WRITE_ENABLE_REGWEN",
+      fields: [
+        { bits: "2:0",
+          name: "INT_STATE_WRITE_ENABLE",
           desc: '''
-                This field will hold csrng command tracking state machine status,
-                This field holds tracking information for instance 2 if the
-                !!SEL_TRACKING_SM register is set to 0.
-                If more than 4 instances are active, then the selection register
-                can be programmed to select up to 3 other groups.
-                The life cycle state must be set to debug state to read this field.
+                Per-instance internal state write enable.
+                Defines whether the internal state of the corresponding instance can be written via !!INT_STATE_VAL.
+                Writes for an instance whose bit is cleared are dropped.
+                Clearing the bit of the selected instance while writing it resets the !!INT_STATE_VAL word pointer.
+                Note that writing additionally requires !!CTRL.WRITE_INT_STATE to be set to `kMultiBitBool4True`.
                 '''
-          tags: [// Internal HW can modify status register
-                 "excl:CsrAllTests:CsrExclCheck"]
-          resval: "0"
+          resval: 0x7
         }
-        { bits: "31:24",
-          name: "TRACKING_SM_OBS3",
+      ]
+    },
+    {
+      name: "INT_STATE_HALT_ENABLE_REGWEN",
+      desc: "Internal state halt enable REGWEN register",
+      swaccess: "rw0c",
+      hwaccess: "none",
+      fields: [
+        { bits: "0",
           desc: '''
-                This field will hold csrng command tracking state machine status,
-                This field holds tracking information for instance 3 if the
-                !!SEL_TRACKING_SM register is set to 0.
-                If more than 4 instances are active, then the selection register
-                can be programmed to select up to 3 other groups.
-                The life cycle state must be set to debug state to read this field.
+                INT_STATE_HALT_ENABLE register configuration enable bit.
+                If this is cleared to 0, the INT_STATE_HALT_ENABLE register cannot be written anymore.
                 '''
-          tags: [// Internal HW can modify status register
-                 "excl:CsrAllTests:CsrExclCheck"]
-          resval: "0"
+          resval: 1,
+        }
+      ]
+    },
+    {
+      name: "INT_STATE_HALT_ENABLE",
+      desc: "Internal state halt enable register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      regwen: "INT_STATE_HALT_ENABLE_REGWEN",
+      fields: [
+        { bits: "2:0",
+          name: "INT_STATE_HALT_ENABLE",
+          desc: '''
+                Per-instance internal state halt enable.
+                Defines whether the corresponding instance can be halted via !!INT_STATE_HALT.
+                Setting !!INT_STATE_HALT has no effect on an instance whose bit is cleared.
+                '''
+          resval: 0x7
+        }
+      ]
+    },
+    {
+      name: "INT_STATE_HALT",
+      desc: "Internal state halt register",
+      swaccess: "rw",
+      hwaccess: "hro",
+      tags: [// A write can halt an instance and affect RECOV_ALERT_STS.
+             "excl:CsrAllTests:CsrExclWrite"]
+      fields: [
+        { bits: "3:0",
+          name: "INT_STATE_HALT",
+          mubi: true,
+          resval: false,
+          desc: '''
+                While this field is set to kMultiBitBool4True, the instance selected by !!INT_STATE_NUM halts.
+                The instance first completes the command in progress and any commands already queued for it.
+                A Generate command is instead halted as soon as the block currently being generated is complete.
+                If this is the final block, the command is acknowledged after resuming, once the block has been read out.
+                While halted, the instance accepts no new commands: EDN requests are back-pressured and !!SW_CMD_STS.CMD_RDY is low for the software instance.
+                This requires the bit of the selected instance in !!INT_STATE_HALT_ENABLE to be set, otherwise the instance is not halted.
+                Poll !!INT_STATE_STS.HALTED, or wait for !!INTR_STATE.CS_CMD_REQ_DONE, to know when the instance has halted.
+                Setting this field to kMultiBitBool4False resumes the command processing of the instance.
+                '''
+        }
+      ]
+    },
+    {
+      name: "INT_STATE_STS",
+      desc: "Internal state halt status register",
+      swaccess: "ro",
+      hwaccess: "hwo",
+      tags: ["excl:CsrNonInitTests:CsrExclCheck"]
+      fields: [
+        { bits: "0",
+          name: "HALTED",
+          desc: '''
+                Reflects whether the instance selected by !!INT_STATE_NUM has quiesced following !!INT_STATE_HALT, such that its internal state stays constant while it is read via !!INT_STATE_VAL.
+                Reads as 0 if !!INT_STATE_NUM selects a reserved instance.
+                Also see !!INTR_STATE.CS_CMD_REQ_DONE, which fires when an instance has halted.
+                '''
+          resval: 0
         }
       ]
     },

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,7 +8,8 @@
                      "hw/dv/tools/dvsim/testplans/alert_test_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/intr_test_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
-                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson"],
+                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson",
+                     "pattgen_sec_cm_testplan.hjson"],
   testpoints: [
     {
       name: smoke
@@ -30,7 +31,7 @@
               - Check completion interrupts are asserted once a pattern
                 is completely generated on the active channels
             '''
-      milestone: V1
+      stage: V1
       tests: ["pattgen_smoke"]
     }
     {
@@ -48,7 +49,7 @@
               - Ensure patterns are correctly generated
               - Ensure interrupts are robust asserted and cleared (e.g. at the high data rate)
             '''
-      milestone: V2
+      stage: V2
       tests: ["pattgen_perf"]
     }
     {
@@ -57,7 +58,7 @@
             Checking ip operation with random counter values
 
             Stimulus:
-              - Program the pre-divider and size registers to unconstraint random values
+              - Program the pre-divider and size registers to unconstrained random values
               - Program the clk_cnt, bit_cnt and rep_cnt to values less than but close to
                 predivider and size registers, so that counting would take a reasonable
                 number of clock cycles
@@ -67,31 +68,12 @@
               - Clear interrupts quickly
 
             Checking:
-              - Include functional cover point that rollover value is reached and counter is reset:
+              - Include functional cover point that rollover value is reached and counter is re-enabled:
               - Ensure patterns are correctly generated
               - Ensure interrupts are robust asserted and cleared (e.g. at the high data rate)
             '''
-      milestone: V2
+      stage: V2
       tests: ["cnt_rollover"]
-    }
-    {
-      name: alert
-      desc: '''
-            Checking alert errors
-
-            Stimulus:
-            TODO: identify exactly what alerts are triggered, and for the V2
-            find out exactly what triggers alert, if anything
-            Checking:
-              - Check alert `fatal_fault_err` is triggered
-              and err_code is `INVALID_CMD`
-              - Check alert `recov_operation_err` is triggered
-              and err_code is `INVALID_DATA`
-              - Check that operations are not recoverable
-              after `fatal_fault_err` alert
-            '''
-      milestone: V2
-      tests: ["pattgen_alert"]
     }
     {
       name: error
@@ -99,29 +81,23 @@
             Reset then re-start the output channel on the fly.
 
             Stimulus:
-              - Programm the configuration registers of the output channels
-              - Randomly reset the in progress output channels
+              - Program the configuration registers of the output channels
+              - Randomly re-enable the in progress output channels
               - Re-program the configuration registers of the output channels
 
             Checking:
-              - Ensure patterns are dropped when reset
-              - Ensure the output channels get back normal after reset
+              - Ensure patterns are dropped when re-enabled
+              - Ensure the output channels get back normal after re-enable
             '''
-      milestone: V2
+      stage: V2
       tests: ["pattgen_error"]
     }
     {
       name: stress_all
       desc: '''
-            Combine above sequences in one test then randomly select for running.
-
-            Stimulus:
-              - Start sequences and randomly add reset between each sequence
-
-            Checking:
-              - All sequences should be finished and checked by the scoreboard
-      '''
-      milestone: V2
+            Stress_all test is a random mix of all the test above except csr tests.
+            '''
+      stage: V2
       tests: ["pattgen_stress_all"]
     }
   ]
@@ -131,28 +107,39 @@
     {
       name: pattgen_op_cg
       desc: '''
-            The following coverage strategy is implemented:
-            * The counters are covered at the max
-              and min corner cases and for the middle values
-            * Data bus has functional coverage using walking ones and zeroes
-            * One bit width variables are wrapped in one cover point
-              while counters and data have designated cover points
-            * Channel enable signal is stand alone cover point
-            * Chennel enable signal is crossed with all other cover points
-            * When both channels are active, the enable signals of each
-              channel are each crossed with cover points of both channels
+            Covers the ch0 pattern generation complete interrupt and event done.
+            Covers the ch1 pattern generation complete interrupt and event done.
             '''
     }
     {
-      name: roll_cg
+      name: pattgen_counters_max_values_cg
       desc: '''
-            Covers that all the counters revert to zero when they reach
-            the maximum value.
-            Individual initial and maximum counter values
-            that will be covered include:
+            Covers the initial and maximum counter values of the following:
             - Initial and maximum values of clock divide counter
             - Initial and maximum values of length counter
-            - Initial and maxim values of repetition counter
+            - Initial and maximum values of repetition counter
+            All valid combinations of the above will also be crossed.
+            '''
+    }
+    {
+      name: pattgen_ch0_cnt_reset_cg
+      desc: '''
+            Covers that ch0 counter values resets to zero when it reaches the assigned value.
+            It includes:
+            - Clock divide counter value
+            - Length counter value
+            - Repetition counter value
+            All valid combinations of the above will also be crossed.
+            '''
+    }
+    {
+      name: pattgen_ch1_cnt_reset_cg
+      desc: '''
+            Covers that ch1 counter values resets to zero when it reaches the assigned value.
+            It includes:
+            - Clock divide counter value
+            - Length counter value
+            - Repetition counter value
             All valid combinations of the above will also be crossed.
             '''
     }
@@ -170,27 +157,10 @@
             '''
     }
     {
-      name: alert_cg
-      desc: '''
-            Covers fatal fault error alert when forcing command error
-            and recover operation error alert when forcing data error.
-            Individual alert settings and signals that will be covered include:
-            - fatal fault error alert
-            - recoverable operation error alert
-            '''
-    }
-    {
       name: inter_cg
       desc: '''
-            Covers that all valid settings of Interrupt Enable Register
-            and Interrupt State Register register have been tested.
-            Individual interrupt settings that will be covered include:
-            - Interrupt Enable Register[0] (done_ch0)
-            - Interrupt Enable Register[1] (done_ch1)
-            - Interrupt State Register[0] (done_ch0)
-            - Interrupt State Register[1] (done_ch1)
-            Combinations of Interrupt Enable and Interrupt State
-            registers for each channel will be crossed
+            intr_cg is defined in cip_base_env_cov and
+            referenced in pattgen_scoreboard
             '''
     }
     {
@@ -245,7 +215,8 @@
             Covers various data_0 values of the channel0 seed pattern ranges,
             to ensure that Pattgen can operate successfully on different pattern lengths.
             we will cover that an acceptable distribution of lengths has been seen,
-            and specifically cover corner cases.
+            and specifically cover corner cases. The covergroup takes data from
+            TL_UL scoreboard input
             '''
     }
     {
@@ -264,6 +235,12 @@
       name: pattern_data_ch1_1_cg
       desc: '''
             Similar to pattern_data_ch0_1_cg.
+            '''
+    }
+    {
+      name: program_while_busy_cg
+      desc: '''
+            Program the DUT while pattern is being produced to insure current pattern is not being corrupt.
             '''
     }
 

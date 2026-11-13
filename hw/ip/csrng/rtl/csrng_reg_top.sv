@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -16,15 +16,12 @@ module csrng_reg_top (
   input  csrng_reg_pkg::csrng_hw2reg_t hw2reg, // Read
 
   // Integrity check errors
-  output logic intg_err_o,
-
-  // Config
-  input devmode_i // If 1, explicit error return for unmapped register access
+  output logic intg_err_o
 );
 
   import csrng_reg_pkg::* ;
 
-  localparam int AW = 7;
+  localparam int AW = 8;
   localparam int DW = 32;
   localparam int DBW = DW/8;                    // Byte Width
 
@@ -53,18 +50,31 @@ module csrng_reg_top (
     .err_o(intg_err)
   );
 
-  logic intg_err_q;
+  // also check for spurious write enables
+  logic reg_we_err;
+  logic [36:0] reg_we_check;
+  prim_reg_we_check #(
+    .OneHotWidth(37)
+  ) u_prim_reg_we_check (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .oh_i  (reg_we_check),
+    .en_i  (reg_we && !addrmiss),
+    .err_o (reg_we_err)
+  );
+
+  logic err_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      intg_err_q <= '0;
-    end else if (intg_err) begin
-      intg_err_q <= 1'b1;
+      err_q <= '0;
+    end else if (intg_err || reg_we_err) begin
+      err_q <= 1'b1;
     end
   end
 
   // integrity error output is permanent and should be used for alert generation
   // register errors are transactional
-  assign intg_err_o = intg_err_q | intg_err;
+  assign intg_err_o = err_q | intg_err | reg_we_err;
 
   // outgoing integrity generation
   tlul_pkg::tl_d2h_t tl_o_pre;
@@ -90,6 +100,9 @@ module csrng_reg_top (
     .tl_i (tl_reg_h2d),
     .tl_o (tl_reg_d2h),
 
+    .en_ifetch_i(prim_mubi_pkg::MuBi4False),
+    .intg_error_o(),
+
     .we_o    (reg_we),
     .re_o    (reg_re),
     .addr_o  (reg_addr),
@@ -103,7 +116,7 @@ module csrng_reg_top (
   // cdc oversampling signals
 
   assign reg_rdata = reg_rdata_next ;
-  assign reg_error = (devmode_i & addrmiss) | wr_err | intg_err;
+  assign reg_error = addrmiss | wr_err | intg_err;
 
   // Define SW related signals
   // Format: <reg>_<field>_{wd|we|qs}
@@ -134,6 +147,8 @@ module csrng_reg_top (
   logic alert_test_we;
   logic alert_test_recov_alert_wd;
   logic alert_test_fatal_alert_wd;
+  logic alert_test_regwen_qs;
+  logic alert_test_regwen_wd;
   logic regwen_we;
   logic regwen_qs;
   logic regwen_wd;
@@ -144,23 +159,69 @@ module csrng_reg_top (
   logic [3:0] ctrl_sw_app_enable_wd;
   logic [3:0] ctrl_read_int_state_qs;
   logic [3:0] ctrl_read_int_state_wd;
+  logic [3:0] ctrl_write_int_state_qs;
+  logic [3:0] ctrl_write_int_state_wd;
+  logic [3:0] ctrl_fips_force_enable_qs;
+  logic [3:0] ctrl_fips_force_enable_wd;
   logic cmd_req_we;
   logic [31:0] cmd_req_wd;
+  logic reseed_interval_we;
+  logic [31:0] reseed_interval_qs;
+  logic [31:0] reseed_interval_wd;
+  logic reseed_counter_0_re;
+  logic [31:0] reseed_counter_0_qs;
+  logic reseed_counter_1_re;
+  logic [31:0] reseed_counter_1_qs;
+  logic reseed_counter_2_re;
+  logic [31:0] reseed_counter_2_qs;
   logic sw_cmd_sts_cmd_rdy_qs;
-  logic sw_cmd_sts_cmd_sts_qs;
+  logic sw_cmd_sts_cmd_ack_qs;
+  logic [2:0] sw_cmd_sts_cmd_sts_qs;
   logic genbits_vld_re;
   logic genbits_vld_genbits_vld_qs;
   logic genbits_vld_genbits_fips_qs;
   logic genbits_re;
   logic [31:0] genbits_qs;
+  logic int_state_read_enable_regwen_we;
+  logic int_state_read_enable_regwen_qs;
+  logic int_state_read_enable_regwen_wd;
+  logic int_state_read_enable_we;
+  logic [2:0] int_state_read_enable_qs;
+  logic [2:0] int_state_read_enable_wd;
   logic int_state_num_we;
   logic [3:0] int_state_num_qs;
   logic [3:0] int_state_num_wd;
   logic int_state_val_re;
+  logic int_state_val_we;
   logic [31:0] int_state_val_qs;
+  logic [31:0] int_state_val_wd;
+  logic fips_force_we;
+  logic [2:0] fips_force_qs;
+  logic [2:0] fips_force_wd;
+  logic gen_abort_regwen_we;
+  logic gen_abort_regwen_qs;
+  logic gen_abort_regwen_wd;
+  logic gen_abort_0_we;
+  logic [3:0] gen_abort_0_qs;
+  logic [3:0] gen_abort_0_wd;
+  logic gen_abort_1_we;
+  logic [3:0] gen_abort_1_qs;
+  logic [3:0] gen_abort_1_wd;
+  logic gen_abort_2_we;
+  logic [3:0] gen_abort_2_qs;
+  logic [3:0] gen_abort_2_wd;
+  logic gen_abort_status_0_we;
+  logic gen_abort_status_0_qs;
+  logic gen_abort_status_0_wd;
+  logic gen_abort_status_1_we;
+  logic gen_abort_status_1_qs;
+  logic gen_abort_status_1_wd;
+  logic gen_abort_status_2_we;
+  logic gen_abort_status_2_qs;
+  logic gen_abort_status_2_wd;
   logic hw_exc_sts_we;
-  logic [14:0] hw_exc_sts_qs;
-  logic [14:0] hw_exc_sts_wd;
+  logic [15:0] hw_exc_sts_qs;
+  logic [15:0] hw_exc_sts_wd;
   logic recov_alert_sts_we;
   logic recov_alert_sts_enable_field_alert_qs;
   logic recov_alert_sts_enable_field_alert_wd;
@@ -168,40 +229,60 @@ module csrng_reg_top (
   logic recov_alert_sts_sw_app_enable_field_alert_wd;
   logic recov_alert_sts_read_int_state_field_alert_qs;
   logic recov_alert_sts_read_int_state_field_alert_wd;
+  logic recov_alert_sts_write_int_state_field_alert_qs;
+  logic recov_alert_sts_write_int_state_field_alert_wd;
+  logic recov_alert_sts_fips_force_enable_field_alert_qs;
+  logic recov_alert_sts_fips_force_enable_field_alert_wd;
+  logic recov_alert_sts_acmd_flag0_field_alert_qs;
+  logic recov_alert_sts_acmd_flag0_field_alert_wd;
+  logic recov_alert_sts_gen_abort_invalid_alert_qs;
+  logic recov_alert_sts_gen_abort_invalid_alert_wd;
+  logic recov_alert_sts_gen_abort_field_alert_qs;
+  logic recov_alert_sts_gen_abort_field_alert_wd;
+  logic recov_alert_sts_int_state_halt_field_alert_qs;
+  logic recov_alert_sts_int_state_halt_field_alert_wd;
+  logic recov_alert_sts_int_state_overwrite_alert_qs;
+  logic recov_alert_sts_int_state_overwrite_alert_wd;
+  logic recov_alert_sts_cs_bus_cmp_alert_qs;
+  logic recov_alert_sts_cs_bus_cmp_alert_wd;
+  logic recov_alert_sts_cmd_stage_invalid_acmd_alert_qs;
+  logic recov_alert_sts_cmd_stage_invalid_acmd_alert_wd;
+  logic recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_qs;
+  logic recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_wd;
+  logic recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_qs;
+  logic recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_wd;
+  logic recov_alert_sts_cmd_stage_reseed_cnt_alert_qs;
+  logic recov_alert_sts_cmd_stage_reseed_cnt_alert_wd;
   logic err_code_sfifo_cmd_err_qs;
   logic err_code_sfifo_genbits_err_qs;
-  logic err_code_sfifo_cmdreq_err_qs;
-  logic err_code_sfifo_rcstage_err_qs;
-  logic err_code_sfifo_keyvrc_err_qs;
-  logic err_code_sfifo_updreq_err_qs;
-  logic err_code_sfifo_bencreq_err_qs;
-  logic err_code_sfifo_bencack_err_qs;
-  logic err_code_sfifo_pdata_err_qs;
-  logic err_code_sfifo_final_err_qs;
-  logic err_code_sfifo_gbencack_err_qs;
-  logic err_code_sfifo_grcstage_err_qs;
-  logic err_code_sfifo_ggenreq_err_qs;
-  logic err_code_sfifo_gadstage_err_qs;
-  logic err_code_sfifo_ggenbits_err_qs;
-  logic err_code_sfifo_blkenc_err_qs;
   logic err_code_cmd_stage_sm_err_qs;
   logic err_code_main_sm_err_qs;
-  logic err_code_drbg_gen_sm_err_qs;
-  logic err_code_drbg_updbe_sm_err_qs;
-  logic err_code_drbg_updob_sm_err_qs;
+  logic err_code_ctr_drbg_sm_err_qs;
   logic err_code_aes_cipher_sm_err_qs;
+  logic err_code_ctr_err_qs;
   logic err_code_fifo_write_err_qs;
   logic err_code_fifo_read_err_qs;
   logic err_code_fifo_state_err_qs;
   logic err_code_test_we;
   logic [4:0] err_code_test_qs;
   logic [4:0] err_code_test_wd;
-  logic sel_tracking_sm_we;
-  logic [1:0] sel_tracking_sm_wd;
-  logic [7:0] tracking_sm_obs_tracking_sm_obs0_qs;
-  logic [7:0] tracking_sm_obs_tracking_sm_obs1_qs;
-  logic [7:0] tracking_sm_obs_tracking_sm_obs2_qs;
-  logic [7:0] tracking_sm_obs_tracking_sm_obs3_qs;
+  logic [5:0] main_sm_state_qs;
+  logic int_state_write_enable_regwen_we;
+  logic int_state_write_enable_regwen_qs;
+  logic int_state_write_enable_regwen_wd;
+  logic int_state_write_enable_we;
+  logic [2:0] int_state_write_enable_qs;
+  logic [2:0] int_state_write_enable_wd;
+  logic int_state_halt_enable_regwen_we;
+  logic int_state_halt_enable_regwen_qs;
+  logic int_state_halt_enable_regwen_wd;
+  logic int_state_halt_enable_we;
+  logic [2:0] int_state_halt_enable_qs;
+  logic [2:0] int_state_halt_enable_wd;
+  logic int_state_halt_we;
+  logic [3:0] int_state_halt_qs;
+  logic [3:0] int_state_halt_wd;
+  logic int_state_sts_qs;
 
   // Register instances
   // R[intr_state]: V(False)
@@ -209,10 +290,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_state_cs_cmd_req_done (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_state_we),
@@ -225,6 +308,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_state.cs_cmd_req_done.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_state_cs_cmd_req_done_qs)
@@ -234,10 +318,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_state_cs_entropy_req (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_state_we),
@@ -250,6 +336,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_state.cs_entropy_req.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_state_cs_entropy_req_qs)
@@ -259,10 +346,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_state_cs_hw_inst_exc (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_state_we),
@@ -275,6 +364,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_state.cs_hw_inst_exc.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_state_cs_hw_inst_exc_qs)
@@ -284,10 +374,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW1C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_state_cs_fatal_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_state_we),
@@ -300,6 +392,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_state.cs_fatal_err.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_state_cs_fatal_err_qs)
@@ -311,10 +404,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_enable_cs_cmd_req_done (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_enable_we),
@@ -327,6 +422,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_enable.cs_cmd_req_done.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_enable_cs_cmd_req_done_qs)
@@ -336,10 +432,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_enable_cs_entropy_req (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_enable_we),
@@ -352,6 +450,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_enable.cs_entropy_req.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_enable_cs_entropy_req_qs)
@@ -361,10 +460,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_enable_cs_hw_inst_exc (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_enable_we),
@@ -377,6 +478,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_enable.cs_hw_inst_exc.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_enable_cs_hw_inst_exc_qs)
@@ -386,10 +488,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_intr_enable_cs_fatal_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (intr_enable_we),
@@ -402,6 +506,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.intr_enable.cs_fatal_err.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (intr_enable_cs_fatal_err_qs)
@@ -409,6 +514,9 @@ module csrng_reg_top (
 
 
   // R[intr_test]: V(True)
+  logic intr_test_qe;
+  logic [3:0] intr_test_flds_we;
+  assign intr_test_qe = &intr_test_flds_we;
   //   F[cs_cmd_req_done]: 0:0
   prim_subreg_ext #(
     .DW    (1)
@@ -418,10 +526,12 @@ module csrng_reg_top (
     .wd     (intr_test_cs_cmd_req_done_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.intr_test.cs_cmd_req_done.qe),
+    .qe     (intr_test_flds_we[0]),
     .q      (reg2hw.intr_test.cs_cmd_req_done.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.intr_test.cs_cmd_req_done.qe = intr_test_qe;
 
   //   F[cs_entropy_req]: 1:1
   prim_subreg_ext #(
@@ -432,10 +542,12 @@ module csrng_reg_top (
     .wd     (intr_test_cs_entropy_req_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.intr_test.cs_entropy_req.qe),
+    .qe     (intr_test_flds_we[1]),
     .q      (reg2hw.intr_test.cs_entropy_req.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.intr_test.cs_entropy_req.qe = intr_test_qe;
 
   //   F[cs_hw_inst_exc]: 2:2
   prim_subreg_ext #(
@@ -446,10 +558,12 @@ module csrng_reg_top (
     .wd     (intr_test_cs_hw_inst_exc_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.intr_test.cs_hw_inst_exc.qe),
+    .qe     (intr_test_flds_we[2]),
     .q      (reg2hw.intr_test.cs_hw_inst_exc.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.intr_test.cs_hw_inst_exc.qe = intr_test_qe;
 
   //   F[cs_fatal_err]: 3:3
   prim_subreg_ext #(
@@ -460,39 +574,79 @@ module csrng_reg_top (
     .wd     (intr_test_cs_fatal_err_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.intr_test.cs_fatal_err.qe),
+    .qe     (intr_test_flds_we[3]),
     .q      (reg2hw.intr_test.cs_fatal_err.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.intr_test.cs_fatal_err.qe = intr_test_qe;
 
 
   // R[alert_test]: V(True)
+  logic alert_test_qe;
+  logic [2:0] alert_test_flds_we;
+  assign alert_test_qe = &alert_test_flds_we;
+  // Create REGWEN-gated WE signal
+  logic alert_test_gated_we;
+  assign alert_test_gated_we = alert_test_we && alert_test_regwen_qs;
   //   F[recov_alert]: 0:0
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_recov_alert (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_recov_alert_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.recov_alert.qe),
+    .qe     (alert_test_flds_we[0]),
     .q      (reg2hw.alert_test.recov_alert.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.alert_test.recov_alert.qe = alert_test_qe;
 
   //   F[fatal_alert]: 1:1
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_fatal_alert (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_fatal_alert_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.fatal_alert.qe),
+    .qe     (alert_test_flds_we[1]),
     .q      (reg2hw.alert_test.fatal_alert.q),
+    .ds     (),
     .qs     ()
+  );
+  assign reg2hw.alert_test.fatal_alert.qe = alert_test_qe;
+
+  //   F[regwen]: 31:31
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_alert_test_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_test_we),
+    .wd     (alert_test_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (alert_test_flds_we[2]),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_test_regwen_qs)
   );
 
 
@@ -500,10 +654,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (1'h1)
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
   ) u_regwen (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (regwen_we),
@@ -516,6 +672,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (regwen_qs)
@@ -523,17 +680,22 @@ module csrng_reg_top (
 
 
   // R[ctrl]: V(False)
+  // Create REGWEN-gated WE signal
+  logic ctrl_gated_we;
+  assign ctrl_gated_we = ctrl_we & regwen_qs;
   //   F[enable]: 3:0
   prim_subreg #(
     .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (4'h5)
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
   ) u_ctrl_enable (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (ctrl_we & regwen_qs),
+    .we     (ctrl_gated_we),
     .wd     (ctrl_enable_wd),
 
     // from internal hardware
@@ -543,6 +705,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.ctrl.enable.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (ctrl_enable_qs)
@@ -552,13 +715,15 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (4'h5)
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
   ) u_ctrl_sw_app_enable (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (ctrl_we & regwen_qs),
+    .we     (ctrl_gated_we),
     .wd     (ctrl_sw_app_enable_wd),
 
     // from internal hardware
@@ -568,6 +733,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.ctrl.sw_app_enable.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (ctrl_sw_app_enable_qs)
@@ -577,13 +743,15 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (4'h5)
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
   ) u_ctrl_read_int_state (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (ctrl_we & regwen_qs),
+    .we     (ctrl_gated_we),
     .wd     (ctrl_read_int_state_wd),
 
     // from internal hardware
@@ -593,20 +761,90 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.ctrl.read_int_state.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (ctrl_read_int_state_qs)
   );
 
+  //   F[write_int_state]: 15:12
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_ctrl_write_int_state (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (ctrl_gated_we),
+    .wd     (ctrl_write_int_state_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.ctrl.write_int_state.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_write_int_state_qs)
+  );
+
+  //   F[fips_force_enable]: 19:16
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_ctrl_fips_force_enable (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (ctrl_gated_we),
+    .wd     (ctrl_fips_force_enable_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.ctrl.fips_force_enable.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_fips_force_enable_qs)
+  );
+
 
   // R[cmd_req]: V(False)
+  logic cmd_req_qe;
+  logic [0:0] cmd_req_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_cmd_req0_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&cmd_req_flds_we),
+    .q_o(cmd_req_qe)
+  );
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_cmd_req (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (cmd_req_we),
@@ -617,23 +855,119 @@ module csrng_reg_top (
     .d      ('0),
 
     // to internal hardware
-    .qe     (reg2hw.cmd_req.qe),
+    .qe     (cmd_req_flds_we[0]),
     .q      (reg2hw.cmd_req.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     ()
   );
+  assign reg2hw.cmd_req.qe = cmd_req_qe;
+
+
+  // R[reseed_interval]: V(False)
+  logic reseed_interval_qe;
+  logic [0:0] reseed_interval_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_reseed_interval0_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&reseed_interval_flds_we),
+    .q_o(reseed_interval_qe)
+  );
+  prim_subreg #(
+    .DW      (32),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (32'hffffffff),
+    .Mubi    (1'b0)
+  ) u_reseed_interval (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (reseed_interval_we),
+    .wd     (reseed_interval_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (reseed_interval_flds_we[0]),
+    .q      (reg2hw.reseed_interval.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (reseed_interval_qs)
+  );
+  assign reg2hw.reseed_interval.qe = reseed_interval_qe;
+
+
+  // Subregister 0 of Multireg reseed_counter
+  // R[reseed_counter_0]: V(True)
+  prim_subreg_ext #(
+    .DW    (32)
+  ) u_reseed_counter_0 (
+    .re     (reseed_counter_0_re),
+    .we     (1'b0),
+    .wd     ('0),
+    .d      (hw2reg.reseed_counter[0].d),
+    .qre    (),
+    .qe     (),
+    .q      (),
+    .ds     (),
+    .qs     (reseed_counter_0_qs)
+  );
+
+
+  // Subregister 1 of Multireg reseed_counter
+  // R[reseed_counter_1]: V(True)
+  prim_subreg_ext #(
+    .DW    (32)
+  ) u_reseed_counter_1 (
+    .re     (reseed_counter_1_re),
+    .we     (1'b0),
+    .wd     ('0),
+    .d      (hw2reg.reseed_counter[1].d),
+    .qre    (),
+    .qe     (),
+    .q      (),
+    .ds     (),
+    .qs     (reseed_counter_1_qs)
+  );
+
+
+  // Subregister 2 of Multireg reseed_counter
+  // R[reseed_counter_2]: V(True)
+  prim_subreg_ext #(
+    .DW    (32)
+  ) u_reseed_counter_2 (
+    .re     (reseed_counter_2_re),
+    .we     (1'b0),
+    .wd     ('0),
+    .d      (hw2reg.reseed_counter[2].d),
+    .qre    (),
+    .qe     (),
+    .q      (),
+    .ds     (),
+    .qs     (reseed_counter_2_qs)
+  );
 
 
   // R[sw_cmd_sts]: V(False)
-  //   F[cmd_rdy]: 0:0
+  //   F[cmd_rdy]: 1:1
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h1)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_sw_cmd_sts_cmd_rdy (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -646,19 +980,50 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (sw_cmd_sts_cmd_rdy_qs)
   );
 
-  //   F[cmd_sts]: 1:1
+  //   F[cmd_ack]: 2:2
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_sw_cmd_sts_cmd_ack (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (1'b0),
+    .wd     ('0),
+
+    // from internal hardware
+    .de     (hw2reg.sw_cmd_sts.cmd_ack.de),
+    .d      (hw2reg.sw_cmd_sts.cmd_ack.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (sw_cmd_sts_cmd_ack_qs)
+  );
+
+  //   F[cmd_sts]: 5:3
+  prim_subreg #(
+    .DW      (3),
+    .SwAccess(prim_subreg_pkg::SwAccessRO),
+    .RESVAL  (3'h0),
+    .Mubi    (1'b0)
   ) u_sw_cmd_sts_cmd_sts (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -671,6 +1036,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (sw_cmd_sts_cmd_sts_qs)
@@ -689,6 +1055,7 @@ module csrng_reg_top (
     .qre    (),
     .qe     (),
     .q      (),
+    .ds     (),
     .qs     (genbits_vld_genbits_vld_qs)
   );
 
@@ -703,6 +1070,7 @@ module csrng_reg_top (
     .qre    (),
     .qe     (),
     .q      (),
+    .ds     (),
     .qs     (genbits_vld_genbits_fips_qs)
   );
 
@@ -718,18 +1086,94 @@ module csrng_reg_top (
     .qre    (reg2hw.genbits.re),
     .qe     (),
     .q      (reg2hw.genbits.q),
+    .ds     (),
     .qs     (genbits_qs)
   );
 
 
+  // R[int_state_read_enable_regwen]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_int_state_read_enable_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_read_enable_regwen_we),
+    .wd     (int_state_read_enable_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_read_enable_regwen_qs)
+  );
+
+
+  // R[int_state_read_enable]: V(False)
+  // Create REGWEN-gated WE signal
+  logic int_state_read_enable_gated_we;
+  assign int_state_read_enable_gated_we =
+    int_state_read_enable_we & int_state_read_enable_regwen_qs;
+  prim_subreg #(
+    .DW      (3),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (3'h7),
+    .Mubi    (1'b0)
+  ) u_int_state_read_enable (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_read_enable_gated_we),
+    .wd     (int_state_read_enable_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.int_state_read_enable.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_read_enable_qs)
+  );
+
+
   // R[int_state_num]: V(False)
+  logic int_state_num_qe;
+  logic [0:0] int_state_num_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_int_state_num0_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&int_state_num_flds_we),
+    .q_o(int_state_num_qe)
+  );
   prim_subreg #(
     .DW      (4),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (4'h0)
+    .RESVAL  (4'h0),
+    .Mubi    (1'b0)
   ) u_int_state_num (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (int_state_num_we),
@@ -740,37 +1184,296 @@ module csrng_reg_top (
     .d      ('0),
 
     // to internal hardware
-    .qe     (reg2hw.int_state_num.qe),
+    .qe     (int_state_num_flds_we[0]),
     .q      (reg2hw.int_state_num.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (int_state_num_qs)
   );
+  assign reg2hw.int_state_num.qe = int_state_num_qe;
 
 
   // R[int_state_val]: V(True)
+  logic int_state_val_qe;
+  logic [0:0] int_state_val_flds_we;
+  assign int_state_val_qe = &int_state_val_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_int_state_val (
     .re     (int_state_val_re),
-    .we     (1'b0),
-    .wd     ('0),
+    .we     (int_state_val_we),
+    .wd     (int_state_val_wd),
     .d      (hw2reg.int_state_val.d),
     .qre    (reg2hw.int_state_val.re),
-    .qe     (),
+    .qe     (int_state_val_flds_we[0]),
     .q      (reg2hw.int_state_val.q),
+    .ds     (),
     .qs     (int_state_val_qs)
+  );
+  assign reg2hw.int_state_val.qe = int_state_val_qe;
+
+
+  // R[fips_force]: V(False)
+  // Create REGWEN-gated WE signal
+  logic fips_force_gated_we;
+  assign fips_force_gated_we = fips_force_we & regwen_qs;
+  prim_subreg #(
+    .DW      (3),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (3'h0),
+    .Mubi    (1'b0)
+  ) u_fips_force (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (fips_force_gated_we),
+    .wd     (fips_force_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.fips_force.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (fips_force_qs)
+  );
+
+
+  // R[gen_abort_regwen]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_gen_abort_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_regwen_we),
+    .wd     (gen_abort_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_regwen_qs)
+  );
+
+
+  // Subregister 0 of Multireg gen_abort
+  // R[gen_abort_0]: V(False)
+  // Create REGWEN-gated WE signal
+  logic gen_abort_0_gated_we;
+  assign gen_abort_0_gated_we = gen_abort_0_we & gen_abort_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_gen_abort_0 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_0_gated_we),
+    .wd     (gen_abort_0_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort[0].de),
+    .d      (hw2reg.gen_abort[0].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.gen_abort[0].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_0_qs)
+  );
+
+
+  // Subregister 1 of Multireg gen_abort
+  // R[gen_abort_1]: V(False)
+  // Create REGWEN-gated WE signal
+  logic gen_abort_1_gated_we;
+  assign gen_abort_1_gated_we = gen_abort_1_we & gen_abort_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_gen_abort_1 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_1_gated_we),
+    .wd     (gen_abort_1_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort[1].de),
+    .d      (hw2reg.gen_abort[1].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.gen_abort[1].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_1_qs)
+  );
+
+
+  // Subregister 2 of Multireg gen_abort
+  // R[gen_abort_2]: V(False)
+  // Create REGWEN-gated WE signal
+  logic gen_abort_2_gated_we;
+  assign gen_abort_2_gated_we = gen_abort_2_we & gen_abort_regwen_qs;
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_gen_abort_2 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_2_gated_we),
+    .wd     (gen_abort_2_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort[2].de),
+    .d      (hw2reg.gen_abort[2].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.gen_abort[2].q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_2_qs)
+  );
+
+
+  // Subregister 0 of Multireg gen_abort_status
+  // R[gen_abort_status_0]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW1C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_gen_abort_status_0 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_status_0_we),
+    .wd     (gen_abort_status_0_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort_status[0].de),
+    .d      (hw2reg.gen_abort_status[0].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_status_0_qs)
+  );
+
+
+  // Subregister 1 of Multireg gen_abort_status
+  // R[gen_abort_status_1]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW1C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_gen_abort_status_1 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_status_1_we),
+    .wd     (gen_abort_status_1_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort_status[1].de),
+    .d      (hw2reg.gen_abort_status[1].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_status_1_qs)
+  );
+
+
+  // Subregister 2 of Multireg gen_abort_status
+  // R[gen_abort_status_2]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW1C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_gen_abort_status_2 (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (gen_abort_status_2_we),
+    .wd     (gen_abort_status_2_wd),
+
+    // from internal hardware
+    .de     (hw2reg.gen_abort_status[2].de),
+    .d      (hw2reg.gen_abort_status[2].d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (gen_abort_status_2_qs)
   );
 
 
   // R[hw_exc_sts]: V(False)
   prim_subreg #(
-    .DW      (15),
+    .DW      (16),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (15'h0)
+    .RESVAL  (16'h0),
+    .Mubi    (1'b0)
   ) u_hw_exc_sts (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (hw_exc_sts_we),
@@ -783,6 +1486,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (hw_exc_sts_qs)
@@ -794,10 +1498,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_sts_enable_field_alert (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_sts_we),
@@ -810,6 +1516,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_sts_enable_field_alert_qs)
@@ -819,10 +1526,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_sts_sw_app_enable_field_alert (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_sts_we),
@@ -835,6 +1544,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_sts_sw_app_enable_field_alert_qs)
@@ -844,10 +1554,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessW0C),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_recov_alert_sts_read_int_state_field_alert (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (recov_alert_sts_we),
@@ -860,9 +1572,346 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (recov_alert_sts_read_int_state_field_alert_qs)
+  );
+
+  //   F[write_int_state_field_alert]: 3:3
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_write_int_state_field_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_write_int_state_field_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.write_int_state_field_alert.de),
+    .d      (hw2reg.recov_alert_sts.write_int_state_field_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_write_int_state_field_alert_qs)
+  );
+
+  //   F[fips_force_enable_field_alert]: 4:4
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_fips_force_enable_field_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_fips_force_enable_field_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.fips_force_enable_field_alert.de),
+    .d      (hw2reg.recov_alert_sts.fips_force_enable_field_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_fips_force_enable_field_alert_qs)
+  );
+
+  //   F[acmd_flag0_field_alert]: 5:5
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_acmd_flag0_field_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_acmd_flag0_field_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.acmd_flag0_field_alert.de),
+    .d      (hw2reg.recov_alert_sts.acmd_flag0_field_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_acmd_flag0_field_alert_qs)
+  );
+
+  //   F[gen_abort_invalid_alert]: 6:6
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_gen_abort_invalid_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_gen_abort_invalid_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.gen_abort_invalid_alert.de),
+    .d      (hw2reg.recov_alert_sts.gen_abort_invalid_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_gen_abort_invalid_alert_qs)
+  );
+
+  //   F[gen_abort_field_alert]: 7:7
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_gen_abort_field_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_gen_abort_field_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.gen_abort_field_alert.de),
+    .d      (hw2reg.recov_alert_sts.gen_abort_field_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_gen_abort_field_alert_qs)
+  );
+
+  //   F[int_state_halt_field_alert]: 8:8
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_int_state_halt_field_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_int_state_halt_field_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.int_state_halt_field_alert.de),
+    .d      (hw2reg.recov_alert_sts.int_state_halt_field_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_int_state_halt_field_alert_qs)
+  );
+
+  //   F[int_state_overwrite_alert]: 9:9
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_int_state_overwrite_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_int_state_overwrite_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.int_state_overwrite_alert.de),
+    .d      (hw2reg.recov_alert_sts.int_state_overwrite_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_int_state_overwrite_alert_qs)
+  );
+
+  //   F[cs_bus_cmp_alert]: 12:12
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_cs_bus_cmp_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_cs_bus_cmp_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.cs_bus_cmp_alert.de),
+    .d      (hw2reg.recov_alert_sts.cs_bus_cmp_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_cs_bus_cmp_alert_qs)
+  );
+
+  //   F[cmd_stage_invalid_acmd_alert]: 13:13
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_cmd_stage_invalid_acmd_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_cmd_stage_invalid_acmd_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.cmd_stage_invalid_acmd_alert.de),
+    .d      (hw2reg.recov_alert_sts.cmd_stage_invalid_acmd_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_cmd_stage_invalid_acmd_alert_qs)
+  );
+
+  //   F[cmd_stage_invalid_gen_cmd_alert]: 14:14
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_cmd_stage_invalid_gen_cmd_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.cmd_stage_invalid_gen_cmd_alert.de),
+    .d      (hw2reg.recov_alert_sts.cmd_stage_invalid_gen_cmd_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_qs)
+  );
+
+  //   F[cmd_stage_invalid_cmd_seq_alert]: 15:15
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_cmd_stage_invalid_cmd_seq_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.cmd_stage_invalid_cmd_seq_alert.de),
+    .d      (hw2reg.recov_alert_sts.cmd_stage_invalid_cmd_seq_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_qs)
+  );
+
+  //   F[cmd_stage_reseed_cnt_alert]: 16:16
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_recov_alert_sts_cmd_stage_reseed_cnt_alert (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (recov_alert_sts_we),
+    .wd     (recov_alert_sts_cmd_stage_reseed_cnt_alert_wd),
+
+    // from internal hardware
+    .de     (hw2reg.recov_alert_sts.cmd_stage_reseed_cnt_alert.de),
+    .d      (hw2reg.recov_alert_sts.cmd_stage_reseed_cnt_alert.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (recov_alert_sts_cmd_stage_reseed_cnt_alert_qs)
   );
 
 
@@ -871,10 +1920,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_sfifo_cmd_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -887,6 +1938,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_sfifo_cmd_err_qs)
@@ -896,10 +1948,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_sfifo_genbits_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -912,369 +1966,22 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_sfifo_genbits_err_qs)
-  );
-
-  //   F[sfifo_cmdreq_err]: 2:2
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_cmdreq_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_cmdreq_err.de),
-    .d      (hw2reg.err_code.sfifo_cmdreq_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_cmdreq_err_qs)
-  );
-
-  //   F[sfifo_rcstage_err]: 3:3
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_rcstage_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_rcstage_err.de),
-    .d      (hw2reg.err_code.sfifo_rcstage_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_rcstage_err_qs)
-  );
-
-  //   F[sfifo_keyvrc_err]: 4:4
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_keyvrc_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_keyvrc_err.de),
-    .d      (hw2reg.err_code.sfifo_keyvrc_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_keyvrc_err_qs)
-  );
-
-  //   F[sfifo_updreq_err]: 5:5
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_updreq_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_updreq_err.de),
-    .d      (hw2reg.err_code.sfifo_updreq_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_updreq_err_qs)
-  );
-
-  //   F[sfifo_bencreq_err]: 6:6
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_bencreq_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_bencreq_err.de),
-    .d      (hw2reg.err_code.sfifo_bencreq_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_bencreq_err_qs)
-  );
-
-  //   F[sfifo_bencack_err]: 7:7
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_bencack_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_bencack_err.de),
-    .d      (hw2reg.err_code.sfifo_bencack_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_bencack_err_qs)
-  );
-
-  //   F[sfifo_pdata_err]: 8:8
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_pdata_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_pdata_err.de),
-    .d      (hw2reg.err_code.sfifo_pdata_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_pdata_err_qs)
-  );
-
-  //   F[sfifo_final_err]: 9:9
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_final_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_final_err.de),
-    .d      (hw2reg.err_code.sfifo_final_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_final_err_qs)
-  );
-
-  //   F[sfifo_gbencack_err]: 10:10
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_gbencack_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_gbencack_err.de),
-    .d      (hw2reg.err_code.sfifo_gbencack_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_gbencack_err_qs)
-  );
-
-  //   F[sfifo_grcstage_err]: 11:11
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_grcstage_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_grcstage_err.de),
-    .d      (hw2reg.err_code.sfifo_grcstage_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_grcstage_err_qs)
-  );
-
-  //   F[sfifo_ggenreq_err]: 12:12
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_ggenreq_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_ggenreq_err.de),
-    .d      (hw2reg.err_code.sfifo_ggenreq_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_ggenreq_err_qs)
-  );
-
-  //   F[sfifo_gadstage_err]: 13:13
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_gadstage_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_gadstage_err.de),
-    .d      (hw2reg.err_code.sfifo_gadstage_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_gadstage_err_qs)
-  );
-
-  //   F[sfifo_ggenbits_err]: 14:14
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_ggenbits_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_ggenbits_err.de),
-    .d      (hw2reg.err_code.sfifo_ggenbits_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_ggenbits_err_qs)
-  );
-
-  //   F[sfifo_blkenc_err]: 15:15
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_sfifo_blkenc_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.sfifo_blkenc_err.de),
-    .d      (hw2reg.err_code.sfifo_blkenc_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_sfifo_blkenc_err_qs)
   );
 
   //   F[cmd_stage_sm_err]: 20:20
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_cmd_stage_sm_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1287,6 +1994,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_cmd_stage_sm_err_qs)
@@ -1296,10 +2004,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_main_sm_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1312,94 +2022,50 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_main_sm_err_qs)
   );
 
-  //   F[drbg_gen_sm_err]: 22:22
+  //   F[ctr_drbg_sm_err]: 22:22
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_drbg_gen_sm_err (
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_err_code_ctr_drbg_sm_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
     .wd     ('0),
 
     // from internal hardware
-    .de     (hw2reg.err_code.drbg_gen_sm_err.de),
-    .d      (hw2reg.err_code.drbg_gen_sm_err.d),
+    .de     (hw2reg.err_code.ctr_drbg_sm_err.de),
+    .d      (hw2reg.err_code.ctr_drbg_sm_err.d),
 
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
-    .qs     (err_code_drbg_gen_sm_err_qs)
-  );
-
-  //   F[drbg_updbe_sm_err]: 23:23
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_drbg_updbe_sm_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.drbg_updbe_sm_err.de),
-    .d      (hw2reg.err_code.drbg_updbe_sm_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_drbg_updbe_sm_err_qs)
-  );
-
-  //   F[drbg_updob_sm_err]: 24:24
-  prim_subreg #(
-    .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
-  ) u_err_code_drbg_updob_sm_err (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.err_code.drbg_updob_sm_err.de),
-    .d      (hw2reg.err_code.drbg_updob_sm_err.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (err_code_drbg_updob_sm_err_qs)
+    .qs     (err_code_ctr_drbg_sm_err_qs)
   );
 
   //   F[aes_cipher_sm_err]: 25:25
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_aes_cipher_sm_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1412,19 +2078,50 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_aes_cipher_sm_err_qs)
+  );
+
+  //   F[ctr_err]: 26:26
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRO),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_err_code_ctr_err (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (1'b0),
+    .wd     ('0),
+
+    // from internal hardware
+    .de     (hw2reg.err_code.ctr_err.de),
+    .d      (hw2reg.err_code.ctr_err.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (err_code_ctr_err_qs)
   );
 
   //   F[fifo_write_err]: 28:28
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_fifo_write_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1437,6 +2134,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_fifo_write_err_qs)
@@ -1446,10 +2144,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_fifo_read_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1462,6 +2162,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_fifo_read_err_qs)
@@ -1471,10 +2172,12 @@ module csrng_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_err_code_fifo_state_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1487,6 +2190,7 @@ module csrng_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_fifo_state_err_qs)
@@ -1494,16 +2198,32 @@ module csrng_reg_top (
 
 
   // R[err_code_test]: V(False)
+  logic err_code_test_qe;
+  logic [0:0] err_code_test_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_err_code_test0_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&err_code_test_flds_we),
+    .q_o(err_code_test_qe)
+  );
+  // Create REGWEN-gated WE signal
+  logic err_code_test_gated_we;
+  assign err_code_test_gated_we = err_code_test_we & regwen_qs;
   prim_subreg #(
     .DW      (5),
     .SwAccess(prim_subreg_pkg::SwAccessRW),
-    .RESVAL  (5'h0)
+    .RESVAL  (5'h0),
+    .Mubi    (1'b0)
   ) u_err_code_test (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (err_code_test_we & regwen_qs),
+    .we     (err_code_test_gated_we),
     .wd     (err_code_test_wd),
 
     // from internal hardware
@@ -1511,26 +2231,59 @@ module csrng_reg_top (
     .d      ('0),
 
     // to internal hardware
-    .qe     (reg2hw.err_code_test.qe),
+    .qe     (err_code_test_flds_we[0]),
     .q      (reg2hw.err_code_test.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (err_code_test_qs)
   );
+  assign reg2hw.err_code_test.qe = err_code_test_qe;
 
 
-  // R[sel_tracking_sm]: V(False)
+  // R[main_sm_state]: V(False)
   prim_subreg #(
-    .DW      (2),
-    .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (2'h0)
-  ) u_sel_tracking_sm (
+    .DW      (6),
+    .SwAccess(prim_subreg_pkg::SwAccessRO),
+    .RESVAL  (6'h37),
+    .Mubi    (1'b0)
+  ) u_main_sm_state (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
-    .we     (sel_tracking_sm_we),
-    .wd     (sel_tracking_sm_wd),
+    .we     (1'b0),
+    .wd     ('0),
+
+    // from internal hardware
+    .de     (hw2reg.main_sm_state.de),
+    .d      (hw2reg.main_sm_state.d),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (main_sm_state_qs)
+  );
+
+
+  // R[int_state_write_enable_regwen]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_int_state_write_enable_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_write_enable_regwen_we),
+    .wd     (int_state_write_enable_regwen_wd),
 
     // from internal hardware
     .de     (1'b0),
@@ -1538,119 +2291,170 @@ module csrng_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (reg2hw.sel_tracking_sm.q),
+    .q      (),
+    .ds     (),
 
     // to register interface (read)
-    .qs     ()
+    .qs     (int_state_write_enable_regwen_qs)
   );
 
 
-  // R[tracking_sm_obs]: V(False)
-  //   F[tracking_sm_obs0]: 7:0
+  // R[int_state_write_enable]: V(False)
+  // Create REGWEN-gated WE signal
+  logic int_state_write_enable_gated_we;
+  assign int_state_write_enable_gated_we =
+    int_state_write_enable_we & int_state_write_enable_regwen_qs;
   prim_subreg #(
-    .DW      (8),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (8'h0)
-  ) u_tracking_sm_obs_tracking_sm_obs0 (
+    .DW      (3),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (3'h7),
+    .Mubi    (1'b0)
+  ) u_int_state_write_enable (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_write_enable_gated_we),
+    .wd     (int_state_write_enable_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.int_state_write_enable.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_write_enable_qs)
+  );
+
+
+  // R[int_state_halt_enable_regwen]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_int_state_halt_enable_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_halt_enable_regwen_we),
+    .wd     (int_state_halt_enable_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_halt_enable_regwen_qs)
+  );
+
+
+  // R[int_state_halt_enable]: V(False)
+  // Create REGWEN-gated WE signal
+  logic int_state_halt_enable_gated_we;
+  assign int_state_halt_enable_gated_we =
+    int_state_halt_enable_we & int_state_halt_enable_regwen_qs;
+  prim_subreg #(
+    .DW      (3),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (3'h7),
+    .Mubi    (1'b0)
+  ) u_int_state_halt_enable (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_halt_enable_gated_we),
+    .wd     (int_state_halt_enable_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.int_state_halt_enable.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_halt_enable_qs)
+  );
+
+
+  // R[int_state_halt]: V(False)
+  prim_subreg #(
+    .DW      (4),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (4'h9),
+    .Mubi    (1'b1)
+  ) u_int_state_halt (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (int_state_halt_we),
+    .wd     (int_state_halt_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.int_state_halt.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (int_state_halt_qs)
+  );
+
+
+  // R[int_state_sts]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRO),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_int_state_sts (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
     .wd     ('0),
 
     // from internal hardware
-    .de     (hw2reg.tracking_sm_obs.tracking_sm_obs0.de),
-    .d      (hw2reg.tracking_sm_obs.tracking_sm_obs0.d),
+    .de     (hw2reg.int_state_sts.de),
+    .d      (hw2reg.int_state_sts.d),
 
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
-    .qs     (tracking_sm_obs_tracking_sm_obs0_qs)
-  );
-
-  //   F[tracking_sm_obs1]: 15:8
-  prim_subreg #(
-    .DW      (8),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (8'h0)
-  ) u_tracking_sm_obs_tracking_sm_obs1 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.tracking_sm_obs.tracking_sm_obs1.de),
-    .d      (hw2reg.tracking_sm_obs.tracking_sm_obs1.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (tracking_sm_obs_tracking_sm_obs1_qs)
-  );
-
-  //   F[tracking_sm_obs2]: 23:16
-  prim_subreg #(
-    .DW      (8),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (8'h0)
-  ) u_tracking_sm_obs_tracking_sm_obs2 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.tracking_sm_obs.tracking_sm_obs2.de),
-    .d      (hw2reg.tracking_sm_obs.tracking_sm_obs2.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (tracking_sm_obs_tracking_sm_obs2_qs)
-  );
-
-  //   F[tracking_sm_obs3]: 31:24
-  prim_subreg #(
-    .DW      (8),
-    .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (8'h0)
-  ) u_tracking_sm_obs_tracking_sm_obs3 (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-
-    // from register interface
-    .we     (1'b0),
-    .wd     ('0),
-
-    // from internal hardware
-    .de     (hw2reg.tracking_sm_obs.tracking_sm_obs3.de),
-    .d      (hw2reg.tracking_sm_obs.tracking_sm_obs3.d),
-
-    // to internal hardware
-    .qe     (),
-    .q      (),
-
-    // to register interface (read)
-    .qs     (tracking_sm_obs_tracking_sm_obs3_qs)
+    .qs     (int_state_sts_qs)
   );
 
 
 
-  logic [17:0] addr_hit;
+  logic [36:0] addr_hit;
   always_comb begin
-    addr_hit = '0;
     addr_hit[ 0] = (reg_addr == CSRNG_INTR_STATE_OFFSET);
     addr_hit[ 1] = (reg_addr == CSRNG_INTR_ENABLE_OFFSET);
     addr_hit[ 2] = (reg_addr == CSRNG_INTR_TEST_OFFSET);
@@ -1658,17 +2462,36 @@ module csrng_reg_top (
     addr_hit[ 4] = (reg_addr == CSRNG_REGWEN_OFFSET);
     addr_hit[ 5] = (reg_addr == CSRNG_CTRL_OFFSET);
     addr_hit[ 6] = (reg_addr == CSRNG_CMD_REQ_OFFSET);
-    addr_hit[ 7] = (reg_addr == CSRNG_SW_CMD_STS_OFFSET);
-    addr_hit[ 8] = (reg_addr == CSRNG_GENBITS_VLD_OFFSET);
-    addr_hit[ 9] = (reg_addr == CSRNG_GENBITS_OFFSET);
-    addr_hit[10] = (reg_addr == CSRNG_INT_STATE_NUM_OFFSET);
-    addr_hit[11] = (reg_addr == CSRNG_INT_STATE_VAL_OFFSET);
-    addr_hit[12] = (reg_addr == CSRNG_HW_EXC_STS_OFFSET);
-    addr_hit[13] = (reg_addr == CSRNG_RECOV_ALERT_STS_OFFSET);
-    addr_hit[14] = (reg_addr == CSRNG_ERR_CODE_OFFSET);
-    addr_hit[15] = (reg_addr == CSRNG_ERR_CODE_TEST_OFFSET);
-    addr_hit[16] = (reg_addr == CSRNG_SEL_TRACKING_SM_OFFSET);
-    addr_hit[17] = (reg_addr == CSRNG_TRACKING_SM_OBS_OFFSET);
+    addr_hit[ 7] = (reg_addr == CSRNG_RESEED_INTERVAL_OFFSET);
+    addr_hit[ 8] = (reg_addr == CSRNG_RESEED_COUNTER_0_OFFSET);
+    addr_hit[ 9] = (reg_addr == CSRNG_RESEED_COUNTER_1_OFFSET);
+    addr_hit[10] = (reg_addr == CSRNG_RESEED_COUNTER_2_OFFSET);
+    addr_hit[11] = (reg_addr == CSRNG_SW_CMD_STS_OFFSET);
+    addr_hit[12] = (reg_addr == CSRNG_GENBITS_VLD_OFFSET);
+    addr_hit[13] = (reg_addr == CSRNG_GENBITS_OFFSET);
+    addr_hit[14] = (reg_addr == CSRNG_INT_STATE_READ_ENABLE_REGWEN_OFFSET);
+    addr_hit[15] = (reg_addr == CSRNG_INT_STATE_READ_ENABLE_OFFSET);
+    addr_hit[16] = (reg_addr == CSRNG_INT_STATE_NUM_OFFSET);
+    addr_hit[17] = (reg_addr == CSRNG_INT_STATE_VAL_OFFSET);
+    addr_hit[18] = (reg_addr == CSRNG_FIPS_FORCE_OFFSET);
+    addr_hit[19] = (reg_addr == CSRNG_GEN_ABORT_REGWEN_OFFSET);
+    addr_hit[20] = (reg_addr == CSRNG_GEN_ABORT_0_OFFSET);
+    addr_hit[21] = (reg_addr == CSRNG_GEN_ABORT_1_OFFSET);
+    addr_hit[22] = (reg_addr == CSRNG_GEN_ABORT_2_OFFSET);
+    addr_hit[23] = (reg_addr == CSRNG_GEN_ABORT_STATUS_0_OFFSET);
+    addr_hit[24] = (reg_addr == CSRNG_GEN_ABORT_STATUS_1_OFFSET);
+    addr_hit[25] = (reg_addr == CSRNG_GEN_ABORT_STATUS_2_OFFSET);
+    addr_hit[26] = (reg_addr == CSRNG_HW_EXC_STS_OFFSET);
+    addr_hit[27] = (reg_addr == CSRNG_RECOV_ALERT_STS_OFFSET);
+    addr_hit[28] = (reg_addr == CSRNG_ERR_CODE_OFFSET);
+    addr_hit[29] = (reg_addr == CSRNG_ERR_CODE_TEST_OFFSET);
+    addr_hit[30] = (reg_addr == CSRNG_MAIN_SM_STATE_OFFSET);
+    addr_hit[31] = (reg_addr == CSRNG_INT_STATE_WRITE_ENABLE_REGWEN_OFFSET);
+    addr_hit[32] = (reg_addr == CSRNG_INT_STATE_WRITE_ENABLE_OFFSET);
+    addr_hit[33] = (reg_addr == CSRNG_INT_STATE_HALT_ENABLE_REGWEN_OFFSET);
+    addr_hit[34] = (reg_addr == CSRNG_INT_STATE_HALT_ENABLE_OFFSET);
+    addr_hit[35] = (reg_addr == CSRNG_INT_STATE_HALT_OFFSET);
+    addr_hit[36] = (reg_addr == CSRNG_INT_STATE_STS_OFFSET);
   end
 
   assign addrmiss = (reg_re || reg_we) ? ~|addr_hit : 1'b0 ;
@@ -1693,8 +2516,29 @@ module csrng_reg_top (
                (addr_hit[14] & (|(CSRNG_PERMIT[14] & ~reg_be))) |
                (addr_hit[15] & (|(CSRNG_PERMIT[15] & ~reg_be))) |
                (addr_hit[16] & (|(CSRNG_PERMIT[16] & ~reg_be))) |
-               (addr_hit[17] & (|(CSRNG_PERMIT[17] & ~reg_be)))));
+               (addr_hit[17] & (|(CSRNG_PERMIT[17] & ~reg_be))) |
+               (addr_hit[18] & (|(CSRNG_PERMIT[18] & ~reg_be))) |
+               (addr_hit[19] & (|(CSRNG_PERMIT[19] & ~reg_be))) |
+               (addr_hit[20] & (|(CSRNG_PERMIT[20] & ~reg_be))) |
+               (addr_hit[21] & (|(CSRNG_PERMIT[21] & ~reg_be))) |
+               (addr_hit[22] & (|(CSRNG_PERMIT[22] & ~reg_be))) |
+               (addr_hit[23] & (|(CSRNG_PERMIT[23] & ~reg_be))) |
+               (addr_hit[24] & (|(CSRNG_PERMIT[24] & ~reg_be))) |
+               (addr_hit[25] & (|(CSRNG_PERMIT[25] & ~reg_be))) |
+               (addr_hit[26] & (|(CSRNG_PERMIT[26] & ~reg_be))) |
+               (addr_hit[27] & (|(CSRNG_PERMIT[27] & ~reg_be))) |
+               (addr_hit[28] & (|(CSRNG_PERMIT[28] & ~reg_be))) |
+               (addr_hit[29] & (|(CSRNG_PERMIT[29] & ~reg_be))) |
+               (addr_hit[30] & (|(CSRNG_PERMIT[30] & ~reg_be))) |
+               (addr_hit[31] & (|(CSRNG_PERMIT[31] & ~reg_be))) |
+               (addr_hit[32] & (|(CSRNG_PERMIT[32] & ~reg_be))) |
+               (addr_hit[33] & (|(CSRNG_PERMIT[33] & ~reg_be))) |
+               (addr_hit[34] & (|(CSRNG_PERMIT[34] & ~reg_be))) |
+               (addr_hit[35] & (|(CSRNG_PERMIT[35] & ~reg_be))) |
+               (addr_hit[36] & (|(CSRNG_PERMIT[36] & ~reg_be)))));
   end
+
+  // Generate write-enables
   assign intr_state_we = addr_hit[0] & reg_we & !reg_error;
 
   assign intr_state_cs_cmd_req_done_wd = reg_wdata[0];
@@ -1727,6 +2571,8 @@ module csrng_reg_top (
   assign alert_test_recov_alert_wd = reg_wdata[0];
 
   assign alert_test_fatal_alert_wd = reg_wdata[1];
+
+  assign alert_test_regwen_wd = reg_wdata[31];
   assign regwen_we = addr_hit[4] & reg_we & !reg_error;
 
   assign regwen_wd = reg_wdata[0];
@@ -1737,31 +2583,151 @@ module csrng_reg_top (
   assign ctrl_sw_app_enable_wd = reg_wdata[7:4];
 
   assign ctrl_read_int_state_wd = reg_wdata[11:8];
+
+  assign ctrl_write_int_state_wd = reg_wdata[15:12];
+
+  assign ctrl_fips_force_enable_wd = reg_wdata[19:16];
   assign cmd_req_we = addr_hit[6] & reg_we & !reg_error;
 
   assign cmd_req_wd = reg_wdata[31:0];
-  assign genbits_vld_re = addr_hit[8] & reg_re & !reg_error;
-  assign genbits_re = addr_hit[9] & reg_re & !reg_error;
-  assign int_state_num_we = addr_hit[10] & reg_we & !reg_error;
+  assign reseed_interval_we = addr_hit[7] & reg_we & !reg_error;
+
+  assign reseed_interval_wd = reg_wdata[31:0];
+  assign reseed_counter_0_re = addr_hit[8] & reg_re & !reg_error;
+  assign reseed_counter_1_re = addr_hit[9] & reg_re & !reg_error;
+  assign reseed_counter_2_re = addr_hit[10] & reg_re & !reg_error;
+  assign genbits_vld_re = addr_hit[12] & reg_re & !reg_error;
+  assign genbits_re = addr_hit[13] & reg_re & !reg_error;
+  assign int_state_read_enable_regwen_we = addr_hit[14] & reg_we & !reg_error;
+
+  assign int_state_read_enable_regwen_wd = reg_wdata[0];
+  assign int_state_read_enable_we = addr_hit[15] & reg_we & !reg_error;
+
+  assign int_state_read_enable_wd = reg_wdata[2:0];
+  assign int_state_num_we = addr_hit[16] & reg_we & !reg_error;
 
   assign int_state_num_wd = reg_wdata[3:0];
-  assign int_state_val_re = addr_hit[11] & reg_re & !reg_error;
-  assign hw_exc_sts_we = addr_hit[12] & reg_we & !reg_error;
+  assign int_state_val_re = addr_hit[17] & reg_re & !reg_error;
+  assign int_state_val_we = addr_hit[17] & reg_we & !reg_error;
 
-  assign hw_exc_sts_wd = reg_wdata[14:0];
-  assign recov_alert_sts_we = addr_hit[13] & reg_we & !reg_error;
+  assign int_state_val_wd = reg_wdata[31:0];
+  assign fips_force_we = addr_hit[18] & reg_we & !reg_error;
+
+  assign fips_force_wd = reg_wdata[2:0];
+  assign gen_abort_regwen_we = addr_hit[19] & reg_we & !reg_error;
+
+  assign gen_abort_regwen_wd = reg_wdata[0];
+  assign gen_abort_0_we = addr_hit[20] & reg_we & !reg_error;
+
+  assign gen_abort_0_wd = reg_wdata[3:0];
+  assign gen_abort_1_we = addr_hit[21] & reg_we & !reg_error;
+
+  assign gen_abort_1_wd = reg_wdata[3:0];
+  assign gen_abort_2_we = addr_hit[22] & reg_we & !reg_error;
+
+  assign gen_abort_2_wd = reg_wdata[3:0];
+  assign gen_abort_status_0_we = addr_hit[23] & reg_we & !reg_error;
+
+  assign gen_abort_status_0_wd = reg_wdata[0];
+  assign gen_abort_status_1_we = addr_hit[24] & reg_we & !reg_error;
+
+  assign gen_abort_status_1_wd = reg_wdata[0];
+  assign gen_abort_status_2_we = addr_hit[25] & reg_we & !reg_error;
+
+  assign gen_abort_status_2_wd = reg_wdata[0];
+  assign hw_exc_sts_we = addr_hit[26] & reg_we & !reg_error;
+
+  assign hw_exc_sts_wd = reg_wdata[15:0];
+  assign recov_alert_sts_we = addr_hit[27] & reg_we & !reg_error;
 
   assign recov_alert_sts_enable_field_alert_wd = reg_wdata[0];
 
   assign recov_alert_sts_sw_app_enable_field_alert_wd = reg_wdata[1];
 
   assign recov_alert_sts_read_int_state_field_alert_wd = reg_wdata[2];
-  assign err_code_test_we = addr_hit[15] & reg_we & !reg_error;
+
+  assign recov_alert_sts_write_int_state_field_alert_wd = reg_wdata[3];
+
+  assign recov_alert_sts_fips_force_enable_field_alert_wd = reg_wdata[4];
+
+  assign recov_alert_sts_acmd_flag0_field_alert_wd = reg_wdata[5];
+
+  assign recov_alert_sts_gen_abort_invalid_alert_wd = reg_wdata[6];
+
+  assign recov_alert_sts_gen_abort_field_alert_wd = reg_wdata[7];
+
+  assign recov_alert_sts_int_state_halt_field_alert_wd = reg_wdata[8];
+
+  assign recov_alert_sts_int_state_overwrite_alert_wd = reg_wdata[9];
+
+  assign recov_alert_sts_cs_bus_cmp_alert_wd = reg_wdata[12];
+
+  assign recov_alert_sts_cmd_stage_invalid_acmd_alert_wd = reg_wdata[13];
+
+  assign recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_wd = reg_wdata[14];
+
+  assign recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_wd = reg_wdata[15];
+
+  assign recov_alert_sts_cmd_stage_reseed_cnt_alert_wd = reg_wdata[16];
+  assign err_code_test_we = addr_hit[29] & reg_we & !reg_error;
 
   assign err_code_test_wd = reg_wdata[4:0];
-  assign sel_tracking_sm_we = addr_hit[16] & reg_we & !reg_error;
+  assign int_state_write_enable_regwen_we = addr_hit[31] & reg_we & !reg_error;
 
-  assign sel_tracking_sm_wd = reg_wdata[1:0];
+  assign int_state_write_enable_regwen_wd = reg_wdata[0];
+  assign int_state_write_enable_we = addr_hit[32] & reg_we & !reg_error;
+
+  assign int_state_write_enable_wd = reg_wdata[2:0];
+  assign int_state_halt_enable_regwen_we = addr_hit[33] & reg_we & !reg_error;
+
+  assign int_state_halt_enable_regwen_wd = reg_wdata[0];
+  assign int_state_halt_enable_we = addr_hit[34] & reg_we & !reg_error;
+
+  assign int_state_halt_enable_wd = reg_wdata[2:0];
+  assign int_state_halt_we = addr_hit[35] & reg_we & !reg_error;
+
+  assign int_state_halt_wd = reg_wdata[3:0];
+
+  // Assign write-enables to checker logic vector.
+  always_comb begin
+    reg_we_check[0] = intr_state_we;
+    reg_we_check[1] = intr_enable_we;
+    reg_we_check[2] = intr_test_we;
+    reg_we_check[3] = alert_test_we;
+    reg_we_check[4] = regwen_we;
+    reg_we_check[5] = ctrl_gated_we;
+    reg_we_check[6] = cmd_req_we;
+    reg_we_check[7] = reseed_interval_we;
+    reg_we_check[8] = 1'b0;
+    reg_we_check[9] = 1'b0;
+    reg_we_check[10] = 1'b0;
+    reg_we_check[11] = 1'b0;
+    reg_we_check[12] = 1'b0;
+    reg_we_check[13] = 1'b0;
+    reg_we_check[14] = int_state_read_enable_regwen_we;
+    reg_we_check[15] = int_state_read_enable_gated_we;
+    reg_we_check[16] = int_state_num_we;
+    reg_we_check[17] = int_state_val_we;
+    reg_we_check[18] = fips_force_gated_we;
+    reg_we_check[19] = gen_abort_regwen_we;
+    reg_we_check[20] = gen_abort_0_gated_we;
+    reg_we_check[21] = gen_abort_1_gated_we;
+    reg_we_check[22] = gen_abort_2_gated_we;
+    reg_we_check[23] = gen_abort_status_0_we;
+    reg_we_check[24] = gen_abort_status_1_we;
+    reg_we_check[25] = gen_abort_status_2_we;
+    reg_we_check[26] = hw_exc_sts_we;
+    reg_we_check[27] = recov_alert_sts_we;
+    reg_we_check[28] = 1'b0;
+    reg_we_check[29] = err_code_test_gated_we;
+    reg_we_check[30] = 1'b0;
+    reg_we_check[31] = int_state_write_enable_regwen_we;
+    reg_we_check[32] = int_state_write_enable_gated_we;
+    reg_we_check[33] = int_state_halt_enable_regwen_we;
+    reg_we_check[34] = int_state_halt_enable_gated_we;
+    reg_we_check[35] = int_state_halt_we;
+    reg_we_check[36] = 1'b0;
+  end
 
   // Read data return
   always_comb begin
@@ -1791,6 +2757,7 @@ module csrng_reg_top (
       addr_hit[3]: begin
         reg_rdata_next[0] = '0;
         reg_rdata_next[1] = '0;
+        reg_rdata_next[31] = alert_test_regwen_qs;
       end
 
       addr_hit[4]: begin
@@ -1801,6 +2768,8 @@ module csrng_reg_top (
         reg_rdata_next[3:0] = ctrl_enable_qs;
         reg_rdata_next[7:4] = ctrl_sw_app_enable_qs;
         reg_rdata_next[11:8] = ctrl_read_int_state_qs;
+        reg_rdata_next[15:12] = ctrl_write_int_state_qs;
+        reg_rdata_next[19:16] = ctrl_fips_force_enable_qs;
       end
 
       addr_hit[6]: begin
@@ -1808,78 +2777,149 @@ module csrng_reg_top (
       end
 
       addr_hit[7]: begin
-        reg_rdata_next[0] = sw_cmd_sts_cmd_rdy_qs;
-        reg_rdata_next[1] = sw_cmd_sts_cmd_sts_qs;
+        reg_rdata_next[31:0] = reseed_interval_qs;
       end
 
       addr_hit[8]: begin
+        reg_rdata_next[31:0] = reseed_counter_0_qs;
+      end
+
+      addr_hit[9]: begin
+        reg_rdata_next[31:0] = reseed_counter_1_qs;
+      end
+
+      addr_hit[10]: begin
+        reg_rdata_next[31:0] = reseed_counter_2_qs;
+      end
+
+      addr_hit[11]: begin
+        reg_rdata_next[1] = sw_cmd_sts_cmd_rdy_qs;
+        reg_rdata_next[2] = sw_cmd_sts_cmd_ack_qs;
+        reg_rdata_next[5:3] = sw_cmd_sts_cmd_sts_qs;
+      end
+
+      addr_hit[12]: begin
         reg_rdata_next[0] = genbits_vld_genbits_vld_qs;
         reg_rdata_next[1] = genbits_vld_genbits_fips_qs;
       end
 
-      addr_hit[9]: begin
+      addr_hit[13]: begin
         reg_rdata_next[31:0] = genbits_qs;
       end
 
-      addr_hit[10]: begin
+      addr_hit[14]: begin
+        reg_rdata_next[0] = int_state_read_enable_regwen_qs;
+      end
+
+      addr_hit[15]: begin
+        reg_rdata_next[2:0] = int_state_read_enable_qs;
+      end
+
+      addr_hit[16]: begin
         reg_rdata_next[3:0] = int_state_num_qs;
       end
 
-      addr_hit[11]: begin
+      addr_hit[17]: begin
         reg_rdata_next[31:0] = int_state_val_qs;
       end
 
-      addr_hit[12]: begin
-        reg_rdata_next[14:0] = hw_exc_sts_qs;
+      addr_hit[18]: begin
+        reg_rdata_next[2:0] = fips_force_qs;
       end
 
-      addr_hit[13]: begin
+      addr_hit[19]: begin
+        reg_rdata_next[0] = gen_abort_regwen_qs;
+      end
+
+      addr_hit[20]: begin
+        reg_rdata_next[3:0] = gen_abort_0_qs;
+      end
+
+      addr_hit[21]: begin
+        reg_rdata_next[3:0] = gen_abort_1_qs;
+      end
+
+      addr_hit[22]: begin
+        reg_rdata_next[3:0] = gen_abort_2_qs;
+      end
+
+      addr_hit[23]: begin
+        reg_rdata_next[0] = gen_abort_status_0_qs;
+      end
+
+      addr_hit[24]: begin
+        reg_rdata_next[0] = gen_abort_status_1_qs;
+      end
+
+      addr_hit[25]: begin
+        reg_rdata_next[0] = gen_abort_status_2_qs;
+      end
+
+      addr_hit[26]: begin
+        reg_rdata_next[15:0] = hw_exc_sts_qs;
+      end
+
+      addr_hit[27]: begin
         reg_rdata_next[0] = recov_alert_sts_enable_field_alert_qs;
         reg_rdata_next[1] = recov_alert_sts_sw_app_enable_field_alert_qs;
         reg_rdata_next[2] = recov_alert_sts_read_int_state_field_alert_qs;
+        reg_rdata_next[3] = recov_alert_sts_write_int_state_field_alert_qs;
+        reg_rdata_next[4] = recov_alert_sts_fips_force_enable_field_alert_qs;
+        reg_rdata_next[5] = recov_alert_sts_acmd_flag0_field_alert_qs;
+        reg_rdata_next[6] = recov_alert_sts_gen_abort_invalid_alert_qs;
+        reg_rdata_next[7] = recov_alert_sts_gen_abort_field_alert_qs;
+        reg_rdata_next[8] = recov_alert_sts_int_state_halt_field_alert_qs;
+        reg_rdata_next[9] = recov_alert_sts_int_state_overwrite_alert_qs;
+        reg_rdata_next[12] = recov_alert_sts_cs_bus_cmp_alert_qs;
+        reg_rdata_next[13] = recov_alert_sts_cmd_stage_invalid_acmd_alert_qs;
+        reg_rdata_next[14] = recov_alert_sts_cmd_stage_invalid_gen_cmd_alert_qs;
+        reg_rdata_next[15] = recov_alert_sts_cmd_stage_invalid_cmd_seq_alert_qs;
+        reg_rdata_next[16] = recov_alert_sts_cmd_stage_reseed_cnt_alert_qs;
       end
 
-      addr_hit[14]: begin
+      addr_hit[28]: begin
         reg_rdata_next[0] = err_code_sfifo_cmd_err_qs;
         reg_rdata_next[1] = err_code_sfifo_genbits_err_qs;
-        reg_rdata_next[2] = err_code_sfifo_cmdreq_err_qs;
-        reg_rdata_next[3] = err_code_sfifo_rcstage_err_qs;
-        reg_rdata_next[4] = err_code_sfifo_keyvrc_err_qs;
-        reg_rdata_next[5] = err_code_sfifo_updreq_err_qs;
-        reg_rdata_next[6] = err_code_sfifo_bencreq_err_qs;
-        reg_rdata_next[7] = err_code_sfifo_bencack_err_qs;
-        reg_rdata_next[8] = err_code_sfifo_pdata_err_qs;
-        reg_rdata_next[9] = err_code_sfifo_final_err_qs;
-        reg_rdata_next[10] = err_code_sfifo_gbencack_err_qs;
-        reg_rdata_next[11] = err_code_sfifo_grcstage_err_qs;
-        reg_rdata_next[12] = err_code_sfifo_ggenreq_err_qs;
-        reg_rdata_next[13] = err_code_sfifo_gadstage_err_qs;
-        reg_rdata_next[14] = err_code_sfifo_ggenbits_err_qs;
-        reg_rdata_next[15] = err_code_sfifo_blkenc_err_qs;
         reg_rdata_next[20] = err_code_cmd_stage_sm_err_qs;
         reg_rdata_next[21] = err_code_main_sm_err_qs;
-        reg_rdata_next[22] = err_code_drbg_gen_sm_err_qs;
-        reg_rdata_next[23] = err_code_drbg_updbe_sm_err_qs;
-        reg_rdata_next[24] = err_code_drbg_updob_sm_err_qs;
+        reg_rdata_next[22] = err_code_ctr_drbg_sm_err_qs;
         reg_rdata_next[25] = err_code_aes_cipher_sm_err_qs;
+        reg_rdata_next[26] = err_code_ctr_err_qs;
         reg_rdata_next[28] = err_code_fifo_write_err_qs;
         reg_rdata_next[29] = err_code_fifo_read_err_qs;
         reg_rdata_next[30] = err_code_fifo_state_err_qs;
       end
 
-      addr_hit[15]: begin
+      addr_hit[29]: begin
         reg_rdata_next[4:0] = err_code_test_qs;
       end
 
-      addr_hit[16]: begin
-        reg_rdata_next[1:0] = '0;
+      addr_hit[30]: begin
+        reg_rdata_next[5:0] = main_sm_state_qs;
       end
 
-      addr_hit[17]: begin
-        reg_rdata_next[7:0] = tracking_sm_obs_tracking_sm_obs0_qs;
-        reg_rdata_next[15:8] = tracking_sm_obs_tracking_sm_obs1_qs;
-        reg_rdata_next[23:16] = tracking_sm_obs_tracking_sm_obs2_qs;
-        reg_rdata_next[31:24] = tracking_sm_obs_tracking_sm_obs3_qs;
+      addr_hit[31]: begin
+        reg_rdata_next[0] = int_state_write_enable_regwen_qs;
+      end
+
+      addr_hit[32]: begin
+        reg_rdata_next[2:0] = int_state_write_enable_qs;
+      end
+
+      addr_hit[33]: begin
+        reg_rdata_next[0] = int_state_halt_enable_regwen_qs;
+      end
+
+      addr_hit[34]: begin
+        reg_rdata_next[2:0] = int_state_halt_enable_qs;
+      end
+
+      addr_hit[35]: begin
+        reg_rdata_next[3:0] = int_state_halt_qs;
+      end
+
+      addr_hit[36]: begin
+        reg_rdata_next[0] = int_state_sts_qs;
       end
 
       default: begin
@@ -1893,17 +2933,7 @@ module csrng_reg_top (
   assign shadow_busy = 1'b0;
 
   // register busy
-  logic reg_busy_sel;
-  assign reg_busy = reg_busy_sel | shadow_busy;
-  always_comb begin
-    reg_busy_sel = '0;
-    unique case (1'b1)
-      default: begin
-        reg_busy_sel  = '0;
-      end
-    endcase
-  end
-
+  assign reg_busy = shadow_busy;
 
   // Unused signal tieoff
 

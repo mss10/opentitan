@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -27,17 +27,37 @@ def extract_messages(str_buffer, patterns):
     return results
 
 
-def extract_messages_count(str_buffer, patterns):
+def extract_messages_count(str_buffer, patterns, exp_unproven_properties):
     '''Extract messages matching patterns from full_file as a dictionary.
 
     The patterns argument is a list of pairs, (key, pattern). Each pattern is a regex
     and the total count of all matches in str_buffer are stored in a dictionary under
     the paired key.
+    If input argument `exp_unproven_properties` is not None, the total count will not
+    include the expected properties. However, if the expected are not found in its
+    category, will add the properties to the category.
     '''
     results = OrderedDict()
     for key, pattern in patterns:
         results.setdefault(key, 0)
-        results[key] += len(re.findall(pattern, str_buffer, flags=re.MULTILINE))
+
+        if exp_unproven_properties and key in exp_unproven_properties:
+            matched_pattern = re.findall(pattern, str_buffer, flags=re.MULTILINE)
+            for unproven_property in exp_unproven_properties[key]:
+                unproven_property_found = 0
+                for item in matched_pattern:
+                    # If the expected unproven property is found, remove the item from the
+                    # list of matched_pattern.
+                    if unproven_property in item:
+                        matched_pattern.remove(item)
+                        unproven_property_found = 1
+                # If expected unproven property is not found, add the property to the
+                # list of matched pattern.
+                if not unproven_property_found:
+                    matched_pattern.append("Fail to find this property: " + unproven_property)
+            results[key] += len(matched_pattern)
+        else:
+            results[key] += len(re.findall(pattern, str_buffer, flags=re.MULTILINE))
 
     return results
 
@@ -62,7 +82,21 @@ def parse_message(str_buffer):
     return extract_messages(str_buffer, err_warn_patterns)
 
 
-def get_summary(str_buffer):
+def get_expected_failures(exp_failure_path):
+    '''Get expected fail properties from a hjson file otherwise return None.'''
+    if exp_failure_path is None or exp_failure_path == "":
+        return {}
+    else:
+        try:
+            with open(exp_failure_path, 'r') as f:
+                exp_failures = hjson.load(f, use_decimal=True, object_pairs_hook=OrderedDict)
+                return exp_failures
+        except ValueError:
+            log.error("{} not found".format(exp_failure_path))
+            return {}
+
+
+def get_summary(str_buffer, exp_failures):
     '''Count errors, warnings, and property status from the log file'''
     message_patterns = [("errors", r"^ERROR: .*"),
                         ("errors", r"^\[ERROR.*"),
@@ -73,25 +107,27 @@ def get_summary(str_buffer):
                         ("covered", r"^\[\d+\].*covered.*"),
                         ("undetermined", r"^\[\d+\].*undetermined.*"),
                         ("unreachable", r"^\[\d+\].*unreachable.*")]
-    summary = extract_messages_count(str_buffer, message_patterns)
+    summary = extract_messages_count(str_buffer, message_patterns, exp_failures)
 
     summary["pass_rate"] = format_percentage(summary["proven"],
-                                             summary["cex"] + summary["undetermined"])
+                                             summary["cex"] + summary["undetermined"] +
+                                             summary["unreachable"])
     summary["cov_rate"] = format_percentage(summary["covered"], summary["unreachable"])
 
     return summary
 
 
-def get_results(logpath):
+def get_results(logpath, exp_failure_path):
     '''Parse log file and extract info to a dictionary'''
     try:
         with Path(logpath).open() as f:
             results = OrderedDict()
             full_file = f.read()
             results["messages"] = parse_message(full_file)
-            summary = get_summary(full_file)
-            if summary:
-                results["summary"] = summary
+
+            results["exp_failures"] = get_expected_failures(exp_failure_path)
+
+            results["summary"] = get_summary(full_file, results["exp_failures"])
             return results
 
     except IOError as err:
@@ -110,17 +146,18 @@ def get_cov_results(logpath, dut_name):
             cov_pattern = r"\s*\|\d*.\d\d%\s\(\d*\/\d*\)"  # cov pattern: 100.00% (5/5)
             pattern_match = r"\s*\|(\d*.\d\d)%\s\(\d*\/\d*\)"  # extract percentage in cov_pattern
             coverage_patterns = \
-                [("stimuli", r"^\|" + dut_name + pattern_match + cov_pattern + cov_pattern),
-                 ("coi", r"^\|" + dut_name + cov_pattern + pattern_match + cov_pattern),
-                 ("proof", r"^\|" + dut_name + cov_pattern + cov_pattern + pattern_match)]
+                [("formal", r"^\|" + dut_name + pattern_match + cov_pattern + cov_pattern),
+                 ("stimuli", r"^\|" + dut_name + cov_pattern + pattern_match + cov_pattern),
+                 ("checker", r"^\|" + dut_name + cov_pattern + cov_pattern + pattern_match)]
             cov_results = extract_messages(full_file, coverage_patterns)
             for key, item in cov_results.items():
                 if len(item) == 1:
                     cov_results[key] = item[0] + " %"
                 else:
                     cov_results[key] = "N/A"
-                    log.error("Parse %s coverage error. Expect one matching value, get %s",
-                              key, item)
+                    # Report ERROR but continue the parsing script.
+                    log.info("ERROR: parse %s coverage error. Expect one matching value, get %s",
+                             key, item)
             return cov_results
 
     except IOError as err:
@@ -153,9 +190,9 @@ def main():
         },
         If coverage is enabled, this script will also parse the coverage result:
         "coverage": {
+          formal:  "90 %",
           stimuli: "90 %",
-          coi    : "90 %",
-          proof  : "80 %"
+          checker: "80 %"
         }
         The script returns nonzero status if any errors or property failures including
         "cex, undetermined, unreachable" are presented.
@@ -183,9 +220,18 @@ def main():
                         default=None,
                         help=('Tesbench name. '
                               'By default is empty, used for coverage parsing.'))
+
+    parser.add_argument('--exp-fail-path',
+                        type=str,
+                        default=None,
+                        help=('The path of a hjson file that contains expected failing properties.'
+                              '''By default is empty, used only if there are properties that are
+                               expected to fail. If input is an empty string, will treat it as not
+                               passing a file.'''))
+
     args = parser.parse_args()
 
-    results = get_results(args.logpath)
+    results = get_results(args.logpath, args.exp_fail_path)
 
     if args.cov:
         results["coverage"] = get_cov_results(args.logpath, args.dut)

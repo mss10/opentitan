@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,30 +8,31 @@
 #include <stdint.h>
 
 #include "sw/device/lib/base/bitfield.h"
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/base/mmio.h"
+#include "sw/device/lib/base/multibits.h"
 #include "sw/device/lib/dif/dif_base.h"
 
-#include "rstmgr_regs.h"  // Generated.
+#include "hw/top/rstmgr_regs.h"  // Generated.
 
 // This macro simplifies the `static_assert` check to make sure that the
 // public reset info register bitfield matches register bits.
-#define RSTMGR_RESET_INFO_CHECK(pub_name, priv_name)         \
-  static_assert(kDifRstmgrResetInfo##pub_name ==             \
-                    (0x1 << RSTMGR_RESET_##priv_name##_BIT), \
-                "kDifRstmgrResetInfo" #pub_name              \
+#define RSTMGR_RESET_INFO_CHECK(pub_name, priv_name)              \
+  static_assert(kDifRstmgrResetInfo##pub_name ==                  \
+                    (0x1 << RSTMGR_RESET_INFO_##priv_name##_BIT), \
+                "kDifRstmgrResetInfo" #pub_name                   \
                 " must match the register definition!")
 
-RSTMGR_RESET_INFO_CHECK(Por, INFO_POR);
-RSTMGR_RESET_INFO_CHECK(LowPowerExit, INFO_LOW_POWER_EXIT);
-RSTMGR_RESET_INFO_CHECK(Ndm, INFO_NDM_RESET);
+// These assertions are only defined for the Earl Grey chip.
+#if defined(OPENTITAN_IS_EARLGREY)
+
+RSTMGR_RESET_INFO_CHECK(Por, POR);
+RSTMGR_RESET_INFO_CHECK(LowPowerExit, LOW_POWER_EXIT);
+RSTMGR_RESET_INFO_CHECK(Sw, SW_RESET);
 
 static_assert(kDifRstmgrResetInfoHwReq == (RSTMGR_RESET_INFO_HW_REQ_MASK
                                            << RSTMGR_RESET_INFO_HW_REQ_OFFSET),
               "kDifRstmgrResetInfoHwReq must match the register definition!");
-
-static_assert(
-    RSTMGR_PARAM_NUM_SW_RESETS == 8,
-    "Number of software resets has changed, please update this file!");
 
 // The Reset Manager implementation will have to be updated if the number
 // of software resets grows, as it would span across multiple registers, so
@@ -50,17 +51,56 @@ static_assert(
 static_assert(
     DIF_RSTMGR_ALERT_INFO_MAX_SIZE == RSTMGR_ALERT_INFO_CTRL_INDEX_MASK,
     "Alert info dump max size has grown, please update the public define!");
+#elif defined(OPENTITAN_IS_DARJEELING)
+// TODO: equivalent assertions are not yet defined for Darjeeling
+#else
+#error "dif_rstmgr does not support this top"
+#endif
+
+/**
+ * Checks whether alert_info capture is disabled.
+ */
+static bool alert_capture_is_locked(mmio_region_t base_addr) {
+  uint32_t bitfield =
+      mmio_region_read32(base_addr, RSTMGR_ALERT_REGWEN_REG_OFFSET);
+
+  // When bit is cleared, alert capture is disabled.
+  return !bitfield_bit32_read(bitfield, RSTMGR_ALERT_REGWEN_EN_BIT);
+}
+
+/**
+ * Checks whether CPU info capture is disabled.
+ */
+static bool cpu_capture_is_locked(mmio_region_t base_addr) {
+  uint32_t bitfield =
+      mmio_region_read32(base_addr, RSTMGR_CPU_REGWEN_REG_OFFSET);
+
+  // When bit is cleared, APU capture is disabled.
+  return !bitfield_bit32_read(bitfield, RSTMGR_CPU_REGWEN_EN_BIT);
+}
+
+static inline ptrdiff_t get_regwen_reg_offset(dif_rstmgr_peripheral_t p) {
+#if RSTMGR_SW_RST_REGWEN_MULTIREG_COUNT > 1
+  return RSTMGR_SW_RST_REGWEN_0_REG_OFFSET + 4 * (ptrdiff_t)p;
+#else
+  return RSTMGR_SW_RST_REGWEN_REG_OFFSET + 4 * (ptrdiff_t)p;
+#endif
+}
 
 /**
  * Checks whether the software reset is disabled for a `peripheral`.
  */
 static bool rstmgr_software_reset_is_locked(
     mmio_region_t base_addr, dif_rstmgr_peripheral_t peripheral) {
-  uint32_t bitfield =
-      mmio_region_read32(base_addr, RSTMGR_SW_RST_REGWEN_REG_OFFSET);
+  return !mmio_region_read32(base_addr, get_regwen_reg_offset(peripheral));
+}
 
-  // When bit is cleared, the software reset for `peripheral` is disabled.
-  return !bitfield_bit32_read(bitfield, peripheral);
+static inline ptrdiff_t get_ctrl_n_reg_offset(dif_rstmgr_peripheral_t p) {
+#if RSTMGR_SW_RST_CTRL_N_MULTIREG_COUNT > 1
+  return RSTMGR_SW_RST_CTRL_N_0_REG_OFFSET + 4 * (ptrdiff_t)p;
+#else
+  return RSTMGR_SW_RST_CTRL_N_REG_OFFSET + 4 * (ptrdiff_t)p;
+#endif
 }
 
 /**
@@ -69,14 +109,8 @@ static bool rstmgr_software_reset_is_locked(
 static void rstmgr_software_reset_hold(mmio_region_t base_addr,
                                        dif_rstmgr_peripheral_t peripheral,
                                        bool hold) {
-  uint32_t bitfield =
-      mmio_region_read32(base_addr, RSTMGR_SW_RST_CTRL_N_REG_OFFSET);
-
-  // Clear bit to hold a `peripheral` in the reset state, and set
-  bool bit = hold ? false : true;
-  bitfield = bitfield_bit32_write(bitfield, peripheral, bit);
-
-  mmio_region_write32(base_addr, RSTMGR_SW_RST_CTRL_N_REG_OFFSET, bitfield);
+  bool value = hold ? false : true;
+  mmio_region_write32(base_addr, get_ctrl_n_reg_offset(peripheral), value);
 }
 
 /**
@@ -98,7 +132,9 @@ dif_result_t dif_rstmgr_reset(const dif_rstmgr_t *handle) {
   rstmgr_reset_info_clear(base_addr);
 
   // Set bits to stop holding all peripherals in the reset state.
-  mmio_region_write32(base_addr, RSTMGR_SW_RST_CTRL_N_REG_OFFSET, UINT32_MAX);
+  for (uint32_t i = 0; i < RSTMGR_PARAM_NUM_SW_RESETS; i++) {
+    mmio_region_write32(base_addr, get_ctrl_n_reg_offset(i), UINT32_MAX);
+  }
 
   return kDifOk;
 }
@@ -111,10 +147,7 @@ dif_result_t dif_rstmgr_reset_lock(const dif_rstmgr_t *handle,
 
   mmio_region_t base_addr = handle->base_addr;
 
-  // Clear bit to disable the software reset for the peripheral.
-  uint32_t bitfield = bitfield_bit32_write(UINT32_MAX, peripheral, false);
-
-  mmio_region_write32(base_addr, RSTMGR_SW_RST_REGWEN_REG_OFFSET, bitfield);
+  mmio_region_write32(base_addr, get_regwen_reg_offset(peripheral), 0);
 
   return kDifOk;
 }
@@ -165,6 +198,10 @@ dif_result_t dif_rstmgr_alert_info_set_enabled(const dif_rstmgr_t *handle,
 
   mmio_region_t base_addr = handle->base_addr;
 
+  if (alert_capture_is_locked(base_addr)) {
+    return kDifLocked;
+  }
+
   uint32_t enabled = (state == kDifToggleEnabled) ? 0x1 : 0x0;
 
   // This will clobber the `ALERT_INFO_CTRL.INDEX` field. However, the index
@@ -192,6 +229,17 @@ dif_result_t dif_rstmgr_alert_info_get_enabled(const dif_rstmgr_t *handle,
   return kDifOk;
 }
 
+dif_result_t dif_rstmgr_alert_info_get_size(const dif_rstmgr_t *handle,
+                                            size_t *size) {
+  if (handle == NULL || size == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_t base_addr = handle->base_addr;
+  *size = mmio_region_read32(base_addr, RSTMGR_ALERT_INFO_ATTR_REG_OFFSET);
+  return kDifOk;
+}
+
 dif_result_t dif_rstmgr_alert_info_dump_read(
     const dif_rstmgr_t *handle, dif_rstmgr_alert_info_dump_segment_t *dump,
     size_t dump_size, size_t *segments_read) {
@@ -214,7 +262,7 @@ dif_result_t dif_rstmgr_alert_info_dump_read(
       mmio_region_read32(base_addr, RSTMGR_ALERT_INFO_CTRL_REG_OFFSET);
 
   // Read the entire alert info crash dump, one 32bit data segment at the time.
-  for (int i = 0; i < dump_size_actual; ++i) {
+  for (uint32_t i = 0; i < dump_size_actual; ++i) {
     control_reg = bitfield_field32_write(control_reg,
                                          RSTMGR_ALERT_INFO_CTRL_INDEX_FIELD, i);
 
@@ -231,16 +279,104 @@ dif_result_t dif_rstmgr_alert_info_dump_read(
   return kDifOk;
 }
 
-dif_rstmgr_software_reset_result_t dif_rstmgr_software_reset(
-    const dif_rstmgr_t *handle, dif_rstmgr_peripheral_t peripheral,
-    dif_rstmgr_software_reset_t reset) {
+dif_result_t dif_rstmgr_cpu_info_set_enabled(const dif_rstmgr_t *handle,
+                                             dif_toggle_t state) {
+  if (handle == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_t base_addr = handle->base_addr;
+
+  if (cpu_capture_is_locked(base_addr)) {
+    return kDifLocked;
+  }
+
+  uint32_t enabled = (state == kDifToggleEnabled) ? 0x1 : 0x0;
+
+  // This will clobber the `CPU_INFO_CTRL.INDEX` field. However, the index
+  // field is only relevant during the crash dump read operation, and is
+  // set by the caller and not the hardware, so it is safe to clobber it.
+  mmio_region_write32(base_addr, RSTMGR_CPU_INFO_CTRL_REG_OFFSET, enabled);
+
+  return kDifOk;
+}
+
+dif_result_t dif_rstmgr_cpu_info_get_enabled(const dif_rstmgr_t *handle,
+                                             dif_toggle_t *state) {
+  if (handle == NULL || state == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_t base_addr = handle->base_addr;
+
+  uint32_t reg = mmio_region_read32(base_addr, RSTMGR_CPU_INFO_CTRL_REG_OFFSET);
+  bool enabled = bitfield_bit32_read(reg, RSTMGR_CPU_INFO_CTRL_EN_BIT);
+
+  *state = enabled ? kDifToggleEnabled : kDifToggleDisabled;
+
+  return kDifOk;
+}
+
+dif_result_t dif_rstmgr_cpu_info_get_size(const dif_rstmgr_t *handle,
+                                          size_t *size) {
+  if (handle == NULL || size == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_t base_addr = handle->base_addr;
+  *size = mmio_region_read32(base_addr, RSTMGR_CPU_INFO_ATTR_REG_OFFSET);
+  return kDifOk;
+}
+
+dif_result_t dif_rstmgr_cpu_info_dump_read(
+    const dif_rstmgr_t *handle, dif_rstmgr_cpu_info_dump_segment_t *dump,
+    size_t dump_size, size_t *segments_read) {
+  if (handle == NULL || dump == NULL || segments_read == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_t base_addr = handle->base_addr;
+
+  // The actual crash dump size (can be smaller than `dump_size`).
+  size_t dump_size_actual =
+      mmio_region_read32(base_addr, RSTMGR_CPU_INFO_ATTR_REG_OFFSET);
+
+  // Partial crash dump read is not allowed.
+  if (dump_size < dump_size_actual) {
+    return kDifError;
+  }
+
+  uint32_t control_reg =
+      mmio_region_read32(base_addr, RSTMGR_CPU_INFO_CTRL_REG_OFFSET);
+
+  // Read the entire cpu info crash dump, one 32bit data segment at the time.
+  for (uint32_t i = 0; i < dump_size_actual; ++i) {
+    control_reg = bitfield_field32_write(control_reg,
+                                         RSTMGR_CPU_INFO_CTRL_INDEX_FIELD, i);
+
+    // Set the index of the 32bit data segment to be read at `i`.
+    mmio_region_write32(base_addr, RSTMGR_CPU_INFO_CTRL_REG_OFFSET,
+                        control_reg);
+
+    // Read the cpu info crash dump 32bit data segment.
+    dump[i] = mmio_region_read32(base_addr, RSTMGR_CPU_INFO_REG_OFFSET);
+  }
+
+  *segments_read = dump_size_actual;
+
+  return kDifOk;
+}
+
+dif_result_t dif_rstmgr_software_reset(const dif_rstmgr_t *handle,
+                                       dif_rstmgr_peripheral_t peripheral,
+                                       dif_rstmgr_software_reset_t reset) {
   if (handle == NULL || peripheral >= RSTMGR_PARAM_NUM_SW_RESETS) {
-    return kDifRstmgrSoftwareResetBadArg;
+    return kDifBadArg;
   }
 
   mmio_region_t base_addr = handle->base_addr;
   if (rstmgr_software_reset_is_locked(base_addr, peripheral)) {
-    return kDifRstmgrSoftwareResetLocked;
+    return kDifLocked;
   }
 
   switch (reset) {
@@ -255,10 +391,10 @@ dif_rstmgr_software_reset_result_t dif_rstmgr_software_reset(
       rstmgr_software_reset_hold(base_addr, peripheral, false);
       break;
     default:
-      return kDifRstmgrSoftwareResetError;
+      return kDifError;
   }
 
-  return kDifRstmgrSoftwareResetOk;
+  return kDifOk;
 }
 
 dif_result_t dif_rstmgr_software_reset_is_held(
@@ -269,11 +405,9 @@ dif_result_t dif_rstmgr_software_reset_is_held(
     return kDifBadArg;
   }
 
-  uint32_t bitfield =
-      mmio_region_read32(handle->base_addr, RSTMGR_SW_RST_CTRL_N_REG_OFFSET);
-
   // When the bit is cleared - peripheral is held in reset.
-  *asserted = !bitfield_bit32_read(bitfield, peripheral);
+  *asserted =
+      !mmio_region_read32(handle->base_addr, get_ctrl_n_reg_offset(peripheral));
 
   return kDifOk;
 }
@@ -283,8 +417,28 @@ dif_result_t dif_rstmgr_software_device_reset(const dif_rstmgr_t *handle) {
     return kDifBadArg;
   }
 
-  // TODO, convert to MultiBitBool when available
-  mmio_region_write32(handle->base_addr, RSTMGR_RESET_REQ_REG_OFFSET, 0xa);
+  mmio_region_write32(handle->base_addr, RSTMGR_RESET_REQ_REG_OFFSET,
+                      kMultiBitBool4True);
 
+  return kDifOk;
+}
+
+dif_result_t dif_rstmgr_get_sw_reset_index(dt_rstmgr_t dt, dt_reset_t reset,
+                                           size_t *sw_rst_idx) {
+  size_t sw_reset_count = dt_rstmgr_sw_reset_count(dt);
+  for (*sw_rst_idx = 0; *sw_rst_idx < sw_reset_count; ++(*sw_rst_idx)) {
+    if (dt_rstmgr_sw_reset(dt, *sw_rst_idx) == reset) {
+      return kDifOk;
+    }
+  }
+  return kDifBadArg;
+}
+
+dif_result_t dif_rstmgr_fatal_err_code_get_codes(
+    const dif_rstmgr_t *rstmgr, dif_rstmgr_fatal_err_codes_t *codes) {
+  if (rstmgr == NULL || codes == NULL) {
+    return kDifBadArg;
+  }
+  *codes = mmio_region_read32(rstmgr->base_addr, RSTMGR_ERR_CODE_REG_OFFSET);
   return kDifOk;
 }

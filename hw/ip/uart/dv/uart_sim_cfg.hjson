@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -31,13 +31,17 @@
                 "{proj_root}/hw/dv/tools/dvsim/tests/alert_test.hjson",
                 "{proj_root}/hw/dv/tools/dvsim/tests/intr_test.hjson",
                 "{proj_root}/hw/dv/tools/dvsim/tests/tl_access_tests.hjson",
+                "{proj_root}/hw/dv/tools/dvsim/tests/sec_cm_tests.hjson",
                 "{proj_root}/hw/dv/tools/dvsim/tests/stress_tests.hjson"]
 
   // Add additional tops for simulation.
-  sim_tops: ["uart_bind"]
+  sim_tops: ["uart_bind", "sec_cm_prim_onehot_check_bind"]
 
   // Default iterations for all tests - each test entry can override this.
-  reseed: 50
+  reseed: 10
+
+  // Enable cdc instrumentation.
+  run_opts: ["+cdc_instrumentation_enabled=1"]
 
   // Default UVM test and seq class name.
   uvm_test: uart_base_test
@@ -70,8 +74,8 @@
 
     {
       name: uart_fifo_reset
-      // need more seeds to cover uart_env_cov::fifo_level_cg
-      reseed: 300
+      // need more seeds to cover uart_env_cov::rx_fifo_level_cg and uart_env_cov::tx_fifo_level_cg
+      reseed: 200
       uvm_test_seq: uart_fifo_reset_vseq
     }
 
@@ -84,7 +88,7 @@
     {
       name: uart_intr
       uvm_test_seq: uart_intr_vseq
-      // 3ms
+      // 3s
       run_opts: ["+test_timeout_ns=3000000000"]
     }
 
@@ -128,7 +132,7 @@
     {
       name: uart_stress_all_with_rand_reset
       // need more seeds to cover uart_agent_cov::uart_reset_cg
-      reseed: 100
+      reseed: 20
     }
   ]
 

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -57,9 +57,9 @@ class NBAssign(cst.BaseSmallStatement):
 class ImplTransformer(cst.CSTTransformer):
     '''An AST visitor used to extract documentation from the ISS'''
     def __init__(self) -> None:
-        self.impls = {}  # type: Dict[str, Sequence[cst.BaseStatement]]
+        self.impls: Dict[str, Sequence[cst.BaseStatement]] = {}
 
-        self.cur_class = None  # type: Optional[str]
+        self.cur_class: Optional[str] = None
 
     def visit_ClassDef(self, node: cst.ClassDef) -> Optional[bool]:
         assert self.cur_class is None

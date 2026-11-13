@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -105,15 +105,15 @@ module spi_readcmd
   // SFDP Base Addr: the beginning index of the SFDP region in DPSRAM
   // SFDP Depth: The size of the SFDP buffer (64 fixed in the spi_device_pkg)
   parameter sram_addr_t  SfdpBaseAddr    = spi_device_pkg::SramSfdpIdx,
-  parameter int unsigned SfdpDepth       = spi_device_pkg::SramSfdpDepth,
-
-  localparam int unsigned BufferAw = $clog2(ReadBufferDepth)
+  parameter int unsigned SfdpDepth       = spi_device_pkg::SramSfdpDepth
 ) (
   input clk_i,
   input rst_ni,
 
   input clk_out_i, // Output clock (inverted SPI_CLK)
+  input rst_out_ni, // Reset safely timed for output clock
 
+  input sys_clk_i,
   input sys_rst_ni, // System reset for buffer tracking pointers
 
   // From Command Parser
@@ -128,7 +128,6 @@ module spi_readcmd
   // Interface: SPI to Parallel
   input               s2p_valid_i,
   input spi_byte_t    s2p_byte_i,
-  input [BitCntW-1:0] s2p_bitcnt_i,
 
   // Interface: Parallel to SPI
   // Should be latched to clk_out_i
@@ -145,13 +144,17 @@ module spi_readcmd
   input logic [CmdInfoIdxW-1:0] cmd_info_idx_i,
 
   // Double buffering in bytes
-  input [BufferAw:0] readbuf_threshold_i,
+  input [SramBufferAw-1:0] readbuf_threshold_i,
+
+  // Clear read buffer address tracker.
+  input sys_readbuf_clr_i,
 
   // The command mode is 4B mode. Every read command receives 4B address
   input addr_4b_en_i,
 
   // Features
   input mailbox_en_i,
+  input cfg_intercept_en_mbx_i, // Intercept
 
   // Mailbox Address base address
   // Only allow compile-time fixed size (1kB by default)
@@ -168,43 +171,35 @@ module spi_readcmd
   output io_mode_e io_mode_o,
 
   // Read watermark event occurs when current address exceeds the threshold cfg
-  // value for the first time after hit the current read buffer (1kB granularity).
-  output read_watermark_o
+  // value for the first time after hit the current read buffer (1kB
+  // granularity).
+  //
+  // These signals are pulse signals.
+  output logic sck_read_watermark_o,
+  output logic sck_read_flip_o
 
 );
 
   logic unused_p2s_sent ;
   assign unused_p2s_sent = p2s_sent_i;
 
-  spi_mode_e unused_spi_mode ; // will be used for passthrough for output enable
-  assign unused_spi_mode = spi_mode_i;
-
-  // TODO: Implement
-  assign mailbox_assumed_o = 1'b 0;
-
   sram_err_t unused_sram_rerr;
   assign unused_sram_rerr = sram_m2l_i.rerror;
 
-  // TODO: Implement cmd_info
   logic unused_cmd_info_idx;
   assign unused_cmd_info_idx = ^cmd_info_idx_i;
 
   logic unused_cmd_info_members;
   assign unused_cmd_info_members = ^{
-    cmd_info_i.addr_en,       // Always assume Readcmd has addr_en set
-    cmd_info_i.addr_swap_en,  // address swap feature is used in Passthrough
-    cmd_info_i.opcode,        // Does not need to check opcode. (fixed slot)
-    cmd_info_i.payload_dir,   // Always output mode
+    cmd_info_i.valid,           // cmdparse checks the valid bit
+    cmd_info_i.addr_swap_en,    // address swap feature is used in Passthrough
+    cmd_info_i.opcode,          // Does not need to check opcode. (fixed slot)
+    cmd_info_i.payload_dir,     // Always output mode
+    cmd_info_i.payload_swap_en, // Used in passthrough mode only
+    cmd_info_i.read_pipeline_mode,
     cmd_info_i.upload,
     cmd_info_i.busy
     };
-
-  `ASSERT(ValidCmdConfig_A,
-          main_st == MainAddress |-> cmd_info_i.addr_en
-          && cmd_info_i.payload_dir == PayloadOut)
-
-  logic unused_s2p_bitcnt;
-  assign unused_s2p_bitcnt = ^s2p_bitcnt_i;
 
   /////////////////
   // Definitions //
@@ -266,20 +261,29 @@ module spi_readcmd
   } main_st_e;
   main_st_e main_st, main_st_d;
 
+  `ASSERT(ValidCmdConfig_A,
+          main_st == MainAddress |-> (cmd_info_i.addr_mode != AddrDisabled &&
+                                      cmd_info_i.payload_dir == PayloadOut &&
+                                      cmd_info_i.valid))
+
   /////////////
   // Signals //
   /////////////
+
+  // Address mode in cmd_info
+  addr_mode_e cmdinfo_addr_mode;
 
   // Address shift & latch
   logic addr_ready_in_word, addr_ready_in_halfword;
   logic addr_latched;
   logic addr_shift_en;
   logic addr_latch_en;
-  logic addr_inc; // increase address by 1 word
+  logic addr_inc; // increase address by 1 byte. Used to track the current addr
   // Address size is latched when the state machine moves to the MainAddress
-  // state based on the cmd_info.addr_4b_affected and addr_4b_en_i
+  // state based on the cmd_info.addr_mode and addr_4b_en_i
   logic [4:0] addr_cnt_d, addr_cnt_q;
   logic addr_cnt_set; // no need to clear the counter
+  logic addr_latched_d;
 
   logic [31:0] addr_q, addr_d;
 
@@ -289,6 +293,11 @@ module spi_readcmd
   // readbuf_addr is to track the Read command address which does not fall
   // into SFDP, Mailbox.
   logic [31:0] readbuf_addr;
+  // Read Buffer update: addr_latch_en at the last addr beat & addr_inc
+  logic readbuf_update;
+  // When FSM is about to move to Output state, FSM triggers readbuf to operate.
+  logic readbuf_start;
+
 
   // Dummy counter
   logic dummycnt_eq_zero;
@@ -301,12 +310,9 @@ module spi_readcmd
   // Compare addr_d[SramAw-1:2] and mailbox_addr_i with mailbox_mask_i. If the
   // value falls into mailbox, set this.  Even this is set, it only uses when
   // sram address is sent.
-  logic addr_in_mailbox;
+  logic addr_d_in_mailbox, addr_q_in_mailbox;
 
-  logic [31:0] mailbox_masked_addr;
-
-  // TODO: implement
-  // logic [31:0] buffer_masked_addr;
+  logic [31:0] mailbox_masked_addr_d, mailbox_masked_addr_q;
 
   // Double buffering signals
   logic readbuf_idx; // 0 or 1
@@ -327,8 +333,12 @@ module spi_readcmd
   logic sfdp_hit;
   assign sfdp_hit = sel_dp_i == DpReadSFDP;
 
-  // Indication of data output phase
-  logic output_start;
+  // Events: watermark, flip
+  logic read_watermark, read_flip;
+
+  // SPI Mode
+  logic  spid_in_flashmode;
+  assign spid_in_flashmode = (spi_mode_i == FlashMode);
 
   //////////////
   // Datapath //
@@ -348,28 +358,37 @@ module spi_readcmd
     end
   end
 
+  // readbuf_addr is visible to SW after CSb is de-asserted. (last_read_addr)
+  //
+  // It indicates the last byte address the host read.
+  // To precisely represent the last byte:
+  //
+  // - the logic does not latch address field (not yet read the byte)
+  // - the logic latches `addr_q` at the last beat. But compare `addr_q` to
+  //   mailbox address.
   always_ff @(posedge clk_i or negedge sys_rst_ni) begin
     if (!sys_rst_ni) begin
       readbuf_addr <= '0;
-    end else if (addr_latch_en && sel_dp_i == DpReadCmd
-                 && !(mailbox_en_i && addr_in_mailbox)) begin
-      readbuf_addr <= addr_d;
+    end else if ((main_st == MainOutput) && (sel_dp_i == DpReadCmd)
+      && addr_latch_en && !(mailbox_en_i && addr_q_in_mailbox)
+      && spid_in_flashmode) begin
+      readbuf_addr <= addr_q;
     end
   end
+
   assign readbuf_address_o = readbuf_addr;
 
   always_comb begin
     addr_d = addr_q; // default value. In 3B mode, upper most byte is 0
     addr_latch_en = 1'b0;
 
-    // TODO: Handle the case of IO command
     if (addr_ready_in_word) begin
       // Return word based address, but should not latch
-      addr_d = {addr_q[31:8], s2p_byte_i[5:0], 2'b00};
+      addr_d = {addr_q[23:0], s2p_byte_i[5:0], 2'b00};
     end else if (addr_ready_in_halfword) begin
       // When addr is a cycle earlier than full addr, sram req sent in
       // spid_readsram
-      addr_d = {addr_q[31:8], s2p_byte_i[6:0], 1'b 0};
+      addr_d = {addr_q[23:0], s2p_byte_i[6:0], 1'b 0};
     end else if (addr_shift_en && s2p_valid_i) begin
       // Latch
       addr_d = {addr_q[23:0], s2p_byte_i[7:0]};
@@ -381,11 +400,29 @@ module spi_readcmd
     end
   end
 
+  // BEGIN: Address Count =====================================================
+  // addr_cnt is to track the current shifted bit position in the address field
   assign addr_ready_in_word     = (addr_cnt_d == 5'd 2);
   assign addr_ready_in_halfword = (addr_cnt_d == 5'd 1);
 
-  // TODO: Check if addr_cnt_d or addr_cnt_q ?
-  assign addr_latched = (addr_cnt_d == 5'd 0);
+  // addr_latched should be a pulse to be used in spid_readsram
+  assign addr_latched_d = (addr_cnt_d == 5'd 0);
+
+  prim_edge_detector #(
+    .Width      (1),
+    .ResetValue (1'b 0),
+    .EnSync     (1'b 0)
+  ) u_addr_latch_pulse (
+    .clk_i,
+    .rst_ni,
+
+    .d_i               (addr_latched_d),
+    .q_sync_o          (              ),
+    .q_posedge_pulse_o (addr_latched  ),
+    .q_negedge_pulse_o (              )
+  );
+
+  assign cmdinfo_addr_mode = get_addr_mode(cmd_info_i.addr_mode, addr_4b_en_i);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -399,16 +436,13 @@ module spi_readcmd
     addr_cnt_d = addr_cnt_q;
     if (addr_cnt_set) begin
       // Set to the addr size based on cmd_info_i
-      // If addr_4b_affected && addr_4b_en, then 32, if not, 24
+      // If addr_mode && addr_4b_en is Addr4B, then 32, if not, 24
       // addr_cnt_d starts from the max -1. As addr_cnt_set is asserted when
       // FSM moves from Reset to Address. At that time of the transition, the
       // datapath should latch the Address[31] or Address[23] too. So, it
       // already counts one beat.
-      addr_cnt_d = (cmd_info_i.addr_4b_affected && addr_4b_en_i) ? 5'd 30 : 5'd 22;
+      addr_cnt_d = (cmdinfo_addr_mode == Addr4B) ? 5'd 31 : 5'd 23;
 
-      // TODO: Dual IO/ Quad IO case
-
-      // TODO: Force 4B mode
     end else if (addr_cnt_q == '0) begin
       addr_cnt_d = addr_cnt_q;
     end else if (addr_shift_en) begin
@@ -416,6 +450,7 @@ module spi_readcmd
       addr_cnt_d = addr_cnt_q - 1'b 1;
     end
   end
+  // END:   Address Count -----------------------------------------------------
 
   // Dummy Counter
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -459,16 +494,36 @@ module spi_readcmd
   localparam int unsigned MailboxAw = $clog2(MailboxDepth);
   localparam logic [31:0] MailboxMask = {{30-MailboxAw{1'b1}}, {2+MailboxAw{1'b0}}};
 
-  assign mailbox_masked_addr = addr_d & MailboxMask;
+  assign mailbox_masked_addr_d = addr_d & MailboxMask;
+  assign mailbox_masked_addr_q = addr_q & MailboxMask;
 
   // Only valid when logic sends SRAM request
-  assign addr_in_mailbox = (mailbox_masked_addr == mailbox_addr_i);
+  assign addr_d_in_mailbox = (mailbox_masked_addr_d == mailbox_addr_i);
+  assign addr_q_in_mailbox = (mailbox_masked_addr_q == mailbox_addr_i);
 
   // internal addr is the address that the logic tracks.
   // the first address comes from host system and then the internal logic
   // manages the address to follow.
 
   logic sram_req;
+
+  // Check if mailbox and intercept config, then raises mailbox_assumed.
+  // The signal shall be registered in SCK in.
+  // Then, spi_device top will latch to SCK out
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) mailbox_assumed_o <= 1'b 0;
+    else if (sram_req && mailbox_en_i && cfg_intercept_en_mbx_i
+            && addr_d_in_mailbox) begin
+      mailbox_assumed_o <= 1'b 1;
+    end else if (mailbox_en_i && cfg_intercept_en_mbx_i
+                && addr_d_in_mailbox && (bitcnt == 3'h 0)) begin
+      // Keep checking if the next byte falls into the mailbox region
+      mailbox_assumed_o <= 1'b 1;
+    end else if (!addr_d_in_mailbox && (bitcnt == 3'h 0)) begin
+      // At every byte, Check the address goes out of mailbox region.
+      mailbox_assumed_o <= 1'b 0;
+    end
+  end
   //- END:   SRAM Datapath ----------------------------------------------------
 
   //= BEGIN: FIFO to P2S datapath =============================================
@@ -476,8 +531,8 @@ module spi_readcmd
 
   // outclk latch
   // can't put async fifo. DC constraint should have half clk datapath
-  always_ff @(posedge clk_out_i or negedge rst_ni) begin
-    if (!rst_ni) begin
+  always_ff @(posedge clk_out_i or negedge rst_out_ni) begin
+    if (!rst_out_ni) begin
       p2s_valid_o <= 1'b 0;
       p2s_byte_o  <= '0 ;
     end else begin
@@ -508,7 +563,6 @@ module spi_readcmd
   end
 
   // readbuf_flip
-  // TODO: implement. Below is temporary.
   assign readbuf_flip = (main_st == MainOutput && addr_q[9:0] == '1);
 
   //- END:   Double Buffering -------------------------------------------------
@@ -545,7 +599,8 @@ module spi_readcmd
 
     io_mode_o = SingleIO;
 
-    output_start = 1'b 0;
+    readbuf_start  = 1'b 0;
+    readbuf_update = 1'b 0;
 
     unique case (main_st)
       MainReset: begin
@@ -561,7 +616,6 @@ module spi_readcmd
       MainAddress: begin
         addr_shift_en = 1'b 1;
 
-        // TODO: DualIO/ QuadIO case
         if (addr_ready_in_word) begin
           sram_req = 1'b 1;
         end
@@ -579,6 +633,8 @@ module spi_readcmd
             2'b 00: begin
               // Moves to Output directly
               main_st_d = MainOutput;
+              readbuf_start  = 1'b 1;
+              readbuf_update = 1'b 1;
             end
 
             2'b 01: begin
@@ -591,8 +647,6 @@ module spi_readcmd
             2'b 1?: begin
               // Regardless of Dummy
               main_st_d = MainMByte;
-
-              // TODO: Set MByte latency (3 or 1)
             end
 
             default: begin
@@ -613,13 +667,13 @@ module spi_readcmd
       MainDummy: begin
         if (dummycnt_eq_zero) begin
           main_st_d = MainOutput;
+          readbuf_start  = 1'b 1;
+          readbuf_update = 1'b 1;
         end
       end
 
       MainOutput: begin
         bitcnt_dec = 1'b 1;
-
-        output_start = 1'b 1;
 
         // Note: p2s accepts the byte and latch inside at the first beat.
         // So, it is safe to change the data at the next cycle.
@@ -636,9 +690,14 @@ module spi_readcmd
         endcase
 
         if (bitcnt == 3'h 0) begin
+          // Increase addr by 1 byte
+          addr_inc = 1'b 1;
+
+          // When address is begin updated, ask readbuf to update the state too
+          readbuf_update = 1'b 1;
+
           // sent all words
           bitcnt_update = 1'b 1;
-          // TODO: FIFO pop here?
           fifo_pop = 1'b 1;
         end
       end
@@ -653,6 +712,14 @@ module spi_readcmd
     endcase
   end
   //- END:   Main state machine -----------------------------------------------
+
+  // Events: register
+  // watermark, flip are pulse signals. watermark pulse width is 1 SCK.
+  // flip pulse width varies inside readbuffer and changed into 1 SCK width.
+  // They are not registered (output of comb logic).
+  // As these signals goes into prim_pulse_sync, no need to register here.
+  assign sck_read_watermark_o = read_watermark;
+  assign sck_read_flip_o      = read_flip;
 
   ///////////////
   // Instances //
@@ -671,10 +738,11 @@ module spi_readcmd
 
     .sram_read_req_i   (sram_req),
     .addr_latched_i    (addr_latched),
-    .current_address_i (addr_d), // TODO: Change it
+    .current_address_i (addr_d),
 
     .mailbox_en_i,
-    .mailbox_hit_i (addr_in_mailbox),
+    .mailbox_addr_i,
+
     .sfdp_hit_i    (sel_dp_i == DpReadSFDP),
 
     .sram_l2m_o,
@@ -687,25 +755,29 @@ module spi_readcmd
   );
 
   // Double Buffer Management logic
-  spid_readbuffer #(
-    .ReadBufferDepth (ReadBufferDepth)
-  ) u_readbuffer (
+  spid_readbuffer u_readbuffer (
     .clk_i,
     .rst_ni,
 
+    .sys_clk_i,
     .sys_rst_ni,
+    .sys_clr_i (sys_readbuf_clr_i),
+
+    .spi_mode_i,
 
     .current_address_i (addr_d),
     .threshold_i       (readbuf_threshold_i),
 
     .sfdp_hit_i    (sfdp_hit),
-    .mailbox_hit_i (addr_in_mailbox),
+    .mailbox_hit_i (addr_d_in_mailbox),
     .mailbox_en_i  (mailbox_en_i),
 
-    .start_i (output_start),
+    .start_i (readbuf_start),
 
-    .event_watermark_o (read_watermark_o),
-    .event_flip_o      ()
+    .address_update_i (readbuf_update),
+
+    .event_watermark_o (read_watermark),
+    .event_flip_o      (read_flip)
   );
 
   ////////////////

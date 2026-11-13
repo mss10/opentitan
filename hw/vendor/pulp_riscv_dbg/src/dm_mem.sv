@@ -1,4 +1,10 @@
-/* Copyright 2018 ETH Zurich and University of Bologna.
+/*
+* Copyright lowRISC contributors (OpenTitan project).
+*
+* Conversion to CHERIoT Ibex ISA from RISC-V
+*   Copyright SCI Semiconductor 2025
+*
+* Copyright 2018 ETH Zurich and University of Bologna.
 * Copyright and related rights are licensed under the Solderpad Hardware
 * License, Version 0.51 (the “License”); you may not use this file except in
 * compliance with the License.  You may obtain a copy of the License at
@@ -20,12 +26,17 @@ module dm_mem #(
   parameter int unsigned        NrHarts          =  1,
   parameter int unsigned        BusWidth         = 32,
   parameter logic [NrHarts-1:0] SelectableHarts  = {NrHarts{1'b1}},
-  parameter int unsigned        DmBaseAddress    = '0
+  parameter int unsigned        DmBaseAddress    = '0,
+  parameter bit                 CheriotSupport   = 1'b0,
+  localparam int unsigned       BeWidth          = BusWidth/8
 ) (
   input  logic                             clk_i,       // Clock
   input  logic                             rst_ni,      // debug module reset
 
   output logic [NrHarts-1:0]               debug_req_o,
+  // Select CHERIoT mode
+  input  prim_mubi_pkg::mubi4_t            cheriot_enable_i,
+  input  logic                             ndmreset_i,
   input  logic [19:0]                      hartsel_i,
   // from Ctrl and Status register
   input  logic [NrHarts-1:0]               haltreq_i,
@@ -54,8 +65,9 @@ module dm_mem #(
   input  logic                             we_i,
   input  logic [BusWidth-1:0]              addr_i,
   input  logic [BusWidth-1:0]              wdata_i,
-  input  logic [BusWidth/8-1:0]            be_i,
-  output logic [BusWidth-1:0]              rdata_o
+  input  logic [BeWidth-1:0]               be_i,
+  output logic [BusWidth-1:0]              rdata_o,
+  output logic                             err_o
 );
   localparam int unsigned DbgAddressBits = 12;
   localparam int unsigned HartSelLen     = (NrHarts == 1) ? 1 : $clog2(NrHarts);
@@ -77,11 +89,23 @@ module dm_mem #(
   localparam logic [DbgAddressBits-1:0] FlagsEndAddr  = 'h7FF;
 
   localparam logic [DbgAddressBits-1:0] HaltedAddr    = 'h100;
-  localparam logic [DbgAddressBits-1:0] GoingAddr     = 'h104;
-  localparam logic [DbgAddressBits-1:0] ResumingAddr  = 'h108;
-  localparam logic [DbgAddressBits-1:0] ExceptionAddr = 'h10C;
+  localparam logic [DbgAddressBits-1:0] GoingAddr     = 'h108;
+  localparam logic [DbgAddressBits-1:0] ResumingAddr  = 'h110;
+  localparam logic [DbgAddressBits-1:0] ExceptionAddr = 'h118;
 
-  logic [dm::ProgBufSize/2-1:0][63:0]   progbuf;
+  localparam logic [DbgAddressBits-1:0] RomBaseAddr   = dm::HaltAddress;
+  // The size is arbitrarily set to 0x800, so as to make the dm_space exactly 0x900 long. This is
+  // more than eough to cover the 19 x 64bit = 0x98 bytes currenty allocated in the debug ROM.
+  localparam logic [DbgAddressBits-1:0] RomEndAddr    = dm::HaltAddress + 'h7FF;
+  // Prog buff size after repacking the 32bit array into a 64bit array.
+  localparam int unsigned ProgBuf64Size = dm::ProgBufSize / 2;
+  localparam int unsigned ProgBuf64AddrSize = $clog2(ProgBuf64Size);
+
+  // CHERIoT mode, only when the CHERIoT ROM is present.
+  prim_mubi_pkg::mubi4_t cheriot_mode;
+  assign cheriot_mode = CheriotSupport ? cheriot_enable_i : prim_mubi_pkg::MuBi4False;
+
+  logic [ProgBuf64Size-1:0][63:0] progbuf;
   logic [7:0][63:0]   abstract_cmd;
   logic [NrHarts-1:0] halted_d, halted_q;
   logic [NrHarts-1:0] resuming_d, resuming_q;
@@ -89,6 +113,17 @@ module dm_mem #(
 
   logic exception;
   logic unsupported_command;
+
+  // Largest Access Register size accepted right now, in the same encoding as MaxAar:
+  // 3 means up to 32 bit, 4 means up to 64 bit.
+  //
+  // aarsize == 3 asks for a 64 bit register transfer, and two independent things can make that
+  // meaningful. One is a 64 bit register path, which MaxAar already describes statically from
+  // BusWidth. The other is CHERIoT mode, where the 64 bit encodings move a capability's address
+  // and metadata together on an otherwise 32 bit machine, and are how a debugger reaches
+  // capability metadata at all.
+  logic [31:0] max_aar;
+  assign max_aar = prim_mubi_pkg::mubi4_test_true_strict(cheriot_mode) ? 32'd4 : 32'(MaxAar);
 
   logic [63:0] rom_rdata;
   logic [63:0] rdata_d, rdata_q;
@@ -201,6 +236,13 @@ module dm_mem #(
       cmderror_valid_o = 1'b1;
       cmderror_o = dm::CmdErrorException;
     end
+
+    if (ndmreset_i) begin
+      // Clear state of hart and its control signals when it is being reset.
+      state_d = Idle;
+      go      = 1'b0;
+      resume  = 1'b0;
+    end
   end
 
   // word mux for 32bit and 64bit buses
@@ -214,16 +256,16 @@ module dm_mem #(
   end
 
   // read/write logic
-  logic [63:0] data_bits;
+  logic [dm::DataCount-1:0][31:0] data_bits;
   logic [7:0][7:0] rdata;
-  always_comb begin : p_rw_logic
+  always_comb (* xprop_off *) begin : p_rw_logic
 
     halted_d_aligned   = NrHartsAligned'(halted_q);
     resuming_d_aligned = NrHartsAligned'(resuming_q);
     rdata_d        = rdata_q;
-    // convert the data in bits representation
     data_bits      = data_i;
     rdata          = '0;
+    fwd_rom_d      = 1'b0;
 
     // write data in csr register
     data_valid_o   = 1'b0;
@@ -258,13 +300,24 @@ module dm_mem #(
           // core can write data registers
           [DataBaseAddr:DataEndAddr]: begin
             data_valid_o = 1'b1;
-            for (int i = 0; i < $bits(be_i); i++) begin
-              if (be_i[i]) begin
-                data_bits[i*8+:8] = wdata_i[i*8+:8];
+            for (int unsigned dc = 0; dc < dm::DataCount; dc++) begin
+              if ((addr_i[DbgAddressBits-1:2] - DataBaseAddr[DbgAddressBits-1:2]) == dc) begin
+                for (int unsigned i = 0; i < $bits(be_i); i++) begin
+                  if (be_i[i]) begin
+                    if (i>3) begin // for upper 32bit data write (only used for BusWidth ==  64)
+                      // ensure we write to an implemented data register
+                      if (dc < (dm::DataCount - 1)) begin
+                        data_bits[dc+1][(i-4)*8+:8] = wdata_i[i*8+:8];
+                      end
+                    end else begin // for lower 32bit data write
+                      data_bits[dc][i*8+:8] = wdata_i[i*8+:8];
+                    end
+                  end
+                end
               end
             end
           end
-          default ;
+          default: ;
         endcase
 
       // this is a read
@@ -293,16 +346,17 @@ module dm_mem #(
 
           [DataBaseAddr:DataEndAddr]: begin
             rdata_d = {
-                      data_i[$clog2(dm::ProgBufSize)'(addr_i[DbgAddressBits-1:3] -
-                          DataBaseAddr[DbgAddressBits-1:3] + 1'b1)],
-                      data_i[$clog2(dm::ProgBufSize)'(addr_i[DbgAddressBits-1:3] -
-                          DataBaseAddr[DbgAddressBits-1:3])]
+                      data_i[$clog2(dm::DataCount)'(((addr_i[DbgAddressBits-1:3]
+                                                      - DataBaseAddr[DbgAddressBits-1:3]) << 1)
+                                                    + 1'b1)],
+                      data_i[$clog2(dm::DataCount)'(((addr_i[DbgAddressBits-1:3]
+                                                      - DataBaseAddr[DbgAddressBits-1:3]) << 1))]
                       };
           end
 
           [ProgBufBaseAddr:ProgBufEndAddr]: begin
-            rdata_d = progbuf[$clog2(dm::ProgBufSize)'(addr_i[DbgAddressBits-1:3] -
-                          ProgBufBaseAddr[DbgAddressBits-1:3])];
+            rdata_d = progbuf[ProgBuf64AddrSize'(addr_i[DbgAddressBits-1:3] -
+                                                 ProgBufBaseAddr[DbgAddressBits-1:3])];
           end
 
           // two slots for abstract command
@@ -320,13 +374,89 @@ module dm_mem #(
             end
             rdata_d = rdata;
           end
+          // Access has to be forwarded to the ROM. The ROM starts at the HaltAddress of the core
+          // e.g.: it immediately jumps to the ROM base address.
+          [RomBaseAddr:RomEndAddr]: begin
+            fwd_rom_d = 1'b1;
+          end
           default: ;
         endcase
       end
     end
 
+    if (ndmreset_i) begin
+      // When harts are reset, they are neither halted nor resuming.
+      halted_d_aligned   = '0;
+      resuming_d_aligned = '0;
+    end
+
     data_o = data_bits;
   end
+
+  // This flags subword writes that are shorter than the defined width of the register.
+  // Other writes are ignored.
+  function automatic logic gen_wr_err(logic we, logic [BeWidth-1:0] be, logic [BeWidth-1:0] mask);
+    return we && (|(~be & mask));
+  endfunction
+
+  // Relevant bus error cases
+  // - access unmapped address
+  // - write a CSR with unaligned address, e.g. `a_address[1:0] != 0`
+  // - write a CSR less than its width, e.g. when CSR is 2 bytes wide, only write 1 byte
+  // - write a RO (read-only) memory
+  localparam logic[BeWidth-1:0] FullRegMask = {BeWidth{1'b1}};
+  localparam logic[BeWidth-1:0] OneBitMask  = BeWidth'(1'b1);
+  localparam logic[BeWidth-1:0] HartSelMask = BeWidth'(2**HartSelLen-1);
+  logic err_d, err_q;
+  always_comb begin
+    err_d = 1'b0;
+    if (req_i) begin
+      unique case (addr_i[DbgAddressBits-1:0]) inside
+        WhereToAddr:                              err_d = gen_wr_err(we_i, be_i, FullRegMask);
+        HaltedAddr:                               err_d = gen_wr_err(we_i, be_i, HartSelMask);
+        GoingAddr:                                err_d = gen_wr_err(we_i, be_i, OneBitMask);
+        ResumingAddr:                             err_d = gen_wr_err(we_i, be_i, HartSelMask);
+        ExceptionAddr:                            err_d = gen_wr_err(we_i, be_i, OneBitMask);
+        [DataBaseAddr:DataEndAddr]:               err_d = gen_wr_err(we_i, be_i, FullRegMask);
+        [ProgBufBaseAddr:ProgBufEndAddr]:         err_d = gen_wr_err(we_i, be_i, FullRegMask);
+        [AbstractCmdBaseAddr:AbstractCmdEndAddr]: err_d = gen_wr_err(we_i, be_i, FullRegMask);
+        [FlagsBaseAddr:FlagsEndAddr]:             err_d = gen_wr_err(we_i, be_i, FullRegMask);
+        [RomBaseAddr:RomEndAddr]:                 err_d = we_i; // Writing ROM area always errors.
+        default: err_d = 1'b1;
+      endcase
+      // Unaligned accesses
+      if (addr_i[$clog2(BeWidth)-1:0] != '0) begin
+        err_d = 1'b1;
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_err_reg
+    if (!rst_ni) begin
+      err_q <= 1'b0;
+    end else begin
+      err_q <= err_d;
+    end
+  end
+
+  assign err_o = err_q;
+
+  // Access to the debug scratch registers, which the abstract command sequences use to spill and
+  // restore the two GPRs they need. In CHERIoT mode these are Special Capability Registers reached
+  // with CSpecialRW rather than CSRs reached with CSRRW.
+  function automatic logic [31:0] scratch_write(prim_mubi_pkg::mubi4_t cap_mode, logic scratch1,
+                                                logic [4:0] rs1);
+    return prim_mubi_pkg::mubi4_test_true_strict(cap_mode) ?
+           dm::cspecialw(scratch1 ? dm::SCR_DSCRATCHC1 : dm::SCR_DSCRATCHC0, rs1) :
+           dm::csrw(scratch1 ? dm::CSR_DSCRATCH1 : dm::CSR_DSCRATCH0, rs1);
+  endfunction
+
+  function automatic logic [31:0] scratch_read(prim_mubi_pkg::mubi4_t cap_mode, logic scratch1,
+                                               logic [4:0] dest);
+    return prim_mubi_pkg::mubi4_test_true_strict(cap_mode) ?
+           dm::cspecialr(scratch1 ? dm::SCR_DSCRATCHC1 : dm::SCR_DSCRATCHC0, dest) :
+           dm::csrr(scratch1 ? dm::CSR_DSCRATCH1 : dm::CSR_DSCRATCH0, dest);
+  endfunction
 
   always_comb begin : p_abstract_cmd_rom
     // this abstract command is currently unsupported
@@ -343,7 +473,8 @@ module dm_mem #(
     abstract_cmd[2][63:32] = dm::nop();
     abstract_cmd[3][31:0]  = dm::nop();
     abstract_cmd[3][63:32] = dm::nop();
-    abstract_cmd[4][31:0]  = HasSndScratch ? dm::csrr(dm::CSR_DSCRATCH1, 5'd10) : dm::nop();
+    abstract_cmd[4][31:0]  = HasSndScratch ? scratch_read(cheriot_mode, 1'b1, 5'd10)
+                                           : dm::nop();
     abstract_cmd[4][63:32] = dm::ebreak();
     abstract_cmd[7:5]      = '0;
 
@@ -353,9 +484,10 @@ module dm_mem #(
       // Access Register
       // --------------------
       dm::AccessRegister: begin
-        if (32'(ac_ar.aarsize) < MaxAar && ac_ar.transfer && ac_ar.write) begin
+        if (32'(ac_ar.aarsize) < max_aar && ac_ar.transfer && ac_ar.write) begin
           // store a0 in dscratch1
-          abstract_cmd[0][31:0] = HasSndScratch ? dm::csrw(dm::CSR_DSCRATCH1, 5'd10) : dm::nop();
+          abstract_cmd[0][31:0] = HasSndScratch ? scratch_write(cheriot_mode, 1'b1, 5'd10)
+                                                : dm::nop();
           // this range is reserved
           if (ac_ar.regno[15:14] != '0) begin
             abstract_cmd[0][31:0] = dm::ebreak(); // we leave asap
@@ -365,13 +497,13 @@ module dm_mem #(
           end else if (HasSndScratch && ac_ar.regno[12] && (!ac_ar.regno[5]) &&
                       (ac_ar.regno[4:0] == 5'd10)) begin
             // store s0 in dscratch
-            abstract_cmd[2][31:0]  = dm::csrw(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[2][31:0]  = scratch_write(cheriot_mode, 1'b0, 5'd8);
             // load from data register
             abstract_cmd[2][63:32] = dm::load(ac_ar.aarsize, 5'd8, LoadBaseAddr, dm::DataAddr);
             // and store it in the corresponding CSR
-            abstract_cmd[3][31:0]  = dm::csrw(dm::CSR_DSCRATCH1, 5'd8);
+            abstract_cmd[3][31:0]  = scratch_write(cheriot_mode, 1'b1, 5'd8);
             // restore s0 again from dscratch
-            abstract_cmd[3][63:32] = dm::csrr(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[3][63:32] = scratch_read(cheriot_mode, 1'b0, 5'd8);
           // GPR/FPR access
           end else if (ac_ar.regno[12]) begin
             // determine whether we want to access the floating point register or not
@@ -386,18 +518,28 @@ module dm_mem #(
           end else begin
             // data register to CSR
             // store s0 in dscratch
-            abstract_cmd[2][31:0]  = dm::csrw(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[2][31:0]  = scratch_write(cheriot_mode, 1'b0, 5'd8);
             // load from data register
             abstract_cmd[2][63:32] = dm::load(ac_ar.aarsize, 5'd8, LoadBaseAddr, dm::DataAddr);
-            // and store it in the corresponding CSR
-            abstract_cmd[3][31:0]  = dm::csrw(dm::csr_reg_t'(ac_ar.regno[11:0]), 5'd8);
+            // and store it in the corresponding CSR or SCR for 64 bit transfers in CHERIoT.
+            if (prim_mubi_pkg::mubi4_test_true_strict(cheriot_mode) &&
+                32'(ac_ar.aarsize) == 32'd3) begin
+              abstract_cmd[3][31:0] = dm::cspecialw(ac_ar.regno[4:0], 5'd8);
+              // Only regno 0x0-0x1f name an SCR.
+              if (ac_ar.regno[11:5] != '0) begin
+                abstract_cmd[0][31:0] = dm::ebreak(); // we leave asap
+                unsupported_command = 1'b1;
+              end
+            end else begin
+              abstract_cmd[3][31:0] = dm::csrw(dm::csr_reg_t'(ac_ar.regno[11:0]), 5'd8);
+            end
             // restore s0 again from dscratch
-            abstract_cmd[3][63:32] = dm::csrr(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[3][63:32] = scratch_read(cheriot_mode, 1'b0, 5'd8);
           end
-        end else if (32'(ac_ar.aarsize) < MaxAar && ac_ar.transfer && !ac_ar.write) begin
+        end else if (32'(ac_ar.aarsize) < max_aar && ac_ar.transfer && !ac_ar.write) begin
           // store a0 in dscratch1
           abstract_cmd[0][31:0]  = HasSndScratch ?
-                                   dm::csrw(dm::CSR_DSCRATCH1, LoadBaseAddr) :
+                                   scratch_write(cheriot_mode, 1'b1, LoadBaseAddr) :
                                    dm::nop();
           // this range is reserved
           if (ac_ar.regno[15:14] != '0) begin
@@ -408,13 +550,13 @@ module dm_mem #(
           end else if (HasSndScratch && ac_ar.regno[12] && (!ac_ar.regno[5]) &&
                       (ac_ar.regno[4:0] == 5'd10)) begin
             // store s0 in dscratch
-            abstract_cmd[2][31:0]  = dm::csrw(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[2][31:0]  = scratch_write(cheriot_mode, 1'b0, 5'd8);
             // read value from CSR into s0
-            abstract_cmd[2][63:32] = dm::csrr(dm::CSR_DSCRATCH1, 5'd8);
+            abstract_cmd[2][63:32] = scratch_read(cheriot_mode, 1'b1, 5'd8);
             // and store s0 into data section
             abstract_cmd[3][31:0]  = dm::store(ac_ar.aarsize, 5'd8, LoadBaseAddr, dm::DataAddr);
             // restore s0 again from dscratch
-            abstract_cmd[3][63:32] = dm::csrr(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[3][63:32] = scratch_read(cheriot_mode, 1'b0, 5'd8);
           // GPR/FPR access
           end else if (ac_ar.regno[12]) begin
             // determine whether we want to access the floating point register or not
@@ -429,15 +571,25 @@ module dm_mem #(
           end else begin
             // CSR register to data
             // store s0 in dscratch
-            abstract_cmd[2][31:0]  = dm::csrw(dm::CSR_DSCRATCH0, 5'd8);
-            // read value from CSR into s0
-            abstract_cmd[2][63:32] = dm::csrr(dm::csr_reg_t'(ac_ar.regno[11:0]), 5'd8);
+            abstract_cmd[2][31:0]  = scratch_write(cheriot_mode, 1'b0, 5'd8);
+            // read value from CSR into s0, or from SCR for 64 bit transfer in CHERIoT.
+            if (prim_mubi_pkg::mubi4_test_true_strict(cheriot_mode) &&
+                32'(ac_ar.aarsize) == 32'd3) begin
+              abstract_cmd[2][63:32] = dm::cspecialr(ac_ar.regno[4:0], 5'd8);
+              // Only regno 0x0-0x1f name an SCR.
+              if (ac_ar.regno[11:5] != '0) begin
+                abstract_cmd[0][31:0] = dm::ebreak(); // we leave asap
+                unsupported_command = 1'b1;
+              end
+            end else begin
+              abstract_cmd[2][63:32] = dm::csrr(dm::csr_reg_t'(ac_ar.regno[11:0]), 5'd8);
+            end
             // and store s0 into data section
             abstract_cmd[3][31:0]  = dm::store(ac_ar.aarsize, 5'd8, LoadBaseAddr, dm::DataAddr);
             // restore s0 again from dscratch
-            abstract_cmd[3][63:32] = dm::csrr(dm::CSR_DSCRATCH0, 5'd8);
+            abstract_cmd[3][63:32] = scratch_read(cheriot_mode, 1'b0, 5'd8);
           end
-        end else if (32'(ac_ar.aarsize) >= MaxAar || ac_ar.aarpostincrement == 1'b1) begin
+        end else if (32'(ac_ar.aarsize) >= max_aar || ac_ar.aarpostincrement == 1'b1) begin
           // this should happend when e.g. ac_ar.aarsize >= MaxAar
           // Openocd will try to do an access with aarsize=64 bits
           // first before falling back to 32 bits.
@@ -474,27 +626,59 @@ module dm_mem #(
   // two registers per hart, hence we also need
   // two scratch registers.
   if (HasSndScratch) begin : gen_rom_snd_scratch
+    logic [63:0] rom_rdata_rv32;
+
     debug_rom i_debug_rom (
       .clk_i,
+      .rst_ni,
       .req_i,
-      .addr_i  ( rom_addr  ),
-      .rdata_o ( rom_rdata )
+      .addr_i  ( rom_addr       ),
+      .rdata_o ( rom_rdata_rv32 )
     );
+
+    if (CheriotSupport) begin : gen_cheriot_rom
+      // Select between the RV32I or the CHERIoT ROM
+      logic [63:0] rom_rdata_cheriot;
+
+      debug_rom_cheriot i_debug_rom_cheriot (
+        .clk_i,
+        .rst_ni,
+        .req_i,
+        .addr_i  ( rom_addr          ),
+        .rdata_o ( rom_rdata_cheriot )
+      );
+
+      assign rom_rdata = prim_mubi_pkg::mubi4_test_true_strict(cheriot_mode) ? rom_rdata_cheriot
+                                                                             : rom_rdata_rv32;
+    end else begin : gen_no_cheriot_rom
+      assign rom_rdata = rom_rdata_rv32;
+    end
   end else begin : gen_rom_one_scratch
     // It uses the zero register (`x0`) as the base
     // for its loads. The zero register does not need to
     // be saved.
+    //
+    // There is no CHERIoT counterpart to this ROM. It saves s0 with CSRRW, while the abstract
+    // commands use CSpecialRW in CHERIoT mode, so CHERIoT mode is not supported here.
     debug_rom_one_scratch i_debug_rom (
       .clk_i,
+      .rst_ni,
       .req_i,
       .addr_i  ( rom_addr  ),
       .rdata_o ( rom_rdata )
     );
-  end
 
-  // ROM starts at the HaltAddress of the core e.g.: it immediately jumps to
-  // the ROM base address
-  assign fwd_rom_d = logic'(addr_i[DbgAddressBits-1:0] >= dm::HaltAddress[DbgAddressBits-1:0]);
+    // pragma translate_off
+    `ifndef VERILATOR
+    initial assert (!CheriotSupport)
+      else $error("CheriotSupport is not supported with DmBaseAddress == 0");
+    // Check the raw input to also catch a top that drives it without setting CheriotSupport.
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+                     !prim_mubi_pkg::mubi4_test_true_strict(cheriot_enable_i))
+      else $error("CHERIoT mode is not supported with DmBaseAddress == 0");
+    `endif
+    // pragma translate_on
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_regs
     if (!rst_ni) begin

@@ -1,10 +1,10 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List
 
-from .yaml_parse_helpers import check_keys, check_str, check_int
+from serialize.parse_helpers import check_keys, check_str, check_int
 
 
 class LSUDesc:
@@ -62,7 +62,8 @@ class LSUDesc:
         if lsu_type.startswith('mem-'):
             if 'bytes' not in yd:
                 raise ValueError('{} defines a memory operation, so requires '
-                                 'a bytes field (how many bytes does this touch?)'
+                                 'a bytes field (how many bytes does this '
+                                 'operation touch?)'
                                  .format(what))
             idx_width = check_int(yd['bytes'], 'bytes field for ' + what)
         else:

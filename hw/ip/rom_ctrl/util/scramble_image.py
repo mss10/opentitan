@@ -1,35 +1,208 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-
 '''Script for scrambling a ROM image'''
 
 import argparse
+from enum import Enum
 import sys
-from typing import Dict, List
+from typing import Dict, IO, Optional, Tuple
 
 import hjson  # type: ignore
 from Crypto.Hash import cSHAKE256
 
 from mem import MemChunk, MemFile
+from util.design.prince import prince, sbox  # type: ignore
+from util.design.secded_gen import ecc_encode_many  # type: ignore
 
-ROM_BASE_WORD = 0x8000 // 4
-ROM_SIZE_WORDS = 8192
 
-PRINCE_SBOX4 = [
-    0xb, 0xf, 0x3, 0x2,
-    0xa, 0xc, 0x9, 0x1,
-    0x6, 0x7, 0x8, 0x0,
-    0xe, 0x5, 0xd, 0x4
-]
+class ScramblingMode(Enum):
+    ROM0 = "base-rom"
+    ROM1 = "second-rom"
+    SRAM = "sram"
 
-PRINCE_SBOX4_INV = [
-    0xb, 0x7, 0x3, 0x2,
-    0xf, 0xd, 0x8, 0x9,
-    0xa, 0x6, 0x4, 0x0,
-    0x5, 0xe, 0xc, 0x1
-]
+
+_UDict = Dict[object, object]
+
+
+class MemoryController:
+    PARAM_VALUE = "__value"
+
+    def __init__(
+            self, top_mem_ctrl: _UDict, secrets_mem_ctrl: _UDict, ctrl_name: str,
+            memory_type: str, mode: str):
+        '''A memory controller constructor
+        @mem_ctrl The memory controller hjson dictionary (in the top configuration)
+        @mem_ctrl The memory controller hjson dictionary (in the secrets file)
+        @ctrl_name is the memory controller IP block name (e.g. 'rom_ctrl0' for the base ROM)
+        @memory_type is the memory type this memory controller run ('rom' or 'ram')
+        @mode is the memory scrambling mode
+        '''
+
+        memory_type, key_name, nonce_name = {
+            ScramblingMode.ROM0.value: ["rom", "RndCnstScrKey", "RndCnstScrNonce"],
+            ScramblingMode.ROM1.value: ["rom", "RndCnstScrKey", "RndCnstScrNonce"],
+            ScramblingMode.SRAM.value: ["ram", "RndCnstSramKey", "RndCnstSramNonce"],
+        }[mode]
+
+        assert memory_type is not None
+        assert key_name is not None
+        assert nonce_name is not None
+
+        size_words = MemoryController._get_size_words(secrets_mem_ctrl, memory_type)
+        base = MemoryController._get_base(secrets_mem_ctrl, memory_type)
+        # Merge parameters of the top configuration and secrets. The secrets take precedence
+        params = MemoryController._get_params(top_mem_ctrl) | \
+            MemoryController._get_params(secrets_mem_ctrl)
+        nonce, nonce_width = MemoryController._get_param_cnst(params, nonce_name)
+        scr_key, scr_key_width = MemoryController._get_param_cnst(params, key_name)
+        scrambling_disabled = MemoryController._get_param_bit(params, "SecDisableScrambling")
+
+        self.ctrl_name = ctrl_name
+        self.memory_type = memory_type
+        self.base = base
+        self.size_words = size_words
+        self.scr_key = scr_key
+        self.scr_key_width = scr_key_width
+        self.nonce = nonce
+        self.nonce_width = nonce_width
+        self.scrambling_disabled = scrambling_disabled
+
+    @staticmethod
+    def _get_params(module: _UDict) -> Dict[str, _UDict]:
+        params = module.get('param_list')
+        assert isinstance(params, list)
+        param_decl = module.get('param_decl', {})
+        assert isinstance(param_decl, dict)
+
+        named_params = {}  # type: Dict[str, _UDict]
+        for param in params:
+            name = param.get('name')
+            assert isinstance(name, str)
+            assert name not in named_params
+
+            # If we find a correspond parameter declaration, we add it
+            # to returned dictionary.
+            if name in param_decl:
+                param["param_decl"] = param_decl[name]
+                value = param_decl[name]
+            else:
+                value = param.get('default')
+            # Create a new field in the dictionary holding the value (ie param_decl
+            # or default if not provided).
+            assert MemoryController.PARAM_VALUE not in param
+            param[MemoryController.PARAM_VALUE] = value
+            named_params[name] = param
+
+        return named_params
+
+    @staticmethod
+    def _get_param_cnst(params: Dict[str, _UDict], name: str) -> Tuple[int, int]:
+        param = params.get(name)
+        assert isinstance(param, dict)
+
+        val = param.get(MemoryController.PARAM_VALUE)
+        assert isinstance(val, str)
+        val = int(val, 0)
+
+        width = param.get("randwidth")
+        assert isinstance(width, int)
+
+        assert 0 <= val < (1 << width)
+
+        return val, width
+
+    @staticmethod
+    def _get_param_bit(params: Dict[str, _UDict], name: str) -> bool:
+        param = params.get(name)
+        assert isinstance(param, dict)
+
+        assert param.get('type') == 'bit'
+        val = param.get(MemoryController.PARAM_VALUE)
+        assert isinstance(val, str)
+        assert 'b' in val, f"invalid bit value for parameter {name}"
+        val_width, val = val.split("'b")
+        assert int(val_width) == 1, f"parameter {name} has value unexpected width {val_width}"
+
+        val = int(val, 0)
+        assert 0 <= val <= 1, f"invalid bit value for parameter {name}"
+
+        return bool(val)
+
+    @staticmethod
+    def _get_size_words(module: _UDict, memory_type: str) -> int:
+        memory = module.get("memory")
+        assert isinstance(memory, dict)
+        memory = memory.get(memory_type)
+        assert isinstance(memory, dict)
+        size_words_bytes_str = memory.get("size")
+        assert isinstance(size_words_bytes_str, str)
+        size_words_bytes = int(size_words_bytes_str, 16)
+        assert size_words_bytes % 4 == 0
+        return size_words_bytes // 4
+
+    @staticmethod
+    def _get_base(module: _UDict, memory_type: str) -> int:
+        base = module.get("base_addrs")
+        assert isinstance(base, dict)
+        base_addr_rom = base.get(memory_type)
+        assert isinstance(base_addr_rom, dict)
+        base_addr = base_addr_rom.get("hart")
+        assert isinstance(base_addr, str)
+        return int(base_addr, 16)
+
+    @staticmethod
+    def from_hjson_path(top_cfg_path: str, secrets_path: str, mode: str) \
+            -> Optional["MemoryController"]:
+        with open(secrets_path, "r", encoding='utf-8') as handle:
+            secrets = hjson.load(handle, use_decimal=True)
+        with open(top_cfg_path, "r", encoding='utf-8') as handle:
+            top = hjson.load(handle, use_decimal=True)
+
+        assert isinstance(secrets, dict)
+        assert isinstance(top, dict)
+        top_modules = top.get('module')
+        secrets_modules = secrets.get('module')
+        assert isinstance(top_modules, list)
+        assert isinstance(secrets_modules, list)
+
+        for entry in secrets_modules:
+            assert isinstance(entry, dict)
+            entry_type = entry.get('type')
+            assert isinstance(entry_type, str)
+            entry_name = entry.get('name')
+            assert isinstance(entry_name, str)
+
+            # Find the corresponding entry in the top cfg.
+            found = False
+            for top_entry in top_modules:
+                assert isinstance(top_entry, dict)
+                top_entry_type = top_entry.get('type')
+                assert isinstance(top_entry_type, str)
+                top_entry_name = top_entry.get('name')
+                assert isinstance(top_entry_name, str)
+                if top_entry_type == entry_type and top_entry_name == entry_name:
+                    found = True
+                    break
+            assert found, "secrets file contain entry for module '{entry_name}'," + \
+                " but it does not exist in the top configuration"
+
+            if mode == ScramblingMode.ROM0.value:
+                # Earlgrey has only one ROM, named `rom_ctrl`, while Darjeeling's
+                # first ROM is named `rom_ctrl0`
+                if entry_name in ("rom_ctrl", "rom_ctrl0"):
+                    if entry_type == "rom_ctrl":
+                        return MemoryController(top_entry, entry, entry_name, entry_type, mode)
+            elif mode == ScramblingMode.ROM1.value:
+                if entry_name == "rom_ctrl1" and entry_type == "rom_ctrl":
+                    return MemoryController(top_entry, entry, entry_name, entry_type, mode)
+            elif mode == ScramblingMode.SRAM.value:
+                if entry_name == "sram_ctrl_main" and entry_type == "sram_ctrl":
+                    return MemoryController(top_entry, entry, entry_name, entry_type, mode)
+
+        return None
+
 
 PRESENT_SBOX4 = [
     0xc, 0x5, 0x6, 0xb,
@@ -44,55 +217,6 @@ PRESENT_SBOX4_INV = [
     0xb, 0x4, 0x6, 0x3,
     0x0, 0x7, 0x9, 0xa
 ]
-
-PRINCE_SHIFT_ROWS64 = [
-    0x4, 0x9, 0xe, 0x3,
-    0x8, 0xd, 0x2, 0x7,
-    0xc, 0x1, 0x6, 0xb,
-    0x0, 0x5, 0xa, 0xf
-]
-
-PRINCE_SHIFT_ROWS64_INV = [
-    0xc, 0x9, 0x6, 0x3,
-    0x0, 0xd, 0xa, 0x7,
-    0x4, 0x1, 0xe, 0xb,
-    0x8, 0x5, 0x2, 0xf
-]
-
-PRINCE_ROUND_CONSTS = [
-    0x0000000000000000,
-    0x13198a2e03707344,
-    0xa4093822299f31d0,
-    0x082efa98ec4e6c89,
-    0x452821e638d01377,
-    0xbe5466cf34e90c6c,
-    0x7ef84f78fd955cb1,
-    0x85840851f1ac43aa,
-    0xc882d32f25323c54,
-    0x64a51195e0e3610d,
-    0xd3b5a399ca0c2399,
-    0xc0ac29b7c97c50dd
-]
-
-PRINCE_SHIFT_ROWS_CONSTS = [0x7bde, 0xbde7, 0xde7b, 0xe7bd]
-
-_UDict = Dict[object, object]
-
-
-def sbox(data: int, width: int, coeffs: List[int]) -> int:
-    assert 0 <= width
-    assert 0 <= data < (1 << width)
-
-    full_mask = (1 << width) - 1
-    sbox_mask = (1 << (4 * (width // 4))) - 1
-
-    ret = data & (full_mask & ~sbox_mask)
-    for i in range(width // 4):
-        nibble = (data >> (4 * i)) & 0xf
-        sb_nibble = coeffs[nibble]
-        ret |= sb_nibble << (4 * i)
-
-    return ret
 
 
 def subst_perm_enc(data: int, key: int, width: int, num_rounds: int) -> int:
@@ -165,184 +289,44 @@ def subst_perm_dec(data: int, key: int, width: int, num_rounds: int) -> int:
     return data ^ key
 
 
-def prince_nibble_red16(data: int) -> int:
-    assert 0 <= data < (1 << 16)
-    nib0 = (data >> 0) & 0xf
-    nib1 = (data >> 4) & 0xf
-    nib2 = (data >> 8) & 0xf
-    nib3 = (data >> 12) & 0xf
-    return nib0 ^ nib1 ^ nib2 ^ nib3
-
-
-def prince_mult_prime(data: int) -> int:
-    assert 0 <= data < (1 << 64)
-    ret = 0
-    for blk_idx in range(4):
-        data_hw = (data >> (16 * blk_idx)) & 0xffff
-        start_sr_idx = 0 if blk_idx in [0, 3] else 1
-        for nibble_idx in range(4):
-            sr_idx = (start_sr_idx + 3 - nibble_idx) % 4
-            sr_const = PRINCE_SHIFT_ROWS_CONSTS[sr_idx]
-            nibble = prince_nibble_red16(data_hw & sr_const)
-            ret |= nibble << (16 * blk_idx + 4 * nibble_idx)
-    return ret
-
-
-def prince_shiftrows(data: int, inv: bool) -> int:
-    assert 0 <= data < (1 << 64)
-    shifts = PRINCE_SHIFT_ROWS64_INV if inv else PRINCE_SHIFT_ROWS64
-
-    ret = 0
-    for nibble_idx in range(64 // 4):
-        src_nibble_idx = shifts[nibble_idx]
-        src_nibble = (data >> (4 * src_nibble_idx)) & 0xf
-        ret |= src_nibble << (4 * nibble_idx)
-    return ret
-
-
-def prince_fwd_round(rc: int, key: int, data: int) -> int:
-    assert 0 <= rc < (1 << 64)
-    assert 0 <= key < (1 << 64)
-    assert 0 <= data < (1 << 64)
-
-    data = sbox(data, 64, PRINCE_SBOX4)
-    data = prince_mult_prime(data)
-    data = prince_shiftrows(data, False)
-    data ^= rc
-    data ^= key
-    return data
-
-
-def prince_inv_round(rc: int, key: int, data: int) -> int:
-    assert 0 <= rc < (1 << 64)
-    assert 0 <= key < (1 << 64)
-    assert 0 <= data < (1 << 64)
-
-    data ^= key
-    data ^= rc
-    data = prince_shiftrows(data, True)
-    data = prince_mult_prime(data)
-    data = sbox(data, 64, PRINCE_SBOX4_INV)
-    return data
-
-
-def prince(data: int, key: int, num_rounds_half: int) -> int:
-    '''Run the PRINCE cipher
-
-    This uses the new keyschedule proposed by Dinur in "Cryptanalytic
-    Time-Memory-Data Tradeoffs for FX-Constructions with Applications to PRINCE
-    and PRIDE".
-
-    '''
-    assert 0 <= data < (1 << 64)
-    assert 0 <= key < (1 << 128)
-    assert 0 <= num_rounds_half <= 5
-
-    k1 = key & ((1 << 64) - 1)
-    k0 = key >> 64
-
-    k0_rot1 = ((k0 & 1) << 63) | (k0 >> 1)
-    k0_prime = k0_rot1 ^ (k0 >> 63)
-
-    data ^= k0
-    data ^= k1
-    data ^= PRINCE_ROUND_CONSTS[0]
-
-    for hri in range(num_rounds_half):
-        round_idx = 1 + hri
-        rc = PRINCE_ROUND_CONSTS[round_idx]
-        rk = k0 if round_idx & 1 else k1
-        data = prince_fwd_round(rc, rk, data)
-
-    data = sbox(data, 64, PRINCE_SBOX4)
-    data = prince_mult_prime(data)
-    data = sbox(data, 64, PRINCE_SBOX4_INV)
-
-    for hri in range(num_rounds_half):
-        round_idx = 11 - num_rounds_half + hri
-        rc = PRINCE_ROUND_CONSTS[round_idx]
-        rk = k1 if round_idx & 1 else k0
-        data = prince_inv_round(rc, rk, data)
-
-    data ^= PRINCE_ROUND_CONSTS[11]
-    data ^= k1
-
-    data ^= k0_prime
-
-    return data
-
-
 class Scrambler:
-    def __init__(self, nonce: int, key: int, rom_size_words: int):
-        assert 0 <= nonce < (1 << 64)
-        assert 0 <= key < (1 << 128)
+    subst_perm_rounds = 2
+    num_rounds_half = 3
+
+    def __init__(self, disable: bool, nonce: int, nonce_width: int,
+                 key: int, key_width: int,
+                 rom_base: int, rom_size_words: int,
+                 hash_file: IO[str]):
+        assert nonce_width > 0
+        assert key_width > 0
+        assert 0 <= nonce < (1 << nonce_width)
+        assert 0 <= key < (1 << key_width)
         assert 0 < rom_size_words < (1 << 64)
 
+        self.disable = disable
         self.nonce = nonce
+        self.nonce_width = nonce_width
         self.key = key
+        self.key_width = key_width
         self.rom_size_words = rom_size_words
+        self.rom_base = rom_base
+
+        self.hash_file = hash_file
 
         self._addr_width = (rom_size_words - 1).bit_length()
 
-    @staticmethod
-    def _get_rom_ctrl(modules: List[object]) -> _UDict:
-        rom_ctrls = []  # type: List[_UDict]
-        for entry in modules:
-            assert isinstance(entry, dict)
-            entry_type = entry.get('type')
-            assert isinstance(entry_type, str)
-
-            if entry_type == 'rom_ctrl':
-                rom_ctrls.append(entry)
-
-        assert len(rom_ctrls) == 1
-        return rom_ctrls[0]
+    def is_disabled(self) -> bool:
+        return self.disable
 
     @staticmethod
-    def _get_params(module: _UDict) -> Dict[str, _UDict]:
-        params = module.get('param_list')
-        assert isinstance(params, list)
+    def from_hjson_path(top_cfg_path: str, secrets_path: str, mode: str, hash_file: IO[str]) \
+            -> 'Scrambler':
+        mem_ctrl = MemoryController.from_hjson_path(top_cfg_path, secrets_path, mode)
+        assert mem_ctrl is not None
 
-        named_params = {}  # type: Dict[str, _UDict]
-        for param in params:
-            name = param.get('name')
-            assert isinstance(name, str)
-            assert name not in named_params
-            named_params[name] = param
-
-        return named_params
-
-    @staticmethod
-    def _get_param_value(params: Dict[str, _UDict],
-                         name: str,
-                         width: int) -> int:
-        param = params.get(name)
-        assert isinstance(param, dict)
-
-        default = param.get('default')
-        assert isinstance(default, str)
-        int_val = int(default, 0)
-        assert 0 <= int_val < (1 << width)
-        return int_val
-
-    @staticmethod
-    def from_hjson_path(path: str, rom_size_words: int) -> 'Scrambler':
-        assert 0 < rom_size_words
-
-        with open(path) as handle:
-            top = hjson.load(handle, use_decimal=True)
-
-        assert isinstance(top, dict)
-        modules = top.get('module')
-        assert isinstance(modules, list)
-
-        rom_ctrl = Scrambler._get_rom_ctrl(modules)
-
-        params = Scrambler._get_params(rom_ctrl)
-        nonce = Scrambler._get_param_value(params, 'RndCnstScrNonce', 64)
-        key = Scrambler._get_param_value(params, 'RndCnstScrKey', 128)
-
-        return Scrambler(nonce, key, rom_size_words)
+        return Scrambler(mem_ctrl.scrambling_disabled, mem_ctrl.nonce, mem_ctrl.nonce_width,
+                         mem_ctrl.scr_key, mem_ctrl.scr_key_width,
+                         mem_ctrl.base, mem_ctrl.size_words, hash_file)
 
     def flatten(self, mem: MemFile) -> MemFile:
         '''Flatten and pad mem up to the correct size
@@ -354,9 +338,8 @@ class Scrambler:
         '''
         digest_size_words = 8
         initial_len = self.rom_size_words - digest_size_words
-        seed = self.key + self.nonce
 
-        flattened = mem.flatten(initial_len, seed)
+        flattened = mem.flatten(initial_len)
         assert len(flattened.chunks) == 1
         assert len(flattened.chunks[0].words) == initial_len
 
@@ -367,11 +350,106 @@ class Scrambler:
 
         return flattened
 
+    def get_keystream(self, log_addr: int, width: int) -> int:
+        assert (log_addr >> self._addr_width) == 0
+        assert 0 < width <= 64
+
+        data_nonce_width = 64 - self._addr_width
+        data_scr_nonce = self.nonce & ((1 << data_nonce_width) - 1)
+        to_scramble = (data_scr_nonce << self._addr_width) | log_addr
+        full_keystream = int(
+            prince(to_scramble, self.key, self.num_rounds_half))
+
+        return full_keystream & ((1 << width) - 1)
+
+    def addr_sp_enc(self, log_addr: int) -> int:
+        assert self._addr_width < self.nonce_width
+        data_nonce_width = self.nonce_width - self._addr_width
+        addr_scr_nonce = self.nonce >> data_nonce_width
+        if (self.rom_size_words == 2**self._addr_width):
+            # Because the memory depth is exactly the size addressable by _addr_width, we can
+            # simply pass the full address through the S&P network.
+            sp_width = self._addr_width
+            num_chunks = 1
+        else:
+            # The memory depth is not a power of two. We split the memory into `num_chunks` chunks
+            # with a power-of-two depth. Within the chunks, addresses get scrambled with the S&P
+            # network. The distribution of the chunks onto the actual memory is determined by the
+            # `off_addr` bits of the nonce.
+            sp_depth = self.rom_size_words & (-self.rom_size_words)
+            num_chunks = self.rom_size_words // sp_depth
+            assert num_chunks * sp_depth == self.rom_size_words
+            sp_width = (sp_depth - 1).bit_length()
+        # Pass the `sp_width` LSBs through the S&P network.
+        sp_addr = log_addr & ((1 << sp_width) - 1)
+        sp_nonce = addr_scr_nonce & ((1 << sp_width) - 1)
+        sp_encrypted_addr = subst_perm_enc(sp_addr, sp_nonce, sp_width,
+                                           self.subst_perm_rounds)
+        if (self.rom_size_words == 2**self._addr_width):
+            encrypted_addr = sp_encrypted_addr
+        else:
+            # Strip off the top-most `off_width` bits of the address and nonce to compute the chunk
+            # offset.
+            off_addr = log_addr >> sp_width
+            off_nonce = addr_scr_nonce >> sp_width
+            # Compute the offset and wrap around if necessary.
+            off_encrypted = (off_addr + off_nonce) % num_chunks
+            # Stitch the decrypted address together.
+            encrypted_addr = (off_encrypted << sp_width) + sp_encrypted_addr
+        return encrypted_addr
+
+    def addr_sp_dec(self, phy_addr: int) -> int:
+        assert self._addr_width < self.nonce_width
+        data_nonce_width = self.nonce_width - self._addr_width
+        addr_scr_nonce = self.nonce >> data_nonce_width
+        if (self.rom_size_words == 2**self._addr_width):
+            # Because the memory depth is exactly the size addressable by _addr_width, we can
+            # simply pass the full address through the S&P network.
+            sp_width = self._addr_width
+            num_chunks = 1
+        else:
+            # The memory depth is not a power of two. We split the memory into `num_chunks` chunks
+            # with a power-of-two depth. Within the chunks, addresses get scrambled with the S&P
+            # network. The distribution of the chunks onto the actual memory is determined by the
+            # `off_addr` bits of the nonce.
+            sp_depth = self.rom_size_words & (-self.rom_size_words)
+            num_chunks = self.rom_size_words // sp_depth
+            assert num_chunks * sp_depth == self.rom_size_words
+            sp_width = (sp_depth - 1).bit_length()
+        # Pass the `sp_width` LSBs through the S&P network.
+        sp_addr = phy_addr & ((1 << sp_width) - 1)
+        sp_nonce = addr_scr_nonce & ((1 << sp_width) - 1)
+        sp_decrypted_addr = subst_perm_dec(sp_addr, sp_nonce, sp_width,
+                                           self.subst_perm_rounds)
+        if (self.rom_size_words == 2**self._addr_width):
+            decrypted_addr = sp_decrypted_addr
+        else:
+            # Strip off the top-most `off_width` bits of the address and nonce to compute the chunk
+            # offset.
+            off_addr = phy_addr >> sp_width
+            off_nonce = addr_scr_nonce >> sp_width
+            # Compute the offset and wrap around if necessary. This must be the inverse of the
+            # addition performed in addr_sp_enc, i.e. subtraction, so that addr_sp_dec is the
+            # true inverse of addr_sp_enc for every nonce value.
+            off_decrypted = (off_addr - off_nonce) % num_chunks
+            # Stitch the decrypted address together.
+            decrypted_addr = (off_decrypted << sp_width) + sp_decrypted_addr
+        return decrypted_addr
+
+    def scramble_word(self, width: int, log_addr: int, clr_data: int) -> int:
+        '''Scramble clr_data at the given logical address.'''
+        keystream = self.get_keystream(log_addr, width)
+        return keystream ^ clr_data
+
+    def unscramble_word(self, width: int, log_addr: int, scr_data: int) -> int:
+        keystream = self.get_keystream(log_addr, width)
+        return keystream ^ scr_data
+
     def scramble(self, mem: MemFile) -> MemFile:
         assert len(mem.chunks) == 1
         assert len(mem.chunks[0].words) == self.rom_size_words
 
-        word_width = mem.width
+        width = mem.width
 
         # Write addr_sp, data_sp for the S&P networks for address and data,
         # respectively. Write clr[i] for unscrambled data word i and scr[i] for
@@ -380,45 +458,31 @@ class Scrambler:
         #
         # Then, for all i, we have:
         #
-        #   clr[i] = PRINCE(i) ^ data_sp(scr[addr_sp(i)])
+        #   clr[i] = PRINCE(i) ^ scr[addr_sp_enc(i)]
         #
-        # Change coordinates by evaluating at addr_sp_inv(i):
+        # Change coordinates by evaluating at addr_sp_dec(i):
         #
-        #   clr[addr_sp_inv(i)] = PRINCE(addr_sp_inv(i)) ^ data_sp(scr[i])
+        #   clr[addr_sp_dec(i)] = PRINCE(addr_sp_dec(i)) ^ scr[i]
         #
         # so
         #
-        #   scr[i] = data_sp_inv(clr[addr_sp_inv(i)] ^ PRINCE(addr_sp_inv(i)))
-        subst_perm_rounds = 2
-        num_rounds_half = 2
+        #   scr[i] = clr[addr_sp_dec(i)] ^ PRINCE(addr_sp_dec(i))
+        #
+        # Using the scramble_word helper function, this is:
+        #
+        #   scr[i] = scramble_word(width, addr_sp_dec(i), clr[addr_sp_dec(i)])
 
-        assert word_width <= 64
-        word_mask = (1 << word_width) - 1
-
-        data_nonce_width = 64 - self._addr_width
-
-        data_scr_nonce = self.nonce & ((1 << data_nonce_width) - 1)
-        addr_scr_nonce = self.nonce >> data_nonce_width
+        assert width <= 64
 
         scrambled = []
         for phy_addr in range(self.rom_size_words):
-            log_addr = subst_perm_dec(phy_addr, addr_scr_nonce,
-                                      self._addr_width, subst_perm_rounds)
+            log_addr = self.addr_sp_dec(phy_addr)
             assert 0 <= log_addr < self.rom_size_words
 
-            to_scramble = (data_scr_nonce << self._addr_width) | log_addr
-            keystream = prince(to_scramble, self.key, num_rounds_half)
-
-            keystream_trunc = keystream & word_mask
             clr_data = mem.chunks[0].words[log_addr]
-            assert 0 <= clr_data < word_mask
+            assert 0 <= clr_data < (1 << width)
 
-            sp_scr_data = keystream_trunc ^ clr_data
-            scr_data = subst_perm_enc(sp_scr_data, 0, word_width, subst_perm_rounds)
-
-            assert 0 <= scr_data < word_mask
-
-            scrambled.append(scr_data)
+            scrambled.append(self.scramble_word(width, log_addr, clr_data))
 
         return MemFile(mem.width, [MemChunk(0, scrambled)])
 
@@ -434,23 +498,22 @@ class Scrambler:
         assert len(scr_mem.chunks) == 1
         assert scr_mem.chunks[0].base_addr == 0
         assert len(scr_mem.chunks[0].words) == self.rom_size_words
+        assert scr_mem.width == 39
 
         scr_chunk = scr_mem.chunks[0]
-
-        data_nonce_width = 64 - self._addr_width
-        subst_perm_rounds = 2
-        addr_scr_nonce = self.nonce >> data_nonce_width
 
         bytes_per_word = 32 // 8
         num_digest_words = 256 // 32
 
-        # Read out the scrambled data
+        # Read out the scrambled data in logical address order
         to_hash = b''
         for log_addr in range(self.rom_size_words - num_digest_words):
-            phy_addr = subst_perm_enc(log_addr, addr_scr_nonce,
-                                      self._addr_width, subst_perm_rounds)
+            phy_addr = self.addr_sp_enc(log_addr)
             scr_word = scr_chunk.words[phy_addr]
-            to_hash += scr_word.to_bytes(64 // 8, byteorder='little')
+            # Note that a scrambled word with ECC amounts to 39bit. The
+            # expression (39 + 7) // 8 calculates the amount of bytes that are
+            # required to store these bits.
+            to_hash += scr_word.to_bytes((39 + 7) // 8, byteorder='little')
 
         # Hash it
         hash_obj = cSHAKE256.new(data=to_hash,
@@ -458,33 +521,71 @@ class Scrambler:
         digest_bytes = hash_obj.read(bytes_per_word * num_digest_words)
         digest256 = int.from_bytes(digest_bytes, byteorder='little')
 
-        # Insert the hash back into scr_mem
+        # Chop the 256-bit digest into 32-bit words. These words should never
+        # be read "unscrambled": the rom_ctrl checker reads them raw. We can
+        # guarantee this by fiddling around with the top 7 bits (which are
+        # otherwise ignored) to ensure that they unscramble to words with
+        # invalid ECC checksums.
+        mask32 = (1 << 32) - 1
+        first_digest_idx = self.rom_size_words - num_digest_words
+        # Create a file to store the ROM hash.
+        print('#include <stdint.h>\n', file = self.hash_file)
+        print(f'const uint32_t kRomImageHash[{num_digest_words}] = {{', file = self.hash_file)
         for digest_idx in range(num_digest_words):
-            log_addr = self.rom_size_words - num_digest_words + digest_idx
-            phy_addr = subst_perm_enc(log_addr, addr_scr_nonce,
-                                      self._addr_width, subst_perm_rounds)
-            digest_word = (digest256 >> (32 * digest_idx)) & ((1 << 32) - 1)
-            scr_chunk.words[phy_addr] = digest_word
+            log_addr = first_digest_idx + digest_idx
+            w32 = (digest256 >> (32 * digest_idx)) & mask32
+            found_mismatch = False
+
+            for chk_bits in range(128):
+                w39 = w32 | (chk_bits << 32)
+                clr39 = self.unscramble_word(39, log_addr, w39)
+                clr32 = clr39 & mask32
+                exp39 = ecc_encode_many('inv_hsiao', 32, [clr32])[0][0]
+                if clr39 != exp39:
+                    # The checksum doesn't match. Excellent!
+                    found_mismatch = True
+                    break
+
+            # Surely at least one of the 128 possible choices of top bits
+            # should have given us an invalid checksum.
+            assert found_mismatch
+
+            phy_addr = self.addr_sp_enc(log_addr)
+            scr_chunk.words[phy_addr] = w32
+            print(f'  {w32:#08x},', file = self.hash_file)
+        print('};', file = self.hash_file)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('hjson')
+    parser.add_argument('top_hjson')
+    parser.add_argument('secrets_hjson')
+    parser.add_argument('mode')
     parser.add_argument('infile', type=argparse.FileType('rb'))
     parser.add_argument('outfile', type=argparse.FileType('w'))
+    parser.add_argument('hashfile', type=argparse.FileType('w'))
 
     args = parser.parse_args()
-    scrambler = Scrambler.from_hjson_path(args.hjson, ROM_SIZE_WORDS)
+    scrambler = Scrambler.from_hjson_path(args.top_hjson, args.secrets_hjson,
+                                          args.mode, args.hashfile)
 
     # Load the input ELF file
-    clr_mem = MemFile.load_elf32(args.infile, 4 * ROM_BASE_WORD)
+    clr_mem = MemFile.load_elf32(args.infile, scrambler.rom_base)
 
     # Flatten the file, padding with pseudo-random data and ensuring it's
     # exactly scrambler.rom_size_words words long.
     clr_flat = scrambler.flatten(clr_mem)
 
-    # Extend from 32 bits to 39 by adding Hsiao (39,32) ECC bits.
-    clr_flat.add_ecc32()
+    # If scrambling is disabled then the memory width is 32 bits, ie no ECC
+    # and the data is not scrambled. There is also no hash added.
+    if scrambler.is_disabled():
+        print("scrambling disabled")
+        clr_flat.write_vmem(args.outfile)
+        return 0
+
+    # Extend from 32 bits to 39 by adding Hsiao (39,32) ECC bits. ROM is not
+    # yet scrambled, so we expect repeated words (padding, zeroes).
+    clr_flat.add_ecc32(expect_repeats=True)
     assert clr_flat.width == 39
 
     # Scramble the memory
@@ -496,19 +597,19 @@ def main() -> int:
     # Check for collisions
     collisions = scr_mem.collisions()
     if collisions:
-        print('ERROR: This combination of ROM contents and scrambling\n'
-              '       key results in one or more collisions where\n'
-              '       different addresses have the same data.\n'
-              '\n'
-              '       Looks like we\'ve been (very) unlucky with the\n'
-              '       birthday problem. As a work-around, try again after\n'
-              '       generating some different RndCnst* parameters.\n',
-              file=sys.stderr)
+        print(
+            'ERROR: This combination of ROM contents and scrambling\n'
+            '       key results in one or more collisions where\n'
+            '       different addresses have the same data.\n'
+            '\n'
+            '       Looks like we\'ve been (very) unlucky with the\n'
+            '       birthday problem. As a work-around, try again after\n'
+            '       generating some different RndCnst* parameters.\n',
+            file=sys.stderr)
         print('{} colliding addresses:'.format(len(collisions)),
               file=sys.stderr)
         for addr0, addr1 in collisions:
-            print('  {:#010x}, {:#010x}'.format(addr0, addr1),
-                  file=sys.stderr)
+            print('  {:#010x}, {:#010x}'.format(addr0, addr1), file=sys.stderr)
         return 1
 
     scr_mem.write_vmem(args.outfile)

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,6 +12,12 @@ class pattgen_stress_all_vseq extends pattgen_base_vseq;
 
   local string str, seq_name;
   local int    seq_run_hist[string];
+
+  local rand int unsigned num_runs;
+
+  constraint num_runs_c {
+    num_runs inside {[cfg.seq_cfg.pattgen_min_num_runs : cfg.seq_cfg.pattgen_max_num_runs]};
+  }
 
   string seq_names[] = {
     "pattgen_common_vseq",      // for intr_test

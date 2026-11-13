@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,105 +6,54 @@
 //
 //   determines when new entropy is ready to be forwarded
 
-module entropy_src_main_sm #(
-  localparam int StateWidth = 8
-) (
+`include "prim_assert.sv"
+
+module entropy_src_main_sm
+  import entropy_src_main_sm_pkg::*;
+(
   input logic                   clk_i,
   input logic                   rst_ni,
 
   input logic                   enable_i,
+  input logic                   fw_ov_ent_insert_i,
+  input logic                   fw_ov_sha3_start_i,
   input logic                   ht_done_pulse_i,
+  input logic                   pd_cntr_zero_i,
   input logic                   ht_fail_pulse_i,
   input logic                   alert_thresh_fail_i,
-  input logic                   sfifo_esfinal_full_i,
-  output logic                  rst_alert_cntr_o,
+  output logic                  alert_cntr_clr_ok_o,
   input logic                   bypass_mode_i,
-  output logic                  rst_bypass_mode_o,
-  input logic                   main_stage_rdy_i,
   input logic                   bypass_stage_rdy_i,
   input logic                   sha3_state_vld_i,
-  output logic                  main_stage_pop_o,
+  output logic                  main_stage_push_o,
   output logic                  bypass_stage_pop_o,
+  output logic                  boot_phase_done_o,
   output logic                  sha3_start_o,
   output logic                  sha3_process_o,
-  output logic                  sha3_done_o,
-  output logic                  cs_aes_halt_req_o,
-  input logic                   cs_aes_halt_ack_i,
+  output prim_mubi_pkg::mubi4_t sha3_done_o,
+  input logic                   local_escalate_i,
   output logic                  main_sm_alert_o,
   output logic                  main_sm_idle_o,
   output logic [StateWidth-1:0] main_sm_state_o,
   output logic                  main_sm_err_o
 );
-// Encoding generated with:
-// $ ./util/design/sparse-fsm-encode.py -d 3 -m 16 -n 8 \
-//      -s 4129751849 --language=sv
-//
-// Hamming distance histogram:
-//
-//  0: --
-//  1: --
-//  2: --
-//  3: |||||||||||||||| (28.33%)
-//  4: |||||||||||||||||||| (35.00%)
-//  5: |||||||||||| (21.67%)
-//  6: |||||| (11.67%)
-//  7: | (3.33%)
-//  8: --
-//
-// Minimum Hamming distance: 3
-// Maximum Hamming distance: 7
-// Minimum Hamming weight: 1
-// Maximum Hamming weight: 6
-//
 
-  typedef enum logic [StateWidth-1:0] {
-    Idle              = 8'b11000110, // idle
-    BootHTRunning     = 8'b10111001, // boot mode, wait for health test done pulse
-    BootPostHTChk     = 8'b10110110, // boot mode, wait for post health test packer not empty state
-    StartupHTStart    = 8'b10000101, // startup mode, pulse the sha3 start input
-    StartupPhase1     = 8'b01110100, // startup mode, look for first test pass/fail
-    StartupPass1      = 8'b00101110, // startup mode, look for first test pass/fail, done if pass
-    StartupFail1      = 8'b01000011, // startup mode, look for second fail, alert if fail
-    ContHTStart       = 8'b01011110, // continuous test mode, pulse the sha3 start input
-    ContHTRunning     = 8'b11110011, // continuous test mode, wait for health test done pulse
-    Sha3Prep          = 8'b10011111, // sha3 mode, request csrng arb to reduce power
-    Sha3Process       = 8'b11101000, // sha3 mode, pulse the sha3 process input
-    Sha3Valid         = 8'b10001010, // sha3 mode, wait for sha3 valid indication
-    Sha3Done          = 8'b00010000, // sha3 mode, capture sha3 result, pulse done input
-    Sha3Quiesce       = 8'b01101101, // sha3 mode, goto alert state or continuous check mode
-    AlertState        = 8'b01011001, // if some alert condition occurs, hang here until sw handles
-    Error             = 8'b00100001  // illegal state reached and hang
-  } state_e;
-
+  // The definition of state_e, the sparse FSM state enum, is in entropy_src_main_sm_pkg.sv
   state_e state_d, state_q;
 
-  logic [StateWidth-1:0] state_raw_q;
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, state_e, Idle)
 
-  // This primitive is used to place a size-only constraint on the
-  // flops in order to prevent FSM state encoding optimizations.
-  prim_flop #(
-    .Width(StateWidth),
-    .ResetValue(StateWidth'(Idle))
-  ) u_state_regs (
-    .clk_i,
-    .rst_ni,
-    .d_i ( state_d ),
-    .q_o ( state_raw_q )
-  );
-
-  assign state_q = state_e'(state_raw_q);
-  assign main_sm_state_o = state_raw_q;
+  assign main_sm_state_o = state_q;
 
   always_comb begin
     state_d = state_q;
-    rst_bypass_mode_o = 1'b0;
-    rst_alert_cntr_o = 1'b0;
-    main_stage_pop_o = 1'b0;
+    alert_cntr_clr_ok_o = 1'b0;
+    main_stage_push_o = 1'b0;
     bypass_stage_pop_o = 1'b0;
+    boot_phase_done_o = 1'b0;
     sha3_start_o = 1'b0;
     sha3_process_o = 1'b0;
-    sha3_done_o = 1'b0;
-    cs_aes_halt_req_o = 1'b0;
+    sha3_done_o = prim_mubi_pkg::MuBi4False;
     main_sm_alert_o = 1'b0;
     main_sm_idle_o = 1'b0;
     main_sm_err_o = 1'b0;
@@ -112,27 +61,44 @@ module entropy_src_main_sm #(
       Idle: begin
         main_sm_idle_o = 1'b1;
         if (enable_i) begin
-          if (bypass_mode_i) begin
+          // running fw override mode and in sha3 mode
+          if (fw_ov_ent_insert_i && !bypass_mode_i) begin
+            sha3_start_o = 1'b1;
+            if (fw_ov_sha3_start_i) begin
+              state_d = FWInsertMsg;
+            end else begin
+              state_d = FWInsertStart;
+            end
+          // running in bypass_mode and not fw override mode
+          end else if (bypass_mode_i && !fw_ov_ent_insert_i) begin
             state_d = BootHTRunning;
+          // running in bypass_mode and fw override mode
+          end else if (bypass_mode_i && fw_ov_ent_insert_i) begin
+            state_d = Idle;
           end else begin
             state_d = StartupHTStart;
           end
         end
       end
       BootHTRunning: begin
+        alert_cntr_clr_ok_o = 1'b1;
         if (!enable_i) begin
           state_d = Idle;
-        end else begin
-          if (ht_done_pulse_i) begin
-            if (ht_fail_pulse_i) begin
-              if (alert_thresh_fail_i) begin
-                state_d = AlertState;
-              end else begin
-                state_d = Idle;
-              end
-            end else begin
-              state_d = BootPostHTChk;
+        end else if (ht_done_pulse_i) begin
+          if (ht_fail_pulse_i) begin
+            if (bypass_stage_rdy_i) begin
+              // Remove failed data
+              bypass_stage_pop_o = 1'b1;
             end
+            if (alert_thresh_fail_i) begin
+              state_d = AlertState;
+            end else begin
+              state_d = Idle;
+            end
+          end else begin
+            // Window sizes other than 384 bits (the seed length) are currently not tested nor
+            // supported in bypass or boot-time mode.
+            state_d = BootPostHTChk;
           end
         end
       end
@@ -142,18 +108,29 @@ module entropy_src_main_sm #(
         end else begin
           if (!bypass_stage_rdy_i) begin
           end else begin
-            rst_alert_cntr_o = 1'b1;
-            rst_bypass_mode_o = 1'b1;
             bypass_stage_pop_o = 1'b1;
-            state_d = StartupHTStart;
+            main_stage_push_o = 1'b1;
+            state_d = BootPhaseDone;
+          end
+        end
+      end
+      BootPhaseDone: begin
+        boot_phase_done_o = 1'b1;
+        if (!enable_i) begin
+          state_d = Idle;
+        end
+        // Even when stalled we keep monitoring for alerts and maintaining alert statistics.
+        // However, we don't signal alerts or clear HT stats in FW_OV mode.
+        if (!fw_ov_ent_insert_i) begin
+          alert_cntr_clr_ok_o = 1'b1;
+          if (ht_done_pulse_i && alert_thresh_fail_i) begin
+            state_d = AlertState;
           end
         end
       end
       StartupHTStart: begin
-        if (!enable_i || sfifo_esfinal_full_i) begin
+        if (!enable_i) begin
           state_d = Idle;
-        end else if (bypass_mode_i) begin
-          state_d = BootHTRunning;
         end else begin
           sha3_start_o = 1'b1;
           state_d = StartupPhase1;
@@ -163,6 +140,7 @@ module entropy_src_main_sm #(
         if (!enable_i) begin
           state_d = Idle;
         end else begin
+          alert_cntr_clr_ok_o = 1'b1;
           if (ht_done_pulse_i) begin
             if (ht_fail_pulse_i) begin
               state_d = StartupFail1;
@@ -176,12 +154,14 @@ module entropy_src_main_sm #(
         if (!enable_i) begin
           state_d = Idle;
         end else begin
+          alert_cntr_clr_ok_o = 1'b1;
           if (ht_done_pulse_i) begin
             if (ht_fail_pulse_i) begin
               state_d = StartupFail1;
             end else begin
-              // Passed two consecutive tests
-              state_d = Sha3Prep;
+              // We've now passed two consecutive test windows of the configured window length.
+              // Next, we're going to compress the collected entropy to produce a single seed.
+              state_d = Sha3Process;
             end
           end
         end
@@ -190,6 +170,7 @@ module entropy_src_main_sm #(
         if (!enable_i) begin
           state_d = Idle;
         end else begin
+          alert_cntr_clr_ok_o = 1'b1;
           if (ht_done_pulse_i) begin
             if (ht_fail_pulse_i) begin
               // Failed two consecutive tests
@@ -201,61 +182,91 @@ module entropy_src_main_sm #(
         end
       end
       ContHTStart: begin
-        if (!enable_i || sfifo_esfinal_full_i) begin
+        if (!enable_i) begin
           state_d = Idle;
         end else begin
+          // Send the Start trigger to the SHA3 engine. After this point, collected raw entropy is
+          // going to be moved into the conditioner in chunks of 64 bits. The SHA3 engine itself
+          // will hash the received raw entropy whenever either of the following two conditions are
+          // met:
+          // 1) 13 64-bit chunks have been received (13 x 64 = 832 = the rate or block size of
+          //    the employed SHA3-384 engine). This condition is checked internally to the SHA3
+          //    engine.
+          // 2) The total amount of received entropy is equal to the configured health test window
+          //    size. This condition is checked by this FSM which then triggers the SHA3 engine
+          //    using the sha3_process_o signal.
           sha3_start_o = 1'b1;
           state_d = ContHTRunning;
         end
       end
       ContHTRunning: begin
-        // pass or fail of HT is the same path
-        if (ht_done_pulse_i || !enable_i) begin
-          state_d = Sha3Prep;
+        if (!enable_i) begin
+          state_d = Idle;
+        end else begin
+          alert_cntr_clr_ok_o = 1'b1;
+          if (ht_done_pulse_i) begin
+            // We've finished testing the current window and all the collected and tested entropy
+            // has been forwarded to the SHA3 engine and has at least partially been absorbed.
+            if (alert_thresh_fail_i) begin
+              state_d = AlertState;
+            end else if (!ht_fail_pulse_i) begin
+              // Move forward and get the conditioner ready to finish the absorption process.
+              state_d = Sha3Process;
+            end
+          end
         end
       end
-      Sha3Prep: begin
-        // for normal or halt cases, always prevent a power spike
-        cs_aes_halt_req_o = 1'b1;
-        if (cs_aes_halt_ack_i) begin
+      FWInsertStart: begin
+        if (!enable_i) begin
+          state_d = Idle;
+        end else if (fw_ov_sha3_start_i) begin
+          state_d = FWInsertMsg;
+        end
+      end
+      FWInsertMsg: begin
+        if (!enable_i) begin
+          state_d = Idle;
+        end else if (!fw_ov_sha3_start_i) begin
           state_d = Sha3Process;
         end
       end
       Sha3Process: begin
-        cs_aes_halt_req_o = 1'b1;
-        rst_alert_cntr_o = 1'b1;
-        sha3_process_o = 1'b1;
-        state_d = Sha3Valid;
+        // Wait for words belonging to the current window to flow into the conditioner before
+        // triggering the final absorption operation of the SHA3 engine.
+        if (pd_cntr_zero_i) begin
+          sha3_process_o = 1'b1;
+          state_d = Sha3Valid;
+        end
       end
       Sha3Valid: begin
-        cs_aes_halt_req_o = 1'b1;
         if (sha3_state_vld_i) begin
           state_d = Sha3Done;
         end
       end
       Sha3Done: begin
         if (!enable_i) begin
-          sha3_done_o = 1'b1;
-          state_d = Idle;
+          sha3_done_o = prim_mubi_pkg::MuBi4True;
+          state_d = Sha3MsgDone;
         end else begin
-          if (main_stage_rdy_i) begin
-            sha3_done_o = 1'b1;
-            main_stage_pop_o = 1'b1;
-            state_d = Sha3Quiesce;
-          end
+          // Push the digest produced by the SHA3 engine into the final FIFO and clear the
+          // internal state of the SHA3 engine to start from scratch for the next seed.
+          sha3_done_o = prim_mubi_pkg::MuBi4True;
+          main_stage_push_o = 1'b1;
+          state_d = Sha3MsgDone;
         end
       end
-      Sha3Quiesce: begin
-        if (!enable_i) begin
+      Sha3MsgDone: begin
+        if (!enable_i || fw_ov_ent_insert_i) begin
           state_d = Idle;
-        end else if (alert_thresh_fail_i) begin
-          state_d = AlertState;
         end else begin
           state_d = ContHTStart;
         end
       end
       AlertState: begin
         main_sm_alert_o = 1'b1;
+        state_d = AlertHang;
+      end
+      AlertHang: begin
         if (!enable_i) begin
           state_d = Idle;
         end
@@ -263,8 +274,14 @@ module entropy_src_main_sm #(
       Error: begin
         main_sm_err_o = 1'b1;
       end
-      default: state_d = Error;
+      default: begin
+        state_d = Error;
+        main_sm_err_o = 1'b1;
+      end
     endcase
+    if (local_escalate_i) begin
+      state_d = Error;
+    end
   end
 
 endmodule

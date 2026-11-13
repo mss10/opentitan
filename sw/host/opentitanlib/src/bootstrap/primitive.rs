@@ -1,16 +1,18 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use mundane::hash::{Digest, Hasher, Sha256};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
-use zerocopy::AsBytes;
+use zerocopy::{Immutable, IntoBytes};
 
-use crate::bootstrap::{BootstrapOptions, UpdateProtocol};
-use crate::io::spi::{Target, Transfer};
+use crate::app::TransportWrapper;
+use crate::bootstrap::{Bootstrap, BootstrapOptions, UpdateProtocol};
+use crate::io::spi::Transfer;
+use crate::transport::{Capability, ProgressIndicator};
 
-#[derive(AsBytes, Debug, Default)]
+#[derive(Immutable, IntoBytes, Debug, Default)]
 #[repr(C)]
 struct FrameHeader {
     hash: [u8; Frame::HASH_LEN],
@@ -18,7 +20,7 @@ struct FrameHeader {
     flash_offset: u32,
 }
 
-#[derive(AsBytes, Debug)]
+#[derive(Immutable, IntoBytes, Debug)]
 #[repr(C)]
 struct Frame {
     header: FrameHeader,
@@ -42,28 +44,26 @@ impl Frame {
     /// Computes the hash in the header.
     fn header_hash(&self) -> [u8; Frame::HASH_LEN] {
         let frame = self.as_bytes();
-        let sha = Sha256::hash(&frame[Frame::HASH_LEN..]);
-        let mut digest = sha.bytes();
+        let mut digest = Sha256::digest(&frame[Frame::HASH_LEN..]);
         // Note: the OpenTitan HMAC produces the digest in little-endian order,
         // so we reverse the order of the bytes in the digest.
         digest.reverse();
-        digest
+        digest.into()
     }
 
     /// Computes the hash over the entire frame.
     fn frame_hash(&self) -> [u8; Frame::HASH_LEN] {
-        let sha = Sha256::hash(self.as_bytes());
-        let mut digest = sha.bytes();
+        let mut digest = Sha256::digest(self.as_bytes());
         // Note: the OpenTitan HMAC produces the digest in little-endian order,
         // so we reverse the order of the bytes in the digest.
         digest.reverse();
-        digest
+        digest.into()
     }
 
     /// Creates a sequence of frames based on a `payload` binary.
     fn from_payload(payload: &[u8]) -> Vec<Frame> {
         let mut frames = Vec::new();
-        let last_frame = (payload.len() + Frame::DATA_LEN - 1) / Frame::DATA_LEN - 1;
+        let last_frame = payload.len().div_ceil(Frame::DATA_LEN) - 1;
         for (i, chunk) in payload.chunks(Frame::DATA_LEN).enumerate() {
             let mut frame = Frame {
                 header: FrameHeader {
@@ -92,7 +92,9 @@ pub struct Primitive {
 }
 
 impl Primitive {
-    const INTER_FRAME_DELAY: Duration = Duration::from_millis(20);
+    // Imperically, a 50ms IFD improves console itegrity and fixes bootstrap for a slower, Bazel
+    // built Test ROM.
+    const INTER_FRAME_DELAY: Duration = Duration::from_millis(50);
     const FLASH_ERASE_DELAY: Duration = Duration::from_millis(200);
 
     /// Creates a new `Primitive` protocol updater from `options`.
@@ -105,10 +107,35 @@ impl Primitive {
 }
 
 impl UpdateProtocol for Primitive {
+    fn verify_capabilities(
+        &self,
+        _container: &Bootstrap,
+        transport: &TransportWrapper,
+    ) -> Result<()> {
+        transport
+            .capabilities()?
+            .request(Capability::GPIO | Capability::SPI)
+            .ok()?;
+        Ok(())
+    }
+
+    fn uses_common_bootstrap_reset(&self) -> bool {
+        true
+    }
+
     /// Performs the update protocol using the `transport` with the firmware `payload`.
-    fn update(&self, spi: &dyn Target, payload: &[u8]) -> Result<()> {
+    fn update(
+        &self,
+        container: &Bootstrap,
+        transport: &TransportWrapper,
+        payload: &[u8],
+        progress: &dyn ProgressIndicator,
+    ) -> Result<()> {
+        let spi = container.spi_params.create(transport, "BOOTSTRAP")?;
+
         let frames = Frame::from_payload(payload);
 
+        progress.new_stage("", payload.len());
         let mut i = 0;
         while i < frames.len() {
             let frame = &frames[i];
@@ -119,6 +146,7 @@ impl UpdateProtocol for Primitive {
             );
 
             // Write the frame and read back the hash of the previous frame.
+            progress.progress(frame.header.flash_offset as usize);
             let mut prev_hash = [0u8; std::mem::size_of::<Frame>()];
             spi.run_transaction(&mut [Transfer::Both(frame.as_bytes(), &mut prev_hash)])?;
 
@@ -142,6 +170,7 @@ impl UpdateProtocol for Primitive {
             }
             i += 1;
         }
+        progress.progress(payload.len());
         Ok(())
     }
 }

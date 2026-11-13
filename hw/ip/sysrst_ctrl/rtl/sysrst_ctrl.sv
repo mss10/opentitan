@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,9 +7,12 @@
 `include "prim_assert.sv"
 
 module sysrst_ctrl
+  import sysrst_ctrl_pkg::*;
   import sysrst_ctrl_reg_pkg::*;
 #(
-  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}}
+  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}},
+  // Number of cycles a differential skew is tolerated on the alert signal
+  parameter int unsigned AlertSkewCycles = 1
 ) (
   input  clk_i,  // Always-on 24MHz clock(config)
   input  clk_aon_i,  // Always-on 200KHz clock(logic)
@@ -25,9 +28,9 @@ module sysrst_ctrl
   output prim_alert_pkg::alert_tx_t [NumAlerts-1:0] alert_tx_o,
 
   // Wake, reset and interrupt requests
-  output logic wkup_req_o,  // OT wake to pwrmgr
-  output logic aon_sysrst_ctrl_rst_req_o,  // OT reset to rstmgr
-  output logic intr_sysrst_ctrl_o,  // sysrst_ctrl interrupt to PLIC
+  output logic wkup_req_o,  // OT wake to pwrmgr, on AON clock
+  output logic rst_req_o,  // OT reset to rstmgr, on AON clock
+  output logic intr_event_detected_o,  // event interrupt to PLIC, on bus clock
 
   // IOs
   input cio_ac_present_i,  // AC power is present
@@ -37,6 +40,7 @@ module sysrst_ctrl
   input cio_key2_in_i,  // TBD button in tablet; row input from keyboard matrix in a laptop
   input cio_pwrb_in_i,  // Power button in both tablet and laptop
   input cio_lid_open_i,  // lid is open from GMR
+  input cio_flash_wp_l_i, // read back of the flash_wp_l output pad
   output logic cio_bat_disable_o,  // Battery is disconnected
   output logic cio_flash_wp_l_o,//Flash write protect is asserted by sysrst_ctrl
   output logic cio_ec_rst_l_o,  // EC reset is asserted by sysrst_ctrl
@@ -59,8 +63,6 @@ module sysrst_ctrl
   // Alerts and CSR Node //
   /////////////////////////
 
-  import sysrst_ctrl_reg_pkg::*;
-
   sysrst_ctrl_reg2hw_t reg2hw;
   sysrst_ctrl_hw2reg_t hw2reg;
 
@@ -70,6 +72,7 @@ module sysrst_ctrl
   for (genvar i = 0; i < NumAlerts; i++) begin : gen_alert_tx
     prim_alert_sender #(
       .AsyncOn(AlertAsyncOn[i]),
+      .SkewCycles(AlertSkewCycles),
       .IsFatal(1'b1)
     ) u_prim_alert_sender (
       .clk_i,
@@ -92,8 +95,8 @@ module sysrst_ctrl
     .tl_o,
     .reg2hw,
     .hw2reg,
-    .intg_err_o(alerts[0]),
-    .devmode_i (1'b1)
+    // SEC_CM: BUS.INTEGRITY
+    .intg_err_o(alerts[0])
   );
 
   ///////////////////////////////////////
@@ -101,25 +104,34 @@ module sysrst_ctrl
   ///////////////////////////////////////
 
   // Optionally invert some of the input signals
-  logic pwrb_int, key0_int, key1_int, key2_int, ac_present_int, lid_open_int, ec_rst_l_int;
+  logic pwrb_int, key0_int, key1_int, key2_int, ac_present_int, lid_open_int;
+  logic ec_rst_l_int, flash_wp_l_int;
   assign pwrb_int       = reg2hw.key_invert_ctl.pwrb_in.q ^ cio_pwrb_in_i;
   assign key0_int       = reg2hw.key_invert_ctl.key0_in.q ^ cio_key0_in_i;
   assign key1_int       = reg2hw.key_invert_ctl.key1_in.q ^ cio_key1_in_i;
   assign key2_int       = reg2hw.key_invert_ctl.key2_in.q ^ cio_key2_in_i;
   assign ac_present_int = reg2hw.key_invert_ctl.ac_present.q ^ cio_ac_present_i;
   assign lid_open_int   = reg2hw.key_invert_ctl.lid_open.q ^ cio_lid_open_i;
-  // Uninverted input
+  // Uninverted inputs
   assign ec_rst_l_int   = cio_ec_rst_l_i;
+  assign flash_wp_l_int = cio_flash_wp_l_i;
 
   // Synchronize input signals to AON clock
   logic aon_pwrb_int, aon_key0_int, aon_key1_int, aon_key2_int;
-  logic aon_ac_present_int, aon_lid_open_int, aon_ec_rst_l_int;
+  logic aon_ac_present_int, aon_lid_open_int, aon_ec_rst_l_int, aon_flash_wp_l_int;
   prim_flop_2sync #(
-    .Width(7)
+    .Width(8)
   ) u_prim_flop_2sync_input (
     .clk_i(clk_aon_i),
     .rst_ni(rst_aon_ni),
-    .d_i({pwrb_int, key0_int, key1_int, key2_int, ac_present_int, lid_open_int, ec_rst_l_int}),
+    .d_i({pwrb_int,
+          key0_int,
+          key1_int,
+          key2_int,
+          ac_present_int,
+          lid_open_int,
+          ec_rst_l_int,
+          flash_wp_l_int}),
     .q_o({
       aon_pwrb_int,
       aon_key0_int,
@@ -127,7 +139,8 @@ module sysrst_ctrl
       aon_key2_int,
       aon_ac_present_int,
       aon_lid_open_int,
-      aon_ec_rst_l_int
+      aon_ec_rst_l_int,
+      aon_flash_wp_l_int
     })
   );
 
@@ -135,12 +148,12 @@ module sysrst_ctrl
   // Autoblock //
   ///////////////
 
-  // This module operates on both synchronized and unsynchronized signals.
-  // I.e., the passthrough signals are NOT synchronnous to the AON clock.
+  // The registers in this module run on the AON clock.
+  // However, the passthrough signals are NOT synchronous to the AON clock.
   logic pwrb_out_hw, key0_out_hw, key1_out_hw, key2_out_hw;
   sysrst_ctrl_autoblock u_sysrst_ctrl_autoblock (
-    .clk_aon_i,
-    .rst_aon_ni,
+    .clk_i(clk_aon_i),
+    .rst_ni(rst_aon_ni),
     // (Optionally) inverted input signals on AON clock
     .aon_pwrb_int_i(aon_pwrb_int),
     // (Optionally) inverted input signals (not synced to AON clock)
@@ -165,7 +178,7 @@ module sysrst_ctrl
   // This module runs on the AON clock entirely.
   // Hence, its local signals are not prefixed with aon_*.
   logic aon_z3_wakeup_hw;
-  logic aon_ulp_wakeup_pulse_int;
+  logic aon_ulp_wakeup_pulse;
   sysrst_ctrl_ulp u_sysrst_ctrl_ulp (
     .clk_i(clk_aon_i),
     .rst_ni(rst_aon_ni),
@@ -178,19 +191,18 @@ module sysrst_ctrl
     .ulp_lid_debounce_ctl_i(reg2hw.ulp_lid_debounce_ctl),
     .ulp_pwrb_debounce_ctl_i(reg2hw.ulp_pwrb_debounce_ctl),
     .ulp_ctl_i(reg2hw.ulp_ctl),
-    .ulp_status_o(hw2reg.ulp_status),
     // wakeup pulses on AON clock
-    .ulp_wakeup_pulse_o(aon_ulp_wakeup_pulse_int),
+    .ulp_wakeup_pulse_o(aon_ulp_wakeup_pulse),
     .z3_wakeup_hw_o(aon_z3_wakeup_hw)
   );
 
-  /////////////////////////////
-  // Key triggered interrups //
-  /////////////////////////////
+  //////////////////////////////
+  // Key triggered interrupts //
+  //////////////////////////////
 
   // This module runs on the AON clock entirely.
   // Hence, its local signals are not prefixed with aon_*.
-  logic aon_sysrst_ctrl_key_intr;
+  logic [NumKeyIntr-1:0] aon_l2h_key_intr, aon_h2l_key_intr;
   sysrst_ctrl_keyintr u_sysrst_ctrl_keyintr (
     .clk_i(clk_aon_i),
     .rst_ni(rst_aon_ni),
@@ -201,12 +213,13 @@ module sysrst_ctrl
     .key2_int_i(aon_key2_int),
     .ac_present_int_i(aon_ac_present_int),
     .ec_rst_l_int_i(aon_ec_rst_l_int),
+    .flash_wp_l_int_i(aon_flash_wp_l_int),
     // CSRs synced to AON clock
     .key_intr_ctl_i(reg2hw.key_intr_ctl),
     .key_intr_debounce_ctl_i(reg2hw.key_intr_debounce_ctl),
-    .key_intr_status_o(hw2reg.key_intr_status),
     // IRQ running on AON clock
-    .sysrst_ctrl_key_intr_o(aon_sysrst_ctrl_key_intr)
+    .l2h_key_intr_o(aon_l2h_key_intr),
+    .h2l_key_intr_o(aon_h2l_key_intr)
   );
 
   /////////////////////
@@ -215,7 +228,8 @@ module sysrst_ctrl
 
   // This module runs on the AON clock entirely.
   // Hence, its local signals are not prefixed with aon_*.
-  logic aon_sysrst_ctrl_combo_intr, aon_bat_disable_hw, aon_ec_rst_l_hw;
+  logic [NumCombo-1:0] aon_combo_intr;
+  logic aon_bat_disable_hw, aon_ec_rst_l_hw;
   sysrst_ctrl_combo u_sysrst_ctrl_combo (
     .clk_i(clk_aon_i),
     .rst_ni(rst_aon_ni),
@@ -229,14 +243,15 @@ module sysrst_ctrl
     // CSRs synced to AON clock
     .ec_rst_ctl_i(reg2hw.ec_rst_ctl),
     .key_intr_debounce_ctl_i(reg2hw.key_intr_debounce_ctl),
+    .com_pre_sel_ctl_i(reg2hw.com_pre_sel_ctl),
+    .com_pre_det_ctl_i(reg2hw.com_pre_det_ctl),
     .com_sel_ctl_i(reg2hw.com_sel_ctl),
     .com_det_ctl_i(reg2hw.com_det_ctl),
     .com_out_ctl_i(reg2hw.com_out_ctl),
-    .combo_intr_status_o(hw2reg.combo_intr_status),
     // Output signals on AON clock
-    .sysrst_ctrl_combo_intr_o(aon_sysrst_ctrl_combo_intr),
+    .combo_intr_o(aon_combo_intr),
     .bat_disable_hw_o(aon_bat_disable_hw),
-    .rst_req_o(aon_sysrst_ctrl_rst_req_o),
+    .rst_req_o(rst_req_o),
     .ec_rst_l_hw_o(aon_ec_rst_l_hw)
   );
 
@@ -245,7 +260,7 @@ module sysrst_ctrl
   ///////////////////////////////
 
   // This module operates on both synchronized and unsynchronized signals.
-  // I.e., the passthrough signals are NOT synchronnous to the AON clock.
+  // I.e., the passthrough signals are NOT synchronous to the AON clock.
   logic pwrb_out_int, key0_out_int, key1_out_int, key2_out_int, aon_bat_disable_out_int;
   logic aon_z3_wakeup_out_int, aon_ec_rst_out_int_l, aon_flash_wp_out_int_l;
   sysrst_ctrl_pin u_sysrst_ctrl_pin (
@@ -258,6 +273,7 @@ module sysrst_ctrl
     .cio_key2_in_i,
     .cio_ac_present_i,
     .cio_ec_rst_l_i,
+    .cio_flash_wp_l_i,
     .cio_lid_open_i,
     // Signals from autoblock (not synced to AON clock)
     .pwrb_out_hw_i(pwrb_out_hw),
@@ -308,65 +324,64 @@ module sysrst_ctrl
   assign cio_flash_wp_l_en_o = 1'b1;
 
   ///////////////////////////
-  // Interrupt agreggation //
+  // Interrupt aggregation //
   ///////////////////////////
 
-  // OT wakeup signal to pwrmgr, CSRs and signals on AON domain (see #6323)
-  assign wkup_req_o = reg2hw.wkup_status.q;
-  assign hw2reg.wkup_status.de = aon_ulp_wakeup_pulse_int ||
-                                 aon_sysrst_ctrl_combo_intr ||
-                                 aon_sysrst_ctrl_key_intr;
-  assign hw2reg.wkup_status.d = 1'b1;
-
-  // sync the wakeup request (level) to bus clock to trigger an IRQ.
-  logic wkup_req;
-  prim_flop_2sync #(
-    .Width(1)
-  ) u_prim_flop_2sync (
+  sysrst_ctrl_intr u_sysrst_ctrl_intr (
+    .clk_aon_i,
+    .rst_aon_ni,
     .clk_i,
     .rst_ni,
-    .d_i(wkup_req_o),
-    .q_o(wkup_req)
+    .aon_l2h_key_intr_i(aon_l2h_key_intr),
+    .aon_h2l_key_intr_i(aon_h2l_key_intr),
+    .aon_combo_intr_i(aon_combo_intr),
+    .aon_ulp_wakeup_pulse_i(aon_ulp_wakeup_pulse),
+    .wkup_status_i(reg2hw.wkup_status),
+    .intr_state_i(reg2hw.intr_state),
+    .intr_enable_i(reg2hw.intr_enable),
+    .intr_test_i(reg2hw.intr_test),
+    .key_intr_status_i(reg2hw.key_intr_status),
+    .combo_intr_status_i(reg2hw.combo_intr_status),
+    .ulp_status_i(reg2hw.ulp_status),
+    .wkup_status_o(hw2reg.wkup_status),
+    .intr_state_o(hw2reg.intr_state),
+    .key_intr_status_o(hw2reg.key_intr_status),
+    .combo_intr_status_o(hw2reg.combo_intr_status),
+    .ulp_status_o(hw2reg.ulp_status),
+    .intr_o(intr_event_detected_o),
+    .aon_wkup_req_o(wkup_req_o)
   );
 
-  // Instantiate the interrupt module
-  prim_intr_hw #(
-    .Width(1)
-  ) u_prim_intr_hw (
-    .clk_i,
-    .rst_ni,
-    .event_intr_i          (wkup_req),
-    .reg2hw_intr_enable_q_i(reg2hw.intr_enable.q),
-    .reg2hw_intr_test_q_i  (reg2hw.intr_test.q),
-    .reg2hw_intr_test_qe_i (reg2hw.intr_test.qe),
-    .reg2hw_intr_state_q_i (reg2hw.intr_state.q),
-    .hw2reg_intr_state_de_o(hw2reg.intr_state.de),
-    .hw2reg_intr_state_d_o (hw2reg.intr_state.d),
-    .intr_o                (intr_sysrst_ctrl_o)
-  );
+  ////////////////
+  // Assertions //
+  ////////////////
 
   // All outputs should be known value after reset
-  `ASSERT_KNOWN(IntrSysRstCtrlOKnown, intr_sysrst_ctrl_o)
-  `ASSERT_KNOWN(OTWkOKnown, wkup_req_o)
-  `ASSERT_KNOWN(OTRstOKnown, aon_sysrst_ctrl_rst_req_o)
-  `ASSERT_KNOWN(TlODValidKnown, tl_o.d_valid)
-  `ASSERT_KNOWN(TlOAReadyKnown, tl_o.a_ready)
-  `ASSERT_KNOWN(AlertKnownO_A, alert_tx_o)
-  `ASSERT_KNOWN(BatOKnown, cio_bat_disable_o)
-  `ASSERT_KNOWN(ECRSTOKnown, cio_ec_rst_l_o)
-  `ASSERT_KNOWN(PwrbOKnown, cio_pwrb_out_o)
-  `ASSERT_KNOWN(Key0OKnown, cio_key0_out_o)
-  `ASSERT_KNOWN(Key1OKnown, cio_key1_out_o)
-  `ASSERT_KNOWN(Key2OKnown, cio_key2_out_o)
-  `ASSERT_KNOWN(Z3WwakupOKnown, cio_z3_wakeup_o)
-  `ASSERT_KNOWN(BatOEnKnown, cio_bat_disable_en_o)
-  `ASSERT_KNOWN(ECRSTOEnKnown, cio_ec_rst_l_en_o)
-  `ASSERT_KNOWN(PwrbOEnKnown, cio_pwrb_out_en_o)
-  `ASSERT_KNOWN(Key0OEnKnown, cio_key0_out_en_o)
-  `ASSERT_KNOWN(Key1OEnKnown, cio_key1_out_en_o)
-  `ASSERT_KNOWN(Key2OEnKnown, cio_key2_out_en_o)
-  `ASSERT_KNOWN(Z3WakeupOEnKnown, cio_z3_wakeup_en_o)
-  `ASSERT_KNOWN(FlashWpOKnown, cio_flash_wp_l_o)
-  `ASSERT_KNOWN(FlashWpOEnKnown, cio_flash_wp_l_en_o)
+  `ASSERT_KNOWN(IntrEventOKnown_A, intr_event_detected_o)
+  `ASSERT_KNOWN(OTWkOKnown_A, wkup_req_o)
+  `ASSERT_KNOWN(OTRstOKnown_A, rst_req_o)
+  `ASSERT_KNOWN(TlODValidKnown_A, tl_o.d_valid)
+  `ASSERT_KNOWN(TlOAReadyKnown_A, tl_o.a_ready)
+  `ASSERT_KNOWN(AlertKnown_A, alert_tx_o)
+  `ASSERT_KNOWN(BatOKnown_A, cio_bat_disable_o)
+  `ASSERT_KNOWN(ECRSTOKnown_A, cio_ec_rst_l_o)
+  `ASSERT_KNOWN(PwrbOKnown_A, cio_pwrb_out_o)
+  `ASSERT_KNOWN(Key0OKnown_A, cio_key0_out_o)
+  `ASSERT_KNOWN(Key1OKnown_A, cio_key1_out_o)
+  `ASSERT_KNOWN(Key2OKnown_A, cio_key2_out_o)
+  `ASSERT_KNOWN(Z3WwakupOKnown_A, cio_z3_wakeup_o)
+  `ASSERT_KNOWN(FlashWpOKnown_A, cio_flash_wp_l_o)
 
+  // In this IP, all output enables are constantly set to 1
+  `ASSERT(BatOEnIsOne_A, cio_bat_disable_en_o === 1'b1)
+  `ASSERT(ECRSTOEnIsOne_A, cio_ec_rst_l_en_o === 1'b1)
+  `ASSERT(PwrbOEnIsOne_A, cio_pwrb_out_en_o === 1'b1)
+  `ASSERT(Key0OEnIsOne_A, cio_key0_out_en_o === 1'b1)
+  `ASSERT(Key1OEnIsOne_A, cio_key1_out_en_o === 1'b1)
+  `ASSERT(Key2OEnIsOne_A, cio_key2_out_en_o === 1'b1)
+  `ASSERT(Z3WakeupOEnIsOne_A, cio_z3_wakeup_en_o === 1'b1)
+  `ASSERT(FlashWpOEnIsOne_A, cio_flash_wp_l_en_o === 1'b1)
+
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ALERT(RegWeOnehotCheck_A, u_reg, alert_tx_o[0])
 endmodule

@@ -1,14 +1,15 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //############################################################################
 // *Name: io_osc
-// *Module Description: IO Clock Oscilator
+// *Module Description: IO Clock Oscillator
 //############################################################################
 
 module io_osc (
   input vcore_pok_h_i,    // VCORE POK @3.3V
   input io_en_i,          // IO Source Clock Enable
+  input io_osc_cal_i,     // IO Oscillator Calibrated
 `ifdef AST_BYPASS_CLK
   input clk_io_ext_i,     // FPGA/VERILATOR Clock input
 `endif
@@ -16,39 +17,71 @@ module io_osc (
 );
 
 `ifndef AST_BYPASS_CLK
+`ifndef SYNTHESIS
 // Behavioral Model
 ////////////////////////////////////////
 timeunit 1ns / 1ps;
-import ast_bhv_pkg::* ;
 
-localparam real IoClkPeriod = 1000000/96;  // ~10416.666667ps (96Mhz)
-logic clk, en_dly;
+real CLK_PERIOD;
+
+reg init_start;
+initial init_start = 1'b0;
 
 initial begin
-  clk = 1'b0;
-  $display("\nIO Clock Period: %0dps", IoClkPeriod);
-  en_dly = 1'b0;  // to block init X
-  #(IO_EN_RDLY + VCAON_POK_RDLY + 1) en_dly = 1'b1;
+  #1;
+  init_start  = 1'b1;
+  #1;
+  $display("\n%m: IO Clock Power-up Frequency: %0d Hz", $rtoi(10**9/CLK_PERIOD));
 end
 
-// Enable 5us RC Delay
-logic io_en_dly, io_clk_dly;
+// Enable 5us RC Delay on rise
+wire en_osc_re_buf, en_osc_re;
+buf #(ast_bhv_pkg::IO_EN_RDLY, 0) b0 (en_osc_re_buf, (vcore_pok_h_i && io_en_i));
+assign en_osc_re = en_osc_re_buf && init_start;
 
-assign #(IO_EN_RDLY) io_en_dly = io_en_i;
-assign io_clk_dly = io_en_dly && en_dly;
 
 // Clock Oscillator
 ////////////////////////////////////////
-logic en_osc;
+real CalIoClkPeriod, UncIoClkPeriod, IoClkPeriod;
+
+initial CalIoClkPeriod = $itor( 1000000/96 );                    // ~10416.666667ps (96MHz)
+initial UncIoClkPeriod = $itor( $urandom_range(40000, 16667) );  // 40000-16667ps (25-60MHz)
+
+assign IoClkPeriod = (io_osc_cal_i && init_start) ? CalIoClkPeriod : UncIoClkPeriod;
+assign CLK_PERIOD = IoClkPeriod/1000;
+
+// Free running oscillator
+reg clk_osc;
+initial clk_osc = 1'b1;
 
 always begin
-   #(IoClkPeriod/2000) clk = ~clk && en_osc;
+   #(CLK_PERIOD/2) clk_osc = ~clk_osc;
 end
-`else  // of AST_BYPASS_CLK
-// SYNTHESIS/VERILATOR/LINTER/FPGA
+
+logic en_osc;
+
+// HDL Clock Gate
+logic en_clk, clk;
+
+always_latch begin
+  if ( !clk_osc ) en_clk = en_osc;
+end
+
+assign clk = clk_osc && en_clk;
+`else  // of SYNTHESIS
+// SYNTHESIS/LINTER
 ///////////////////////////////////////
-logic io_clk_dly;
-assign io_clk_dly = 1'b1;
+logic en_osc_re;
+assign en_osc_re = vcore_pok_h_i && io_en_i;
+
+logic clk, en_osc;
+assign clk = 1'b0;
+`endif  // of SYNTHESIS
+`else  // of AST_BYPASS_CLK
+// VERILATOR/FPGA
+///////////////////////////////////////
+logic en_osc_re;
+assign en_osc_re = vcore_pok_h_i && io_en_i;
 
 // Clock Oscillator
 ////////////////////////////////////////
@@ -64,11 +97,9 @@ prim_clock_gating #(
 );
 `endif
 
-logic en_osc_re, en_osc_fe;
+logic en_osc_fe;
 
-assign en_osc_re = vcore_pok_h_i && io_en_i && io_clk_dly;
-
-// Syncronize en_osc to clk FE for glitch free disable
+// Synchronize en_osc to clk FE for glitch free disable
 always_ff @( negedge clk, negedge vcore_pok_h_i ) begin
   if ( !vcore_pok_h_i ) begin
     en_osc_fe <= 1'b0;
@@ -87,5 +118,14 @@ prim_clock_buf #(
   .clk_i ( clk ),
   .clk_o ( io_clk_o )
 );
+
+
+`ifdef SYNTHESIS
+/////////////////////////
+// Unused Signals
+/////////////////////////
+logic unused_sigs;
+assign unused_sigs = ^{ io_osc_cal_i, en_osc, en_osc_fe };
+`endif
 
 endmodule : io_osc

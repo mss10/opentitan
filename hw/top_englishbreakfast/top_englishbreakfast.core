@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:systems:top_englishbreakfast:0.1"
@@ -7,24 +7,20 @@ description: "Technology-independent English Breakfast toplevel"
 filesets:
   files_rtl_generic:
     depend:
-      - lowrisc:systems:topgen
-      - lowrisc:constants:top_pkg
-      - lowrisc:tlul:headers
+      - lowrisc:englishbreakfast_ip:pwrmgr_pkg
+      - lowrisc:earlgrey_ip:alert_handler_pkg
+      - lowrisc:systems:top_englishbreakfast_ast_pkg
+      - lowrisc:englishbreakfast_constants:top_racl_pkg
       # Manually instantiated
-      - lowrisc:ip:rv_core_ibex
       - lowrisc:ip:rv_dm
-      - lowrisc:opentitan:top_englishbreakfast_rv_plic
       - lowrisc:ip:tlul
       - lowrisc:prim:all
       - lowrisc:prim:ram_1p_adv
       - lowrisc:prim:ram_1p_scr
       - lowrisc:prim:flash
-      - lowrisc:ip:flash_ctrl
       - lowrisc:ip:sram_ctrl
       # Instantiated by topgen
       - lowrisc:ip:uart:0.1
-      - lowrisc:ip:gpio
-      - lowrisc:ip:pinmux_component
       - lowrisc:ip:rv_timer
       - lowrisc:ip:spi_device
       - lowrisc:ip:spi_host
@@ -32,16 +28,37 @@ filesets:
       - lowrisc:ip:entropy_src
       - lowrisc:ip:hmac
       - lowrisc:ip:kmac
-      - lowrisc:ip:keymgr
-      - lowrisc:ip:otp_ctrl
+      - lowrisc:ip:keymgr_dpe_pkg
       - lowrisc:ip:lc_ctrl
       - lowrisc:ip:usbdev
       - lowrisc:top_englishbreakfast:xbar_main
       - lowrisc:top_englishbreakfast:xbar_peri
-      - lowrisc:ip:rstmgr
-      - lowrisc:ip:pwrmgr
+      - lowrisc:englishbreakfast_ip:clkmgr
+      - lowrisc:englishbreakfast_ip:flash_ctrl
+      - lowrisc:englishbreakfast_ip:pinmux
+      - lowrisc:englishbreakfast_ip:pwrmgr
+      - lowrisc:englishbreakfast_ip:rstmgr
+      - lowrisc:englishbreakfast_ip:rv_plic
+      - lowrisc:englishbreakfast_ip:gpio
+      - lowrisc:englishbreakfast_ip:rv_core_ibex
       - lowrisc:ip:rom_ctrl
       - lowrisc:ip:aon_timer
+      - lowrisc:tlul:headers
+      - lowrisc:systems:top_englishbreakfast_pkg
+      - lowrisc:englishbreakfast_constants:top_pkg
+    files:
+      - rtl/autogen/top_englishbreakfast.sv
+      - rtl/autogen/englishbreakfast_pd_main.sv
+      - rtl/autogen/englishbreakfast_pd_aon.sv
+    file_type: systemVerilogSource
+
+  files_rtl_testing:
+    depend:
+      - lowrisc:englishbreakfast_constants:testing_rnd_cnst_pkg
+
+  files_rtl_tapeout:
+    depend:
+      - lowrisc:englishbreakfast_constants:prod_rnd_cnst_pkg
 
   files_verilator_waiver:
     depend:
@@ -66,37 +83,41 @@ filesets:
       # common waivers
       - lowrisc:lint:common
       - lowrisc:lint:comportable
+    files:
+      - lint/top_englishbreakfast.vbl
+    file_type: veribleLintWaiver
 
+
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
 
 parameters:
   SYNTHESIS:
     datatype: bool
     paramtype: vlogdefine
-  # For value definition, please see ip/prim/rtl/prim_pkg.sv
-  PRIM_DEFAULT_IMPL:
-    datatype: str
-    paramtype: vlogdefine
-    description: Primitives implementation to use, e.g. "prim_pkg::ImplGeneric".
-    default: prim_pkg::ImplGeneric
 
 
 targets:
   default: &default_target
     filesets:
-      - tool_verilator   ? (files_verilator_waiver)
-      - tool_ascentlint  ? (files_ascentlint_waiver)
-      - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_verilator    ? (files_verilator_waiver)
+      - tool_ascentlint   ? (files_ascentlint_waiver)
+      - tool_veriblelint  ? (files_veriblelint_waiver)
+      - tool_slang        ? (files_slang_waiver)
+      - fileset_tapeout   ? (files_rtl_tapeout)
+      - "!fileset_tapeout ? (files_rtl_testing)"
       - files_rtl_generic
-    parameters:
-      - PRIM_DEFAULT_IMPL=prim_pkg::ImplGeneric
     toplevel: top_englishbreakfast
 
   sim:
     default_tool: icarus
     filesets:
+      - fileset_tapeout   ? (files_rtl_tapeout)
+      - "!fileset_tapeout ? (files_rtl_testing)"
       - files_rtl_generic
-    parameters:
-      - PRIM_DEFAULT_IMPL=prim_pkg::ImplGeneric
     toplevel: top_englishbreakfast
 
   lint:

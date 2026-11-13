@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,7 +7,7 @@
 // produces the alert cause and class trigger signals.
 //
 
-module alert_handler_class import alert_pkg::*; (
+module alert_handler_class import alert_handler_pkg::*; (
   input [NAlerts-1:0]                   alert_trig_i,      // alert trigger
   input [N_LOC_ALERT-1:0]               loc_alert_trig_i,  // alert trigger
   input [NAlerts-1:0]                   alert_en_i,        // alert enable

@@ -1,24 +1,105 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any, Callable, Dict, List, Optional
+from .constants import CsrAddrs
+from .ext_regs import OTBNExtRegs
 from .flags import FlagGroups
-from .wsr import WSRFile
+from .ispr import DumbISPR
+from .kmac_ispr import KmacStatusCSR, KmacCtrlCSR, KmacCfgCSR, KmacStrbCSR
+from .mai_ispr import MaiCtrlCSR, MaiStatusCSR
+from .trace import Trace
+from .wsr import WSRFile, URNDWSR
+
+
+class WrapperCSR:
+    """A CSR that delegates read/write logic to external callback functions.
+
+    Useful for registers that map to non-standard logic.
+    """
+
+    def __init__(self,
+                 read_func: Optional[Callable[[], int]] = None,
+                 write_func: Optional[Callable[[int], Any]] = None):
+
+        self._read_func = read_func if read_func else self._default_read
+        self._write_func = write_func if write_func else self._default_write
+
+    def _default_read(self) -> int:
+        """Default behavior: Return 0"""
+        return 0
+
+    def _default_write(self, value: int) -> None:
+        """Default behavior: Ineffective write"""
+        return
+
+    def read_unsigned(self) -> int:
+        return self._read_func()
+
+    def write_unsigned(self, value: int) -> None:
+        self._write_func(value)
+
+
+class UrndCtrlCSR(DumbISPR):
+    '''The URND_CTRL CSR.
+
+    Only issues commands to the URND PRNG and always reads as 0. The command handling lives in the
+    URND WSR.
+    '''
+    def __init__(self, name: str, urnd: URNDWSR):
+        super().__init__(name, 32)
+        self._urnd = urnd
+        self.on_start()
+
+    def read_unsigned(self) -> int:
+        return 0
+
+    def write_unsigned(self, value: int) -> None:
+        # Keep the written value for tracing. We ignore the _value attribute that gets updated when
+        # committing anyway.
+        super().write_unsigned(value)
+        # Forward the write to the URND WSR implementing the URND control logic.
+        self._urnd.write_urnd_ctrl(value)
 
 
 class CSRFile:
     '''A model of the CSR file'''
-    def __init__(self) -> None:
+    def __init__(self, wsrs: WSRFile, ext_regs: OTBNExtRegs) -> None:
         self.flags = FlagGroups()
+        self.RND_PREFETCH = WrapperCSR(
+            write_func=lambda val: wsrs.RND.request_value()
+        )
+        self.URND_CTRL = UrndCtrlCSR('URND_CTRL', wsrs.URND)
+        self.URND_STATUS = WrapperCSR(read_func=wsrs.URND.read_urnd_status)
+        self.KMAC_STATUS = KmacStatusCSR('KMAC_STATUS')
+        self.KMAC_CTRL = KmacCtrlCSR('KMAC_CTRL')
+        self.KMAC_CFG = KmacCfgCSR('KMAC_CFG')
+        self.KMAC_STRB = KmacStrbCSR('KMAC_STRB')
+        self.RND = WrapperCSR(read_func=wsrs.RND.read_u32)
+        self.URND = WrapperCSR(read_func=wsrs.URND.read_u32)
+        self.MAI_CTRL = MaiCtrlCSR()
+        self.MAI_STATUS = MaiStatusCSR()
+        self.INSN_CNT = WrapperCSR(read_func=ext_regs.read_insn_cnt)
 
-        self._known_indices = set()
-        self._known_indices.add(0x7c0)  # FG0
-        self._known_indices.add(0x7c1)  # FG1
-        self._known_indices.add(0x7c8)  # FLAGS
-        for idx in range(0x7d0, 0x7d8):
-            self._known_indices.add(idx)  # MODi
-        self._known_indices.add(0x7d8)  # RND_PREFETCH
-        self._known_indices.add(0xfc0)  # RND
+        # This does not include all CSR addresses because:
+        # - FG0 and FG1 map to the same underlying register.
+        # - MOD0 .. MOD7 map to the MOD WSR.
+        self._by_addr: Dict[CsrAddrs, Any] = {
+            CsrAddrs.FLAGS: self.flags,
+            CsrAddrs.RND_PREFETCH: self.RND_PREFETCH,
+            CsrAddrs.URND_CTRL: self.URND_CTRL,
+            CsrAddrs.URND_STATUS: self.URND_STATUS,
+            CsrAddrs.KMAC_STATUS: self.KMAC_STATUS,
+            CsrAddrs.KMAC_CTRL: self.KMAC_CTRL,
+            CsrAddrs.KMAC_CFG: self.KMAC_CFG,
+            CsrAddrs.KMAC_STRB: self.KMAC_STRB,
+            CsrAddrs.MAI_CTRL: self.MAI_CTRL,
+            CsrAddrs.RND: self.RND,
+            CsrAddrs.URND: self.URND,
+            CsrAddrs.MAI_STATUS: self.MAI_STATUS,
+            CsrAddrs.INSN_CNT: self.INSN_CNT,
+        }
 
     @staticmethod
     def _get_field(field_idx: int, field_size: int, val: int) -> int:
@@ -35,62 +116,88 @@ class CSRFile:
 
     def check_idx(self, idx: int) -> bool:
         '''Return True if idx points to a valid CSR; False otherwise.'''
-        return idx in self._known_indices
+        # TODO: Clean this up once we have python 3.12+
+        return idx in CsrAddrs._value2member_map_
 
     def read_unsigned(self, wsrs: WSRFile, idx: int) -> int:
-        if 0x7c0 <= idx <= 0x7c1:
-            # FG0/FG1
-            fg = idx - 0x7c0
+        csr_addr = CsrAddrs(idx)
+
+        # The flag groups are implemented as one physical register. Reading one flag group is
+        # therefore actually a read from both groups.
+        if CsrAddrs.FG0 <= csr_addr <= CsrAddrs.FG1:
+            fg = csr_addr - CsrAddrs.FG0
             return self._get_field(fg, 4, self.flags.read_unsigned())
 
-        if idx == 0x7c8:
-            # FLAGS register
-            return self.flags.read_unsigned()
-
-        if 0x7d0 <= idx <= 0x7d7:
+        if CsrAddrs.MOD0 <= csr_addr <= CsrAddrs.MOD7:
             # MOD0 .. MOD7. MODi is bits [32*(i+1)-1..32*i]
-            mod_n = idx - 0x7d0
+            mod_n = csr_addr - CsrAddrs.MOD0
             return self._get_field(mod_n, 32, wsrs.MOD.read_unsigned())
 
-        if idx == 0x7d8:
-            # RND_PREFETCH register
-            return 0
+        csr = self._by_addr.get(csr_addr)
+        if csr is not None:
+            return int(csr.read_unsigned())
 
-        if idx == 0xfc0:
-            # RND register
-            return wsrs.RND.read_u32()
-
-        raise RuntimeError('Unknown CSR index: {:#x}'.format(idx))
+        raise RuntimeError('Unhandled CSR index: {:#x}'.format(idx))
 
     def write_unsigned(self, wsrs: WSRFile, idx: int, value: int) -> None:
         assert 0 <= value < (1 << 32)
+        csr_addr = CsrAddrs(idx)
 
-        if 0x7c0 <= idx <= 0x7c1:
-            # FG0/FG1
-            fg = idx - 0x7c0
+        # The flag groups are impleme`  nted as one physical register. Writing to one flag group is
+        # therefore actually a write to both groups.
+        if CsrAddrs.FG0 <= csr_addr <= CsrAddrs.FG1:
+            fg = csr_addr - CsrAddrs.FG0
             old = self.flags.read_unsigned()
             self.flags.write_unsigned(self._set_field(fg, 4, value & 0xf, old))
             return
 
-        if idx == 0x7c8:
-            # FLAGS register
-            self.flags.write_unsigned(value)
-            return
-
-        if 0x7d0 <= idx <= 0x7d7:
+        if CsrAddrs.MOD0 <= csr_addr <= CsrAddrs.MOD7:
             # MOD0 .. MOD7. MODi is bits [32*(i+1)-1..32*i]. read,modify,write.
-            mod_n = idx - 0x7d0
+            mod_n = csr_addr - CsrAddrs.MOD0
             old = wsrs.MOD.read_unsigned()
             wsrs.MOD.write_unsigned(self._set_field(mod_n, 32, value, old))
             return
 
-        if idx == 0x7d8:
-            # RND_PREFETCH
-            # TODO: Implement.
+        csr = self._by_addr.get(csr_addr)
+        if csr is not None:
+            csr.write_unsigned(value)
             return
 
-        if idx == 0xfc0:
-            # RND register (which ignores writes)
-            return
+        raise RuntimeError('Unhandled CSR index: {:#x}'.format(idx))
 
-        raise RuntimeError('Unknown CSR index: {:#x}'.format(idx))
+    def commit(self) -> None:
+        self.flags.commit()
+        self.URND_CTRL.commit()
+        self.KMAC_STATUS.commit()
+        self.KMAC_CTRL.commit()
+        self.KMAC_CFG.commit()
+        self.KMAC_STRB.commit()
+        self.MAI_CTRL.commit()
+        self.MAI_STATUS.commit()
+
+    def abort(self) -> None:
+        self.flags.abort()
+        self.URND_CTRL.abort()
+        self.KMAC_STATUS.abort()
+        self.KMAC_CTRL.abort()
+        self.KMAC_CFG.abort()
+        self.KMAC_STRB.abort()
+        self.MAI_CTRL.abort()
+        # MAI_STATUS is always committed because only the MAI updates it.
+        self.MAI_STATUS.commit()
+
+    def changes(self) -> List[Trace]:
+        ret: List[Trace] = []
+        ret += self.flags.changes()
+        ret += self.URND_CTRL.changes()
+        ret += self.KMAC_STATUS.changes()
+        ret += self.KMAC_CTRL.changes()
+        ret += self.KMAC_CFG.changes()
+        ret += self.KMAC_STRB.changes()
+        ret += self.MAI_CTRL.changes()
+        ret += self.MAI_STATUS.changes()
+        return ret
+
+    def wipe(self) -> None:
+        self.flags.write_unsigned(0)
+        # TODO: Wipe or reset MAI CTRL/STATUS?

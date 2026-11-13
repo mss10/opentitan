@@ -1,8 +1,8 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: "lowrisc:ip:rv_plic_component:0.1"
+name: lowrisc:earlgrey_ip:rv_plic_component:0.1
 description: "RISC-V Platform Interrupt Controller (PLIC)"
 
 filesets:
@@ -10,7 +10,9 @@ filesets:
     depend:
       - lowrisc:prim:assert
       - lowrisc:prim:alert
+      - lowrisc:prim:max_tree
       - lowrisc:prim:flop_2sync
+      - lowrisc:prim:reg_we_check
     files:
       - rtl/rv_plic_gateway.sv
       - rtl/rv_plic_target.sv

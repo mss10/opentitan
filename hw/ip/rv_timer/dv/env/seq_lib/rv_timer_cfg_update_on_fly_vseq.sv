@@ -1,10 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 // This sequence update timer configuration while its active/running, this
 // includes updating mtime, mtimecmp. Randomly step and prescale updated
-// after disabling timer. This seq also exercise upating timer cfg multiple
+// after disabling timer. This seq also exercises updating timer cfg multiple
 // times when timer is close to expire (1 prescale before).
 
 class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
@@ -14,7 +14,7 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
   rand bit upd_cfg_in_end;
 
   // Defing min clocks to have room to update timer cfg
-  uint64 min_clks_until_expiry = 10_000;
+  uint64 min_clks_until_expiry = 100;
 
   constraint ticks_c {
     solve prescale before ticks;
@@ -32,7 +32,7 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
 
   function void pre_randomize();
     super.pre_randomize();
-    max_clks_until_expiry = 1_000_000; // Redefining max clock to avoid timeout
+    max_clks_until_expiry = 10_000; // Redefining max clock to avoid timeout
   endfunction
 
   task body();
@@ -41,6 +41,7 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
 
       // disable timers
       csr_wr(.ptr(ral.ctrl[0]), .value(ral.ctrl[0].get_reset()));
+      if (cfg.under_reset) return;
 
       for (int hart = 0; hart < NUM_HARTS; hart++) begin
         for (int timer = 0; timer < NUM_TIMERS; timer++) begin
@@ -69,7 +70,7 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
               num_clks = $urandom_range((num_clks / 10), (num_clks / 2));
             end
             status_read_for_clks(.hart(hart), .clks(num_clks));
-
+            if (cfg.under_reset) return;
             // update timer cfg (step/prescale)
             if (!upd_cfg_in_end & $urandom_range(0, 1)) begin
               // update either step or prescale
@@ -94,7 +95,7 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
             // compare_val without overflowing with below randomization which is
             // ((1 << 64)-1) - (max_step_value*300) = 'hFFFFFFFFFFFED52B
             // min_timer_val is calculated using max random value subtracted from
-            // timer_val with below randomiztion which is (max_step_value*300) = 'h12AD4
+            // timer_val with below randomization which is (max_step_value*300) = 'h12AD4
             if ((compare_val[hart][timer] >= 64'hFFFFFFFFFFFED52B) |
                 (timer_val[hart] <= 64'h12AD4)) begin
               timer_at_min_max_val = 1'b1;
@@ -123,10 +124,14 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
             end
             // Read timer val reg to get latest value of timer for calc of num_clks
             read_timer_val_reg(.hart(hart), .mtime_val(timer_val[hart]));
+
+            // Return here to avoid iterating in the loop if in reset
+            if (cfg.under_reset) return;
           end
 
           // check for no intr asserted
           read_intr_status_reg(.hart(hart), .status_val(read_data));
+          if (cfg.under_reset) return;
           `DV_CHECK_EQ(read_data, 0)
 
           // random read till for clks = (num_clks - (prescale[hart] + 4))
@@ -138,15 +143,18 @@ class rv_timer_cfg_update_on_fly_vseq extends rv_timer_random_vseq;
 
           // wait for (prescale[*] + 5) to let timer expire as per new cfg,
           // one clock extra to avoid race condition btw scoreboard predict and seq reg read
-          cfg.clk_rst_vif.wait_clks(prescale[hart] + 5);
+          cfg.clk_rst_vif.wait_clks_or_rst(prescale[hart] + 5);
 
           `uvm_info(`gfn, $sformatf("Timer expired last read"), UVM_LOW)
           read_intr_status_reg(.hart(hart), .status_val(read_data));
+          if (cfg.under_reset) return;
+
           `DV_CHECK_EQ_FATAL(read_data, (1 << timer))
 
           // clear intr status randomly while timer is still enable and check for sticky interrupt
-          if ($urandom_range(0, 1)) clear_intr_state(.hart(hart), .timer(timer));
-
+          if ($urandom_range(0, 1)) begin
+            clear_intr_state(.hart(hart), .timer(timer));
+          end
           // disable timers and clear interrupt
           cfg_timer(.hart(hart), .timer(timer), .enable(1'b0));
           clear_intr_state(.hart(hart), .timer(timer));

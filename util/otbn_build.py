@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-
 """Build software running on OTBN
 
-Each assembly source file is first assembled with otbn-as. All resulting objects
-are then linked with otbn-ld. The resulting ELF file is converted into an
-embeddable RV32 object file using objcopy.  In this object, all symbols
+Each assembly source file is first assembled with otbn_as.py. All resulting
+objects are then linked with otbn_ld.py. The resulting ELF file is converted
+into an embeddable RV32 object file using objcopy.  In this object, all symbols
 are prefixed with `_otbn_app_<appname>_` (only global symbols are included).
 
 environment variables:
@@ -16,14 +15,14 @@ environment variables:
   sensible default values are provided (tools are generally expected to be in
   the $PATH).
 
-  OTBN_AS            path to otbn-as, the OTBN assembler
-  OTBN_LD            path to otbn-ld, the OTBN linker
+  OTBN_TOOLS         path to the OTBN linker and assembler tools
   RV32_TOOL_LD       path to RV32 ld
   RV32_TOOL_AS       path to RV32 as
+  RV32_TOOL_AR       path to RV32 ar
   RV32_TOOL_OBJCOPY  path to RV32 objcopy
 
   The RV32* environment variables are used by both this script and the OTBN
-  wrappers (otbn-as and otbn-ld) to find tools in a RV32 toolchain.
+  wrappers (otbn_as.py and otbn_ld.py) to find tools in a RV32 toolchain.
 
 outputs:
   The build process produces multiple files inside the output directory.
@@ -35,6 +34,7 @@ outputs:
 """
 
 import argparse
+import binascii
 import logging as log
 import os
 import shlex
@@ -42,9 +42,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+import re
+import lz4.block
 
-REPO_TOP = Path(__file__).parent.parent.resolve()
+import otbn_as
+import otbn_ld
+from elftools.elf.elffile import ELFFile, SymbolTableSection  # type: ignore
 
 
 def cmd_to_str(cmd: List[str]) -> str:
@@ -66,22 +70,26 @@ def run_cmd(args, display_cmd=None):
     subprocess.run(str_args, check=True)
 
 
-def run_tool(tool: str, out_file: Path, args) -> None:
+def run_tool(tool, out_file: Path, args) -> None:
     '''Run tool to produce out_file (using an '-o' argument)
 
     This works by writing to a temporary file (in the same directory) and then
     atomically replacing any existing destination file when done. This is
     needed if we need to run multiple otbn_build processes that generate the
-    same files in parallel (a requirement because of our current Meson-based
-    infrastructure).
+    same files in parallel (this was a requirement of our old Meson-based
+    infrastructure; it may not be needed now that we use Bazel).
 
     '''
     out_dir, out_base = os.path.split(out_file)
-    tmpfile = tempfile.NamedTemporaryFile(prefix=out_base, dir=out_dir,
+    tmpfile = tempfile.NamedTemporaryFile(prefix=out_base,
+                                          dir=out_dir,
                                           delete=False)
     try:
-        run_cmd([tool, '-o', tmpfile.name] + args,
-                cmd_to_str([tool, '-o', out_file] + args))
+        if type(tool) is str:
+            run_cmd([tool, '-o', tmpfile.name] + args,
+                    cmd_to_str([tool, '-o', out_file] + args))
+        else:
+            tool(['', '-o', tmpfile.name] + list(map(str, args)))
 
         # If we get here, the tool ran successfully, producing the output file.
         # Use os.replace to rename appropriately.
@@ -98,20 +106,17 @@ def run_tool(tool: str, out_file: Path, args) -> None:
 
 
 def call_otbn_as(src_file: Path, out_file: Path):
-    otbn_as_cmd = os.environ.get('OTBN_AS',
-                                 str(REPO_TOP / 'hw/ip/otbn/util/otbn-as'))
-    run_tool(otbn_as_cmd, out_file, [src_file])
+    run_tool(otbn_as.main, out_file, [src_file])
 
 
-def call_otbn_ld(src_files: List[Path], out_file: Path, linker_script: Optional[Path]):
-    otbn_ld_cmd = os.environ.get('OTBN_LD',
-                                 str(REPO_TOP / 'hw/ip/otbn/util/otbn-ld'))
+def call_otbn_ld(src_files: List[Path], out_file: Path,
+                 linker_script: Optional[Path]):
 
-    args = []
+    args = ['-gc-sections', '-gc-keep-exported']
     if linker_script:
         args += ['-T', linker_script]
     args += src_files
-    run_tool(otbn_ld_cmd, out_file, args)
+    run_tool(otbn_ld.main, out_file, args)
 
 
 def call_rv32_objcopy(args: List[str]):
@@ -120,31 +125,148 @@ def call_rv32_objcopy(args: List[str]):
     run_cmd([rv32_tool_objcopy] + args)
 
 
+def call_rv32_ar(args: List[str]):
+    rv32_tool_ar = os.environ.get('RV32_TOOL_AR', 'riscv32-unknown-elf-ar')
+    run_cmd([rv32_tool_ar] + args)
+
+
+def get_app_checksum(elf_path: str) -> int:
+    '''Get the CRC32 checksum of an OTBN app.
+
+    The checksum is computed over first the `.text` (IMEM) section, then the
+    `.data` section, in order. Each 32-bit word of IMEM or DMEM becomes a
+    48-bit value: {imem, addr, value}, where `imem` is 1 or 0 depending on if
+    the value is for IMEM or DMEM, `addr` is the word-offset within OTBN's
+    memory zero-extended to 15 bits. The checksum is computed over this value
+    in little-endian order.
+    '''
+    with open(elf_path, 'rb') as elf:
+        elf_file = ELFFile(elf)
+        imem = elf_file.get_section_by_name('.text').data()
+        data = elf_file.get_section_by_name('.data').data()
+
+        # Compute the checksum over the IMEM.
+        checksum = 0
+        for i in range(0, len(imem), 4):
+            checksum = binascii.crc32(imem[i:i + 4], checksum)
+            location = (1 << 15) | (i // 4)
+            location_bytes = int.to_bytes(location, length=2, byteorder='little')
+            checksum = binascii.crc32(location_bytes, checksum)
+
+        # The starting offset for the data section might not be zero, so pull
+        # it from the symbol table.
+        symtab = elf_file.get_section_by_name('.symtab')
+        data_start_symbols = symtab.get_symbol_by_name('_dmem_data_start')
+        if len(data_start_symbols) != 1:
+            raise ValueError(f'Expected one symbol for `_dmem_data_start`, '
+                             f'got {len(data_start_symbols)}: '
+                             f'{data_start_symbols}')
+        data_start_offset = data_start_symbols[0]['st_value']
+        if (data_start_offset % 4 != 0):
+            # If `.data` is not word-aligned, it will cause problems for Ibex
+            # loading the app.
+            raise ValueError('Start of `.data` section is not word-aligned.')
+
+        # Continue computing the checksum over `.data`.
+        for i in range(0, len(data), 4):
+            checksum = binascii.crc32(data[i:i + 4], checksum)
+            location = ((data_start_offset + i) // 4)
+            location_bytes = int.to_bytes(location, length=2, byteorder='little')
+            checksum = binascii.crc32(location_bytes, checksum)
+
+    return checksum
+
+
+def get_otbn_syms(elf_path: str) -> List[Tuple[str, int]]:
+    '''Get externally-visible symbols from an ELF
+
+    Symbols are returned as a list of triples: (name, address). This
+    discards locals and also anything in .scratchpad, since those addresses
+    aren't bus-accessible.
+    '''
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # First, run objcopy to discard local symbols and the .scratchpad
+        # section. We also use --extract-symbol since we don't care about
+        # anything but the symbol data anyway.
+        syms_path = os.path.join(tmpdir, 'syms.elf')
+        call_rv32_objcopy([
+            '-O', 'elf32-littleriscv', '--remove-section=.scratchpad',
+            '--extract-symbol'
+        ] + [elf_path, syms_path])
+
+        # Load the file and use elftools to grab any symbol table
+        with open(syms_path, 'rb') as syms_fd:
+            syms_file = ELFFile(syms_fd)
+            symtab = syms_file.get_section_by_name('.symtab')
+            if symtab is None or not isinstance(symtab, SymbolTableSection):
+                # No symbol table found or we did find a section called
+                # .symtab, but it isn't actually a symbol table (huh?!). Give
+                # up.
+                return []
+
+            ret = []
+            for sym in symtab.iter_symbols():
+                if sym['st_info']['bind'] != 'STB_GLOBAL':
+                    continue
+                addr = sym['st_value']
+                assert isinstance(addr, int)
+                ret.append((sym.name, addr))
+            return ret
+
+
+def compress_chunked(data: bytes, chunk_size: int = 1024) -> bytes:
+    # If there is no data (e.g., empty DMEM section),
+    # return a single 4-byte dummy header
+    # to prevent objcopy from crashing on an empty file.
+    if not data:
+        return bytes([0, 0, 0, 0])
+
+    result = bytearray()
+    for i in range(0, len(data), chunk_size):
+        chunk = data[i: i + chunk_size]
+        comp = lz4.block.compress(chunk, mode='high_compression', store_size=False)
+        # 4-byte header per chunk
+        result += len(comp).to_bytes(2, byteorder='little')
+        result += len(chunk).to_bytes(2, byteorder='little')
+        result += comp
+    return bytes(result)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        '--out-dir',
-        '-o',
-        required=False,
-        default=".",
-        help="Output directory (default: %(default)s)")
-    parser.add_argument(
-        '--verbose',
-        '-v',
-        action='store_true',
-        help='Print commands that are executed.')
-    parser.add_argument(
-        '--script',
-        '-T',
-        dest="linker_script",
-        required=False,
-        help="Linker script")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--out-dir',
+                        '-o',
+                        required=False,
+                        default=".",
+                        help="Output directory (default: %(default)s)")
+    parser.add_argument('--archive',
+                        '-a',
+                        action='store_true',
+                        help='Archive the rv32embed.o file into a library.')
+    parser.add_argument('--verbose',
+                        '-v',
+                        action='store_true',
+                        help='Print commands that are executed.')
+    parser.add_argument('--script',
+                        '-T',
+                        dest="linker_script",
+                        required=False,
+                        help="Linker script")
     parser.add_argument(
         '--app-name',
         '-n',
         required=False,
         help="Name of the application, used as basename for the output. "
-             "Default: basename of the first source file.")
+        "Default: basename of the first source file.")
+    parser.add_argument(
+        '--no-assembler',
+        '-x',
+        action='store_true',
+        required=False,
+        help="Use when input files have already been assembled into object "
+        "files and only linking is required.")
     parser.add_argument('src_files', nargs='+', type=str, metavar='SRC_FILE')
     args = parser.parse_args()
 
@@ -152,57 +274,143 @@ def main() -> int:
     log.basicConfig(level=log_level, format="%(message)s")
 
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     src_files = [Path(f) for f in args.src_files]
     for src_file in src_files:
         if not src_file.exists():
             log.fatal("Source file %s not found." % src_file)
             return 1
-    obj_files = [out_dir / f.with_suffix('.o').name for f in src_files]
+
+    obj_files = []
+    for f in src_files:
+        if f.suffix == '.o':
+            obj_files.append(f)
+        else:
+            obj_files.append(out_dir / f.with_suffix('.o').name)
 
     app_name = args.app_name or str(src_files[0].stem)
+    archive = args.archive
 
     try:
-        for src_file, obj_file in zip(src_files, obj_files):
-            call_otbn_as(src_file, obj_file)
+        if not args.no_assembler:
+            for src_file, obj_file in zip(src_files, obj_files):
+                call_otbn_as(src_file, obj_file)
 
         out_elf = out_dir / (app_name + '.elf')
-        call_otbn_ld(obj_files, out_elf, linker_script = args.linker_script)
+        call_otbn_ld(obj_files, out_elf, linker_script=args.linker_script)
 
-        # Use objcopy to create an ELF that can be linked into a RISC-V binary
-        # (to run on Ibex). This should set flags for all sections to look like
-        # rodata (since they're not executable on Ibex, nor does it make sense
-        # for Ibex code to manipulate OTBN data sections "in place"). We name
-        # them with a .otbn prefix, so end up with e.g. .rodata.otbn.text and
-        # .rodata.otbn.data.
+        # out_elf is a fully-linked OTBN binary, but we want to be able to use
+        # it from Ibex, the host processor. To make this work, we generate an
+        # ELF file that can be linked into the Ibex image.
         #
-        # Symbols that are exposed by the binary (including those giving the
-        # start and end of imem and dmem) will be relocated as part of the
-        # link, so they'll give addresses in the Ibex address space. So that
-        # the RISC-V binary can link multiple OTBN applications, we give them
-        # an application-specific prefix. (Note: This prefix is used in
-        # sw/device/lib/runtime/otbn.h: so needs to be kept in sync with that).
-        sym_pfx = '_otbn_app_{}_'.format(app_name)
+        # This ELF contains all initialised data (the .text and .data
+        # sections). We change the flags to treat them like rodata (since
+        # they're not executable on Ibex, nor does it make sense for Ibex code
+        # to manipulate OTBN data sections "in place") and add a .rodata.otbn
+        # prefix to the section names.
+        #
+        # The symbols exposed by the binary will be relocated as part of the
+        # link, so they'll point into the Ibex address space. To allow linking
+        # against multiple OTBN applications, we give the symbols an
+        # application-specific prefix. (Note: This prefix is used in driver
+        # code: so needs to be kept in sync with that).
+        #
+        # As well as the initialised data and relocated symbols, we also want
+        # to add (absolute) symbols that have the OTBN addresses of the symbols
+        # in question. Unfortunately, objcopy doesn't seem to have a "make all
+        # symbols absolute" command, so we have to do it by hand. This also
+        # means constructing an enormous objcopy command line :-/ If we run out
+        # of space, we might have to use elftools to inject the addresses after
+        # the objcopy.
+        host_side_pfx = '_otbn_local_app_{}_'.format(app_name)
+        otbn_side_pfx = '_otbn_remote_app_{}_'.format(app_name)
+        # Compute the CRC32 checksum and add it as a constant. Ibex can use
+        # this with the LOAD_CHECKSUM register to ensure the app was loaded
+        # correctly.
+        checksum = get_app_checksum(out_elf)
         out_embedded_obj = out_dir / (app_name + '.rv32embed.o')
-        args = (['-O', 'elf32-littleriscv',
-                 '--prefix-sections=.rodata.otbn',
-                 '--set-section-flags=*=alloc,load,readonly',
-                 '--prefix-symbols', sym_pfx] +
-                [out_elf,
-                 out_embedded_obj])
 
-        call_rv32_objcopy(args)
+        # Generate the uncompressed object
+        uncomp_obj = out_dir / f"{app_name}_uncomp.o"
+        uncomp_args = [
+            '-O', 'elf32-littleriscv',
+            '--set-section-flags=*=alloc,load,readonly',
+            '--remove-section=.scratchpad', '--remove-section=.bss',
+            '--remove-section=.debug*',
+            '--prefix-sections=.rodata.otbn', '--prefix-symbols', host_side_pfx
+        ]
+        for name, addr in get_otbn_syms(out_elf):
+            uncomp_args += ['--add-symbol', f'{otbn_side_pfx}{name}=0x{addr:x}']
+        uncomp_args += ['--add-symbol', f'{otbn_side_pfx}_checksum={checksum:#x}']
 
-        # After objcopy has finished, we have to do a little surgery to
-        # overwrite the ELF e_type field (a 16-bit little-endian number at file
-        # offset 0x10). It will currently be 0x2 (ET_EXEC), which means a
-        # fully-linked executable file. Binutils doesn't want to link with
-        # anything of type ET_EXEC (since it usually wouldn't make any sense to
-        # do so). Hack the type to be 0x1 (ET_REL), which means an object file.
+        call_rv32_objcopy(uncomp_args + [str(out_elf), str(uncomp_obj)])
+
+        with open(uncomp_obj, 'r+b') as emb_file:
+            emb_file.seek(0x10)
+            emb_file.write(b'\1\0')
+
+        # Generate the compressed object using LZ4
+        imem_bin = out_dir / f"{app_name}_imem.bin"
+        dmem_bin = out_dir / f"{app_name}_dmem.bin"
+        call_rv32_objcopy(['-O', 'binary', '-j', '.text', str(out_elf), str(imem_bin)])
+        call_rv32_objcopy(['-O', 'binary', '-j', '.data', str(out_elf), str(dmem_bin)])
+
+        imem_compressed = out_dir / f"{app_name}_imem.lz4"
+        dmem_compressed = out_dir / f"{app_name}_dmem.lz4"
+
+        with open(imem_bin, 'rb') as f_in, open(imem_compressed, 'wb') as f_out:
+            imem_data = f_in.read()
+            imem_uncompressed_bytes = len(imem_data)
+            f_out.write(compress_chunked(imem_data, chunk_size=1024))
+
+        with open(dmem_bin, 'rb') as f_in, open(dmem_compressed, 'wb') as f_out:
+            dmem_data = f_in.read()
+            dmem_uncompressed_bytes = len(dmem_data)
+            f_out.write(compress_chunked(dmem_data, chunk_size=1024))
+
+        imem_obj = out_dir / f"{app_name}_imem.o"
+        dmem_obj = out_dir / f"{app_name}_dmem.o"
+        call_rv32_objcopy(['-I', 'binary', '-O', 'elf32-littleriscv', '-B',
+                           'riscv', str(imem_compressed), str(imem_obj)])
+        call_rv32_objcopy(['-I', 'binary', '-O', 'elf32-littleriscv', '-B',
+                           'riscv', str(dmem_compressed), str(dmem_obj)])
+
+        comp_obj_intermediate = out_dir / f"{app_name}_comp_intermediate.o"
+        rv32_tool_ld = os.environ.get('RV32_TOOL_LD', 'riscv32-unknown-elf-ld')
+        run_cmd([rv32_tool_ld, '-r', '-m', 'elf32lriscv',
+                 '-o', str(comp_obj_intermediate), str(imem_obj), str(dmem_obj)])
+
+        def path_to_sym(path):
+            return '_binary_' + re.sub(r'[^a-zA-Z0-9]', '_', str(path))
+
+        imem_sym_base = path_to_sym(imem_compressed)
+        dmem_sym_base = path_to_sym(dmem_compressed)
+
+        comp_obj = out_dir / f"{app_name}_comp.o"
+        comp_args = [
+            '--rename-section', '.data=.rodata.otbn.compressed,alloc,load,readonly,data,contents',
+            '--redefine-sym', f"{imem_sym_base}_start={host_side_pfx}imem_compressed_start",
+            '--redefine-sym', f"{imem_sym_base}_end={host_side_pfx}imem_compressed_end",
+            '--redefine-sym', f"{dmem_sym_base}_start={host_side_pfx}dmem_compressed_start",
+            '--redefine-sym', f"{dmem_sym_base}_end={host_side_pfx}dmem_compressed_end",
+            '--add-symbol', f'{otbn_side_pfx}imem_uncompressed_bytes={imem_uncompressed_bytes}',
+            '--add-symbol', f'{otbn_side_pfx}dmem_uncompressed_bytes={dmem_uncompressed_bytes}',
+        ]
+        call_rv32_objcopy(comp_args + [str(comp_obj_intermediate), str(comp_obj)])
+
+        # Merge the uncompressed and compressed object into a single binary
+        # We rely on the garbage collection to filter out the unused binary
+        run_cmd([rv32_tool_ld, '-r', '-m', 'elf32lriscv',
+                 '-o', str(out_embedded_obj), str(uncomp_obj), str(comp_obj)])
+
         with open(out_embedded_obj, 'r+b') as emb_file:
             emb_file.seek(0x10)
             emb_file.write(b'\1\0')
+
+        if archive:
+            out_embedded_a = out_dir / ('lib' + app_name + '.rv32embed.a')
+            call_rv32_ar(['rcs', out_embedded_a, out_embedded_obj])
 
     except subprocess.CalledProcessError as e:
         # Show a nicer error message if any of the called programs fail.

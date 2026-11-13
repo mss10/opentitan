@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:csrng:0.1"
@@ -7,10 +7,15 @@ description: "csrng"
 filesets:
   files_rtl:
     depend:
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
       - lowrisc:prim:all
+      - lowrisc:prim:count
+      - lowrisc:prim:edge_detector
       - lowrisc:prim:assert
       - lowrisc:prim:lc_sync
+      - lowrisc:prim:mubi
+      - lowrisc:prim:onehot
+      - lowrisc:prim:sparse_fsm
       - lowrisc:ip:tlul
       - lowrisc:ip:aes
       - lowrisc:ip:otp_ctrl_pkg
@@ -18,13 +23,10 @@ filesets:
     files:
       - rtl/csrng_reg_top.sv
       - rtl/csrng_main_sm.sv
-      - rtl/csrng_track_sm.sv
       - rtl/csrng_state_db.sv
       - rtl/csrng_cmd_stage.sv
       - rtl/csrng_block_encrypt.sv
-      - rtl/csrng_ctr_drbg_cmd.sv
-      - rtl/csrng_ctr_drbg_upd.sv
-      - rtl/csrng_ctr_drbg_gen.sv
+      - rtl/csrng_ctr_drbg.sv
       - rtl/csrng_core.sv
       - rtl/csrng.sv
     file_type: systemVerilogSource
@@ -48,6 +50,12 @@ filesets:
     file_type: waiver
 
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
+
 parameters:
   SYNTHESIS:
     datatype: bool
@@ -59,6 +67,7 @@ targets:
     filesets:
       - tool_verilator  ? (files_verilator_waiver)
       - tool_ascentlint ? (files_ascentlint_waiver)
+      - tool_slang      ? (files_slang_waiver)
       - files_rtl
     toplevel: csrng
 
@@ -72,5 +81,3 @@ targets:
         mode: lint-only
         verilator_options:
           - "-Wall"
-
-

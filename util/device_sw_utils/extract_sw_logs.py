@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """Script to convert logs placed in given sections into SystemVerilog-friendly
@@ -22,7 +22,7 @@ from elftools.elf import elffile
 
 # A printf statement in C code is converted into a single write to a reserved
 # address in the RAM. The value written is the address of the log_fields_t
-# struct constucted from the log. It has the following fields:
+# struct constructed from the log. It has the following fields:
 # severity (int), 4 bytes:        0 (I), 1 (W), 2 (E), 3 (F)
 # file_name (int, ptr), 4 bytes:  Pointer to file_name string.
 # Line no (int), 4 bytes:         Line number of the log message.
@@ -52,20 +52,33 @@ def cleanup_newlines(string):
 def cleanup_format(_format):
     '''Converts C style format specifiers to SV style.
 
-    It makes the folllowing substitutions:
+    It makes the following substitutions:
     - Change %[N]?i, %[N]?u --> %[N]?d
     - Change %[N]?x, %[N]?p --> %[N]?h
     - Change %[N]?X         --> %[N]?H
 
     The below is a non-standard format specifier added in OpenTitan
-    (see sw/device/lib/base/print.c for more details). A single %z specifier
+    (see sw/device/lib/base/print.c for more details). A single %!s specifier
     consumes 2 arguments instead of 1 and hence has to converted as such to
     prevent the log monitor in SystemVerilog from throwing an error at runtime.
-    - Change %[N]?z         --> %[N]?s[%d].'''
-    _format = re.sub(r"(%-?\d*)[iu]", r"\1d", _format)
-    _format = re.sub(r"(%-?\d*)[xp]", r"\1h", _format)
-    _format = re.sub(r"(%-?\d*)X", r"\1H", _format)
-    _format = re.sub(r"(%-?\d*)z", r"\1s[%d]", _format)
+    The %!{x, X, y, Y} specifiers have the same property, but can print garbage,
+    so they're converted to pointers instead.
+    - Change %![N]?s        --> %[N]?s[%d].
+    - Change %![N]?[xXyY]   --> %[N]?h.
+    - Change %![N]?b        --> %[N]?d.
+
+    Status values are printed as hexadecimal values which can be manually decoded
+    by users as necessary, to prevent errors occurring in tests due to lacking
+    support for this formatting specifier. JSON support for status printing is
+    likewise just replaced by displaying the hex.
+    - Change %!?[N]?r        --> %8h'''
+    _format = re.sub(r"%(-?\d*)[iu]", r"%\1d", _format)
+    _format = re.sub(r"%(-?\d*)[xp]", r"%\1h", _format)
+    _format = re.sub(r"%(-?\d*)X", r"%\1H", _format)
+    _format = re.sub(r"%!(-?\d*)s", r"%\1s[%d]", _format)
+    _format = re.sub(r"%!(-?\d*)[xXyY]", r"%\1h[%d]", _format)
+    _format = re.sub(r"%!(-?\d*)b", r"%\1d[%d]", _format)
+    _format = re.sub(r"%!?(-?\d*)r", r"%8h", _format)
     _format = re.sub(r"%([bcodhHs])", r"%0\1", _format)
     return cleanup_newlines(_format)
 
@@ -80,7 +93,7 @@ def get_string_format_specifier_indices(_format):
 
     It is assumed that _format has been passed through `cleanup_format()`.
     '''
-    pattern = '''
+    pattern = r'''
          %                    # literal "%"
          (?:[-+0 #]{0,5})     # optional flags
          (?:\d+|\*)?          # width
@@ -96,8 +109,10 @@ def get_string_format_specifier_indices(_format):
     index = 0
     result = []
     for match in m:
-        if match[1] == '%': continue
-        if match[0] == 's': result.append(str(index))
+        if match[1] == '%':
+            continue
+        if match[0] == 's':
+            result.append(str(index))
         index += 1
     return ' '.join(result).strip()
 
@@ -114,15 +129,17 @@ def get_addr_strings(ro_contents):
 
     This function processes the read-only sections of the elf supplied as
     a list of ro_content tuples comprising of base addr, size and data in bytes
-    and converts it into an {addr: string} dict which is returned.'''
+    and converts it into an {addr: (string, length} dict which is returned.
+    We preserve the original length of the string because the string may
+    go through cleanup methods which will alter it.'''
     result = {}
     for ro_content in ro_contents:
         str_start = 0
         base_addr, size, data = ro_content
         while (str_start < size):
             str_end = data.find(b'\0', str_start)
-            # Skip the remainder of this section since it can't contain any C-strings if
-            # there are no nul bytes.
+            # Skip the remainder of this section since it can't contain any
+            # C-strings if there are no null bytes.
             if str_end == -1:
                 break
             # Skip if start and end is the same
@@ -131,6 +148,7 @@ def get_addr_strings(ro_contents):
                 continue
             # Get full string address by adding base addr to the start.
             addr = base_addr + str_start
+            length = str_end - str_start
             string = cleanup_newlines(data[str_start:str_end].decode(
                 'utf-8', errors='replace'))
             if addr in result:
@@ -138,7 +156,7 @@ def get_addr_strings(ro_contents):
                 exc_msg += "addr: {} string: {}\n".format(addr, result[addr])
                 exc_msg += "addr: {} string: {}\n".format(addr, string)
                 raise IndexError(exc_msg)
-            result[addr] = string
+            result[addr] = (string, length)
             str_start = str_end + 1
     return result
 
@@ -149,12 +167,13 @@ def get_str_at_addr(str_addr, addr_strings):
     It may be possible that the input addr is an offset within the string.
     If true, then it returns remainder of the string starting at the offset.'''
     for addr in addr_strings.keys():
-        if addr <= str_addr < addr + len(addr_strings[addr]):
-            return addr_strings[addr][str_addr - addr:].strip()
-    raise KeyError("string at addr {} not found".format(str_addr))
+        string, length = addr_strings[addr]
+        if addr <= str_addr < addr + length:
+            return string[str_addr - addr:].strip()
+    raise KeyError(f"string at addr {str_addr:x} not found")
 
 
-def extract_sw_logs(elf_file, logs_fields_section, ro_sections):
+def extract_sw_logs(elf_file, logs_fields_section):
     '''This function extracts contents from the logs fields section, and the
     read only sections, processes them and generates a tuple of (results) -
     log with fields and (rodata) - constant strings with their addresses.
@@ -162,32 +181,40 @@ def extract_sw_logs(elf_file, logs_fields_section, ro_sections):
     # Open the elf file.
     with open(elf_file, 'rb') as f:
         elf = elffile.ELFFile(f)
-        # Parse the ro sections to get {addr: string} pairs.
         ro_contents = []
-        for ro_section in ro_sections:
-            section = elf.get_section_by_name(name=ro_section)
-            if section:
-                base_addr = int(section.header['sh_addr'])
-                size = int(section.header['sh_size'])
-                data = section.data()
-                ro_contents.append((base_addr, size, data))
-            else:
-                print("Error: {} section not found in {}".format(
-                    ro_section, elf_file))
-                sys.exit(1)
+        for section_idx in range(elf.num_sections()):
+            section = elf.get_section(section_idx)
+            # Only consider sections stored in the image.
+            if section.header['sh_type'] != "SHT_PROGBITS":
+                continue
+
+            # Ignore the logs fields section.
+            if section.name == logs_fields_section:
+                continue
+
+            # Ignore the debug sections.
+            if section.name.startswith(".debug"):
+                continue
+            if section.name.startswith("__llvm"):
+                continue
+
+            base_addr = int(section.header['sh_addr'])
+            size = int(section.header['sh_size'])
+            data = section.data()
+            ro_contents.append((base_addr, size, data))
+
         addr_strings = get_addr_strings(ro_contents)
 
         # Dump the {addr: string} data.
         rodata = ""
         for addr in addr_strings.keys():
             rodata += "addr: {}\n".format(hex(addr)[2:])
-            string = cleanup_newlines(addr_strings[addr])
+            string, _ = addr_strings[addr]
             rodata += "string: {}\n".format(string)
 
         # Parse the logs fields section to extract the logs.
         section = elf.get_section_by_name(name=logs_fields_section)
         if section:
-            logs_base_addr = int(section.header['sh_addr'])
             logs_size = int(section.header['sh_size'])
             logs_data = section.data()
         else:
@@ -195,15 +222,18 @@ def extract_sw_logs(elf_file, logs_fields_section, ro_sections):
                 logs_fields_section, elf_file))
             sys.exit(1)
 
+        header_size = 4
+        logs_offset, = struct.unpack('I', logs_data[0:header_size])
+
         # Dump the logs with fields.
         result = ""
-        num_logs = logs_size // LOGS_FIELDS_SIZE
+        num_logs = (logs_size - header_size) // LOGS_FIELDS_SIZE
         for i in range(num_logs):
-            start = i * LOGS_FIELDS_SIZE
+            start = header_size + i * LOGS_FIELDS_SIZE
             end = start + LOGS_FIELDS_SIZE
             severity, file_addr, line, nargs, format_addr = struct.unpack(
                 'IIIII', logs_data[start:end])
-            result += "addr: {}\n".format(hex(logs_base_addr + start)[2:])
+            result += "addr: {}\n".format(hex(logs_offset + start)[2:])
             result += "severity: {}\n".format(severity)
             result += "file: {}\n".format(
                 prune_filename(get_str_at_addr(file_addr, addr_strings)))
@@ -224,11 +254,6 @@ def main():
                         '-f',
                         default=LOGS_FIELDS_SECTION,
                         help="Elf section where log fields are written.")
-    parser.add_argument('--rodata-sections',
-                        '-r',
-                        nargs="+",
-                        action="append",
-                        help="Elf sections with rodata.")
     parser.add_argument('--name',
                         '-n',
                         required=True,
@@ -239,19 +264,8 @@ def main():
                         help="Output directory.")
     args = parser.parse_args()
 
-    if args.rodata_sections is None:
-        ro_sections = [RODATA_SECTION]
-    else:
-        # TODO: We want the `--rodata-sections` arg to have the 'extend' action
-        # which is only available in Python 3.8. To maintain compatibility with
-        # Python 3.6 (which is the minimum required version for OpenTitan), we
-        # flatten the list here instead.
-        ro_sections = list(
-            set([section for lst in args.rodata_sections for section in lst]))
-
     os.makedirs(args.outdir, exist_ok=True)
-    rodata, result = extract_sw_logs(args.elf_file, args.logs_fields_section,
-                                     ro_sections)
+    rodata, result = extract_sw_logs(args.elf_file, args.logs_fields_section)
 
     outfile = os.path.join(args.outdir, args.name + ".rodata.txt")
     with open(outfile, "w", encoding='utf-8') as f:

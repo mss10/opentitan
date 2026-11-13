@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -34,7 +34,7 @@ covergroup tl_a_chan_cov_cg(string name, int valid_source_width, string path) wi
     bins values[] = {Get, PutFullData, PutPartialData};
   }
   cp_mask: coverpoint item.a_mask {
-    bins all_enables  = {'1};
+    bins all_enables  = {{MaskWidth{1'b1}}};
     bins others       = default;
   }
   cp_size: coverpoint item.a_size {
@@ -70,7 +70,8 @@ class tl_agent_cov extends dv_base_agent_cov #(tl_agent_cfg);
 
   // knob to create m_outstanding_item_w_same_addr_cov_obj, even design supports more than
   // 1 outstanding items, but may not support they use the same address
-  // TODO: may need to disable it for spi_device and hmac even they support 2 oustanding items
+  // TODO(#16840): may need to disable it for spi_device and hmac even they support 2 outstanding
+  // items
   bit en_cov_outstanding_item_w_same_addr = 1;
 
   // item coverage, call sample(item) at the end of transaction to sample them
@@ -86,21 +87,21 @@ class tl_agent_cov extends dv_base_agent_cov #(tl_agent_cfg);
                                "PutFullData_mask_not_match_size",
                                "addr_not_align_mask",
                                "addr_not_align_size",
-                               "mask_not_in_enabled_lanes",
+                               "mask_not_in_active_lanes",
                                "size_over_max"};
     super.build_phase(phase);
     m_pending_req_on_rst_cg = new("m_pending_req_on_rst_cg", `gfn);
     m_max_outstanding_cg    = new("m_max_outstanding_cg", cfg.max_outstanding_req, `gfn);
 
     if (cfg.max_outstanding_req > 1 && en_cov_outstanding_item_w_same_addr) begin
-      m_outstanding_item_w_same_addr_cov_obj = new(.name("m_outstanding_item_w_same_addr_cov_obj"),
-                                                   .path(`gfn));
+      m_outstanding_item_w_same_addr_cov_obj =
+          new({`gfn, "::m_outstanding_item_w_same_addr_cov_obj"});
     end
 
     if (cfg.if_mode == dv_utils_pkg::Host) begin
       m_tl_a_chan_cov_cg = new("m_tl_a_chan_cov_cg", cfg.valid_a_source_width, `gfn);
       foreach (tl_error_names[i]) begin
-        m_tl_error_cov_objs[tl_error_names[i]] = new(.name(tl_error_names[i]), .path(`gfn));
+        m_tl_error_cov_objs[tl_error_names[i]] = new({`gfn, "::", tl_error_names[i]});
       end
     end else begin // device mode
       m_tl_d_chan_cov_cg = new("m_tl_d_chan_cov_cg", `gfn);
@@ -118,8 +119,8 @@ class tl_agent_cov extends dv_base_agent_cov #(tl_agent_cfg);
             item.get_error_PutFullData_mask_size_mismatched());
         m_tl_error_cov_objs["addr_not_align_mask"].sample(item.get_error_addr_size_misaligned());
         m_tl_error_cov_objs["addr_not_align_size"].sample(item.get_error_addr_size_misaligned());
-        m_tl_error_cov_objs["mask_not_in_enabled_lanes"].sample(
-            item.get_error_mask_not_in_enabled_lanes());
+        m_tl_error_cov_objs["mask_not_in_active_lanes"].sample(
+            item.get_error_mask_not_in_active_lanes());
         m_tl_error_cov_objs["size_over_max"].sample(item.get_error_size_over_max());
       end
     end else begin // device mode

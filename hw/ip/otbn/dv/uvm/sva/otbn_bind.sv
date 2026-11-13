@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -24,8 +24,18 @@ module otbn_bind;
     .clk_i    (clk_i),
     .rst_ni   (rst_ni),
     .reg2hw   (reg2hw),
+    .hw2reg   (hw2reg),
     .done_i   (done),
-    .idle_o_i (idle_o)
+    .idle_o_i (idle_o),
+
+    .otbn_dmem_scramble_key_req_busy_i(otbn_dmem_scramble_key_req_busy),
+    .otbn_imem_scramble_key_req_busy_i(otbn_imem_scramble_key_req_busy),
+
+    .status_q_i(status_q),
+    .busy_secure_wipe,
+
+    .imem_rdata_bus(imem_rdata_bus),
+    .dmem_rdata_bus(dmem_rdata_bus)
   );
 
 endmodule

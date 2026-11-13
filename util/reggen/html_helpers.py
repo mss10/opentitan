@@ -1,10 +1,15 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging as log
 import re
 from typing import List, Match, Optional, Set
+
+
+def get_reg_link(rname: str) -> str:
+    '''Return regname with a HTML link to itself'''
+    return '<a href="#{}">{}</a>'.format(rname.lower(), rname)
 
 
 def expand_paras(s: str, rnames: Set[str]) -> List[str]:
@@ -22,13 +27,14 @@ def expand_paras(s: str, rnames: Set[str]) -> List[str]:
     !!FOO.field will generate a link to that register.
 
     Returns a list of rendered paragraphs
-
     '''
     # Start by splitting into paragraphs. The regex matches a newline followed
     # by one or more lines that just contain whitespace. Then render each
     # paragraph with the _expand_paragraph worker function.
-    paras = [_expand_paragraph(paragraph.strip(), rnames)
-             for paragraph in re.split(r'\n(?:\s*\n)+', s)]
+    paras = [
+        _expand_paragraph(paragraph.strip(), rnames)
+        for paragraph in re.split(r'\n(?:\s*\n)+', s)
+    ]
 
     # There will always be at least one paragraph (splitting an empty string
     # gives [''])
@@ -38,17 +44,26 @@ def expand_paras(s: str, rnames: Set[str]) -> List[str]:
 
 def _expand_paragraph(s: str, rnames: Set[str]) -> str:
     '''Expand a single paragraph, as described in _get_desc_paras'''
+
     def fieldsub(match: Match[str]) -> str:
         base = match.group(1).partition('.')[0].lower()
-        if base in rnames:
+        # If we do not find the register name, there is a chance that this
+        # is a multireg that spans more than one register entry.
+        # We check whether at least _0 and _1 exist (via a set intersection),
+        # and still insert the link if these names exist.
+        # Note that we do not have to modify the link name since we insert
+        # a link target without the index suffix right before the first multireg
+        # entry in the register table.
+        mr_names = set([base + "_0", base + "_1"])
+        if base in rnames or len(rnames & mr_names) == 2:
             if match.group(1)[-1] == ".":
-                return ('<a href="#Reg_' + base + '"><code class=\"reg\">' +
+                return ('<a href="#' + base + '"><code class=\"reg\">' +
                         match.group(1)[:-1] + '</code></a>.')
             else:
-                return ('<a href="#Reg_' + base + '"><code class=\"reg\">' +
+                return ('<a href="#' + base + '"><code class=\"reg\">' +
                         match.group(1) + '</code></a>')
-        log.warn('!!' + match.group(1).partition('.')[0] +
-                 ' not found in register list.')
+        log.warning('!!' + match.group(1).partition('.')[0] +
+                    ' not found in register list.')
         return match.group(0)
 
     # Split out pre-formatted text. Because the call to re.split has a capture

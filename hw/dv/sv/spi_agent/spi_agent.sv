@@ -1,8 +1,8 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-class spi_agent extends dv_base_agent#(
+class spi_agent extends dv_reactive_agent #(
     .CFG_T          (spi_agent_cfg),
     .DRIVER_T       (spi_driver),
     .HOST_DRIVER_T  (spi_host_driver),
@@ -28,6 +28,12 @@ class spi_agent extends dv_base_agent#(
     end else begin
       `uvm_info(`gfn, "spi agent is configure in Host mode", UVM_HIGH)
     end
+    cfg.has_req_fifo = 1;
   endfunction : build_phase
+
+  function void connect_phase(uvm_phase phase);
+    super.connect_phase(phase);
+    monitor.host_analysis_port.connect(sequencer.host_mon_analysis_imp);
+  endfunction
 
 endclass

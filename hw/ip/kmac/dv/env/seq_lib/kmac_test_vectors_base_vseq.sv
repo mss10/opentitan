@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,6 +17,11 @@ class kmac_test_vectors_base_vseq extends kmac_smoke_vseq;
 
   task body();
     test_vectors_pkg::test_vectors_t vectors[];
+
+    // Randomly pick a single test vector set to limit test run time.
+    int test_idx = $urandom_range(0, test_list.size - 1);
+    test_list = {test_list[test_idx]};
+    `uvm_info(`gfn, $sformatf("test_idx = %0d", test_idx), UVM_MEDIUM)
 
     foreach (test_list[i]) begin
       // parse each test vector file

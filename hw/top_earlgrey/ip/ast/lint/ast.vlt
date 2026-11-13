@@ -1,5 +1,26 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // waiver file for ast
+
+`verilator_config
+
+// ast_clks_byp.sv has an always_latch block which doesn't actually do anything
+// because the enable signal (!scan_mode_i) is always true. Verilator notices
+// and complains, but we're doing this on purpose.
+lint_off -rule NOLATCH -file "*/rtl/ast_clks_byp_primary.sv"
+
+// Manually mark a clock enable: if we don't tell Verilator we're doing it on
+// purpose, it will warn us that there's a path from "normal" logic through to
+// a clock signal.
+clock_enable -module "ast_clks_byp_primary" -var "clk_ext_en"
+
+// The behavioral models of the power good detectors drive their outputs
+// through delays, which the chip simulation ignores with `--no-timing`.
+// Waive the reports here, so that `-Werror-STMTDLY -Werror-ASSIGNDLY` in the
+// simulation target catches a delay added anywhere else.
+lint_off -rule STMTDLY   -file "*/rtl/vio_pgd.sv"
+lint_off -rule ASSIGNDLY -file "*/rtl/vio_pgd.sv"
+lint_off -rule STMTDLY   -file "*/rtl/vcc_pgd.sv"
+lint_off -rule ASSIGNDLY -file "*/rtl/vcc_pgd.sv"

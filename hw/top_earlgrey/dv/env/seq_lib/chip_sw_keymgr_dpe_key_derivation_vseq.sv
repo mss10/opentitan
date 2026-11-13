@@ -1,0 +1,938 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+// This sequence interacts with the test (sw/device/tests/keymgr_dpe_key_derivation_test.c)
+// and performs the checks on digest data.
+
+// Detailed test description
+// - In the SW test, write fixed value to OTP for root_key and write creator and owner
+//   seeds in NVM. And then reboot the chip.
+// - In the SV sequence, backdoor read Device ID and ROM digest through CSRs.
+// - For HardwareRevisionSecret, use the constant values in design.
+// - Configure the keymgr dpe and derive the `CreatorRootKey` from the UDS.
+// - Verify the correctness of the generated `CreatorRootKey`.
+// - Generate keys for OTBN / AES / KMAC / SW / HMAC and verify each of the generated keys.
+// - Derive the `CreatorIntKey` from `CreatorRootKey` (consumes the field entropy).
+// - Verify the correctness of the generated `CreatorIntKey`.
+// - Generate keys for OTBN / AES / KMAC / SW / HMAC and verify each of the generated keys.
+// - Derive the `OwnerIntKey` from `CreatorIntKey`.
+// - Verify the correctness of the generated `OwnerIntKey`.
+// - Generate keys for OTBN / AES / KMAC / SW / HMAC and verify each of the generated keys.
+// - Derive the `OwnerKey` from `OwnerIntKey`.
+// - Verify the correctness of the generated `OwnerKey`.
+// - Generate keys for OTBN / AES / KMAC / SW / HMAC and verify each of the generated keys.
+// - Derive the `OwnerKey` again to generate custom DPE context without overwriting
+//   the `OwnerKey`.
+// - Verify the correctness of the generated custom DPE context.
+// - Generate keys for OTBN / AES / KMAC / SW / HMAC and verify each of the generated keys.
+// - Generate keys for OTBN / SW from `OwnerKey` and verify each of the generated keys.
+
+class chip_sw_keymgr_dpe_key_derivation_vseq extends chip_sw_base_vseq;
+  `uvm_object_utils(chip_sw_keymgr_dpe_key_derivation_vseq)
+
+  `uvm_object_new
+
+  typedef bit [kmac_pkg::AppDigestW-1:0]                      digest_t;
+  typedef bit [TL_DW-1:0]                                     tl_data_t;
+  typedef bit [keymgr_dpe_pkg::KeyWidth-1:0]                  key_t;
+  typedef key_t [keymgr_dpe_pkg::Shares-1:0]                  key_shares_t;
+  typedef bit [keymgr_dpe_pkg::WideHwKeyWidth-1:0]            wide_key_t;
+  typedef wide_key_t [keymgr_dpe_pkg::Shares-1:0]             wide_key_shares_t;
+  typedef tl_data_t [keymgr_dpe_reg_pkg::NumSaltReg-1:0]      salt_t;
+  typedef tl_data_t [keymgr_dpe_reg_pkg::NumSwBindingReg-1:0] sw_binding_t;
+
+  typedef struct packed {
+    sw_binding_t                                SoftwareBinding;
+    bit [keymgr_dpe_pkg::DeviceIdWidth-1:0]     DeviceIdentifier;
+    bit [lc_ctrl_pkg::LcKeymgrDivWidth-1:0]     HealthMeasurement;
+    key_t                                       RomDigest;
+    key_t                                       HardwareRevisionSeed;
+  } adv_creator_data_t;
+
+  // Must match the advance width defined as localparam inside the keymgr_dpe.sv.
+  localparam int DpeAdvDataWidth = $bits(adv_creator_data_t);
+  typedef bit [DpeAdvDataWidth-1:0] adv_data_t;
+
+  typedef struct packed {
+    // some portions are unused, which are 0s
+    bit [(DpeAdvDataWidth - keymgr_dpe_pkg::KeyWidth - keymgr_dpe_pkg::SwBindingWidth) - 1 : 0]
+                 unused;
+    sw_binding_t SoftwareBinding;
+    key_t        FieldEntropy;
+  } adv_creator_int_data_t;
+
+  typedef struct packed {
+    // some portions are unused, which are 0s
+    bit [(DpeAdvDataWidth - keymgr_dpe_pkg::KeyWidth - keymgr_dpe_pkg::SwBindingWidth) - 1 : 0]
+                 unused;
+    sw_binding_t SoftwareBinding;
+    key_t        CreatorSeed;
+  } adv_owner_int_data_t;
+
+  typedef struct packed {
+    // some portions are unused, which are 0s
+    bit [(DpeAdvDataWidth - keymgr_dpe_pkg::KeyWidth - keymgr_dpe_pkg::SwBindingWidth) - 1 : 0]
+                 unused;
+    sw_binding_t SoftwareBinding;
+    key_t        OwnerSeed;
+  } adv_owner_data_t;
+
+  typedef struct packed {
+    // some portions are unused, which are 0s
+    bit [(DpeAdvDataWidth - keymgr_dpe_pkg::SwBindingWidth) - 1 : 0]
+                 unused;
+    sw_binding_t SoftwareBinding;
+  } adv_sw_data_t;
+
+  typedef struct packed {
+    tl_data_t              KeyVersion;
+    salt_t                 Salt;
+    keymgr_dpe_pkg::seed_t HwDestSeed;
+    keymgr_dpe_pkg::seed_t OutputSeed;
+  } gen_data_t;
+
+  // These values have to match with the values defined for the kKeyVersionedParams
+  // ./sw/device/lib/testing/keymgr_dpe_testutils.h:kKeyVersionedParams
+  const salt_t kSaltVersionedKey = {
+        32'hde919d54, 32'h322288d8, 32'h4bd127c7, 32'h9f89bc56,
+        32'hb4fb0fdf, 32'h1ca1567b, 32'h13a0e876, 32'hb6521d8f
+    };
+  const tl_data_t kVersionVersionedKey = 'h0;
+
+  localparam int KmacDigestBytes = kmac_pkg::AppDigestW / 8;
+
+  int num_hw_slots;
+  bit lc_at_prod;
+
+  virtual task dut_init(string reset_kind = "HARD");
+    string num_hw_slots_path =
+        "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.NumInstHwSlot";
+    string adv_data_width_path =
+        "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.DpeAdvDataWidth";
+    int unsigned rtl_adv_data_width;
+    super.dut_init(reset_kind);
+    void'($value$plusargs("lc_at_prod=%0d", lc_at_prod));
+    if (lc_at_prod) begin
+      otp_write_lc_partition_state(cfg.mem_bkdr_util_h[Otp], LcStProd);
+    end
+    // Backdoor load the number of hw slots available
+    `DV_CHECK_FATAL(uvm_hdl_read(num_hw_slots_path, num_hw_slots))
+    // Verify the width of the advance message
+    `DV_CHECK_FATAL(uvm_hdl_read(adv_data_width_path, rtl_adv_data_width))
+    `DV_CHECK_EQ_FATAL(DpeAdvDataWidth, rtl_adv_data_width,
+                       "Advance data width mirrored in this vseq does not match the RTL")
+  endtask
+
+  // This body mainly controls the setup of the keymgr_dpe and kmac
+  virtual task body();
+    key_shares_t uds, creator_key;
+    int uds_slot_idx, creator_key_slot_idx;
+
+    super.body();
+
+    // Wait for keymgr_dpe to become available by loading the UDS into a slot
+    // with boot stage set to 0.
+    cfg.sw_logger_vif.wait_for_log_message(
+        "Keymgr DPE loaded the UDS and entered Available state.",
+        20_000_000 /* 20 ms, longer than default because OT needs to come out of SW reset*/,
+        "keymgr_dpe to derive CreatorRootKey"
+    );
+
+    // At this point, exactly one key slot should be valid and that key slot should contain the
+    // creator key and be in boot stage 0.
+    begin
+      bit valid_found = 1'b0;
+      key_shares_t otp_root_key = get_otp_root_key();
+      bit [keymgr_dpe_pkg::KeyWidth-1:0] stage_key_unmasked;
+      bit [keymgr_dpe_pkg::KeyWidth-1:0] otp_root_key_unmasked;
+      uds_slot_idx = 0;
+      for (int i = 0; i < num_hw_slots; i++) begin
+        keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+        if (slot.valid) begin
+          `DV_CHECK_EQ(valid_found, 1'b0, "Expecting only one valid key slot")
+          valid_found = 1'b1;
+          `DV_CHECK_EQ(slot.boot_stage, 'd0, "Expecting boot stage to be 0")
+          uds = slot.key;
+          uds_slot_idx = i;
+        end
+      end
+      // The key from the slot is scrambled with random entropy! Therefore it is necessary to xor
+      // both shares together for both keys and compare this result!
+      stage_key_unmasked = get_unmasked_key(uds);
+      otp_root_key_unmasked = get_unmasked_key(otp_root_key);
+      // Compare the UDS with its ground truth
+      `DV_CHECK_EQ(valid_found, 1'b1, "Expecting one valid key slot")
+      `DV_CHECK_EQ(stage_key_unmasked, otp_root_key_unmasked,
+                   $sformatf("Expecting UDS in dpe context to be equal to the UDS from OTP"));
+    end
+    `uvm_info(`gfn, $sformatf("UDS is in slot %0d:\n%s", uds_slot_idx,
+        key_shares_str(uds)), UVM_LOW)
+
+    // Wait for keymgr_dpe to derive the CreatorRootKey and thus have consumed the associated
+    // values (creator seed etc.).
+    // Afterwards the UDS is manually removed from the keymgr dpe.
+    cfg.sw_logger_vif.wait_for_log_message("KeymgrDpe derived CreatorRootKey and removed the UDS");
+    // At this point, exactly one key slot should contain the boot stage 1 key. Verify that this
+    // holds.
+    begin
+      bit key_found = 1'b0;
+      creator_key_slot_idx = 0;
+      for (int i = 0; i < num_hw_slots; i++) begin
+        keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+        if (slot.valid && slot.boot_stage == keymgr_dpe_pkg::BootStageCreatorInt) begin
+          `DV_CHECK_EQ(key_found, 1'b0, "Expecting only one boot stage 1 key")
+          key_found = 1'b1;
+          creator_key = slot.key;
+          creator_key_slot_idx = i;
+        end
+      end
+      `DV_CHECK_EQ(key_found, 1'b1, "Expecting one boot stage 1 key")
+    end
+    `uvm_info(`gfn, $sformatf("CreatorRootKey is in slot %0d:\n%s", creator_key_slot_idx,
+        key_shares_str(creator_key)), UVM_LOW)
+
+    // Verify that the key was derived from the creator data as expected.
+    check_derived_key(uds, get_creator_data(), creator_key);
+
+    // Run the test-sequence (Can be overwritten by additional tests)
+    run_test_sequence(creator_key);
+  endtask
+
+  // This test_sequence assumes the keymgr has derived the CreatorRootKey
+  virtual task run_test_sequence(key_shares_t creator_key);
+    key_shares_t creator_int_key, owner_int_key, owner_key, derived_key;
+    int creator_int_key_slot_idx, owner_int_key_slot_idx, owner_key_slot_idx, derived_key_slot_idx;
+    // Verify that the outputs generated from the CreatorRootKey match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_msg("OTBN", "CreatorRootKey");
+    check_generated_output(.key_shares(creator_key),
+                           // These values must match those passed in SW. (Ideally, we would
+                           // backdoor-load them into SW to remove the redundancy, but that's no
+                           // immediate priority.)
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version('d0),
+                           .salt({32'h49379059, 32'hff523992, 32'h75666880, 32'hc0e44716,
+                                  32'h999612df, 32'h80f1a9de, 32'h481eae40, 32'h45e2c7f0}));
+    wait_for_keymgr_dpe_gen_output_msg("SW", "CreatorRootKey");
+    check_generated_output(.key_shares(creator_key),
+                           // These values must match those passed in SW. (Ideally, we would
+                           // backdoor-load them into SW to remove the redundancy, but that's no
+                           // immediate priority.)
+                           .dest(keymgr_dpe_pkg::None),
+                           .version('d0),
+                           .salt({32'h72d5886b, 32'h4e359e52, 32'h0d7ff336, 32'h267773cf,
+                                  32'h00c7d10c, 32'h6dea4fb9, 32'h77fa328a, 32'h15779805}));
+    wait_for_keymgr_dpe_gen_output_msg("KMAC", "CreatorRootKey");
+    check_generated_output(.key_shares(creator_key),
+                           // These values must match those passed in SW. (Ideally, we would
+                           // backdoor-load them into SW to remove the redundancy, but that's no
+                           // immediate priority.)
+                           .dest(keymgr_dpe_pkg::Kmac),
+                           .version('d0),
+                           .salt({32'h78ad5715, 32'h508680d4, 32'hc7f825b2, 32'ha7924b8d,
+                                  32'h0906825f, 32'h77cf81a3, 32'hd63d89bd, 32'h88fd3697}));
+    wait_for_keymgr_dpe_gen_output_msg("AES", "CreatorRootKey");
+    check_generated_output(.key_shares(creator_key),
+                           // These values must match those passed in SW. (Ideally, we would
+                           // backdoor-load them into SW to remove the redundancy, but that's no
+                           // immediate priority.)
+                           .dest(keymgr_dpe_pkg::Aes),
+                           .version('d0),
+                           .salt({32'h945642d9, 32'hfbcbc925, 32'hdb7b0691, 32'hcd973f4d,
+                                  32'h278e051d, 32'h0d9f1f0d, 32'h45eff95b, 32'hb1ad6ba7}));
+    wait_for_keymgr_dpe_gen_output_msg("HMAC", "CreatorRootKey");
+    check_generated_output(.key_shares(creator_key),
+                           // These values must match those passed in SW. (Ideally, we would
+                           // backdoor-load them into SW to remove the redundancy, but that's no
+                           // immediate priority.)
+                           .dest(keymgr_dpe_pkg::Hmac),
+                           .version('d0),
+                           .salt({32'h59f92ba4, 32'ha2573816, 32'h35624f4d, 32'hd8dda033,
+                                  32'hc0849c20, 32'h61adbcf9, 32'h2c8e9f64, 32'h063fa1ad}));
+
+    // Wait for keymgr_dpe to have advanced to boot stage 2 and thus have consumed the associated
+    // values (field entropy).
+    cfg.sw_logger_vif.wait_for_log_message("KeymgrDpe derived CreatorIntKey");
+    // At this point, exactly one key slot should contain the boot stage 2 key. Verify that this
+    // holds.
+    begin
+      bit key_found = 1'b0;
+      creator_int_key_slot_idx = 0;
+      for (int i = 0; i < num_hw_slots; i++) begin
+        keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+        if (slot.valid && slot.boot_stage == keymgr_dpe_pkg::BootStageOwnerInt) begin
+          `DV_CHECK_EQ(key_found, 1'b0, "Expecting only one boot stage 2 key")
+          key_found = 1'b1;
+          creator_int_key = slot.key;
+          creator_int_key_slot_idx = i;
+        end
+      end
+      `DV_CHECK_EQ(key_found, 1'b1, "Expecting one boot stage 2 key")
+    end
+    `uvm_info(`gfn, $sformatf("CreatorIntKey in slot %0d:\n%s", creator_int_key_slot_idx,
+        key_shares_str(creator_int_key)), UVM_LOW)
+
+    // Verify that the key was derived from the creator int data as expected.
+    check_derived_key(creator_key, get_creator_int_data(), creator_int_key);
+
+    // Verify that the outputs generated from the CreatorIntKey match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_msg("KMAC", "CreatorIntKey");
+    check_generated_output(.key_shares(creator_int_key),
+                           .dest(keymgr_dpe_pkg::Kmac),
+                           .version('d0),
+                           .salt({32'h3e8a91c4, 32'hb57d2e09, 32'h1c64f8a3, 32'h9f20d7b6,
+                                  32'h52e1ac38, 32'hd8437f15, 32'h06bc59e2, 32'ha1f3c470}));
+    wait_for_keymgr_dpe_gen_output_msg("AES", "CreatorIntKey");
+    check_generated_output(.key_shares(creator_int_key),
+                           .dest(keymgr_dpe_pkg::Aes),
+                           .version('d1),
+                           .salt({32'h7d19e6a2, 32'h4c83b05f, 32'he2a57d31, 32'h18f6c94e,
+                                  32'hb04d2a87, 32'h6e91f3c5, 32'hc35a087b, 32'h29e4b6d0}));
+    wait_for_keymgr_dpe_gen_output_msg("SW", "CreatorIntKey");
+    check_generated_output(.key_shares(creator_int_key),
+                           .dest(keymgr_dpe_pkg::None),
+                           .version('d2),
+                           .salt({32'h91c7a35e, 32'h0fd4682b, 32'h5ab31ec9, 32'he6082f74,
+                                  32'h3d79c510, 32'ha4e6b29f, 32'h7802d4e3, 32'hc1bf5a66}));
+    wait_for_keymgr_dpe_gen_output_msg("OTBN", "CreatorIntKey");
+    check_generated_output(.key_shares(creator_int_key),
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version('d3),
+                           .salt({32'hf04b6c19, 32'h83e2a7d5, 32'h2b98f40e, 32'hd65c1b37,
+                                  32'h47a0e9c2, 32'h9e3d7058, 32'h15f2c8ab, 32'h6ac94d03}));
+    wait_for_keymgr_dpe_gen_output_msg("HMAC", "CreatorIntKey");
+    check_generated_output(.key_shares(creator_int_key),
+                           .dest(keymgr_dpe_pkg::Hmac),
+                           .version('d0),
+                           .salt({32'h0e81e53d, 32'h6e43271c, 32'h7f1e4339, 32'hdb35276e,
+                                  32'h05b06259, 32'h2612681a, 32'h6c61f7c7, 32'h6b2fd668}));
+
+    // Wait for keymgr_dpe to have advanced to boot stage 3 and thus have consumed the associated
+    // values (creator seed etc.).
+    cfg.sw_logger_vif.wait_for_log_message("KeymgrDpe derived OwnerIntKey");
+    // At this point, exactly one key slot should contain the boot stage 3 key. Verify that this
+    // holds.
+    begin
+      bit key_found = 1'b0;
+      owner_int_key_slot_idx = 0;
+      for (int i = 0; i < num_hw_slots; i++) begin
+        keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+        if (slot.valid && slot.boot_stage == keymgr_dpe_pkg::BootStageOwner) begin
+          `DV_CHECK_EQ(key_found, 1'b0, "Expecting only one boot stage 3 key")
+          key_found = 1'b1;
+          owner_int_key = slot.key;
+          owner_int_key_slot_idx = i;
+        end
+      end
+      `DV_CHECK_EQ(key_found, 1'b1, "Expecting one boot stage 3 key")
+    end
+    `uvm_info(`gfn, $sformatf("OwnerIntKey in slot %0d:\n%s", owner_int_key_slot_idx,
+        key_shares_str(owner_int_key)), UVM_LOW)
+
+    // Verify that the key was derived from the owner int data as expected.
+    check_derived_key(creator_int_key, get_owner_int_data(), owner_int_key);
+
+    // Verify that the outputs generated from the OwnerIntKey match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_msg("KMAC", "OwnerIntKey");
+    check_generated_output(.key_shares(owner_int_key),
+                           .dest(keymgr_dpe_pkg::Kmac),
+                           .version('d0),
+                           .salt({32'h6b21d5da, 32'h929ea4f4, 32'heb06038b, 32'hcecba4ea,
+                                  32'h8c8e756a, 32'h26691553, 32'h7189202b, 32'h5e560c86}));
+    wait_for_keymgr_dpe_gen_output_msg("AES", "OwnerIntKey");
+    check_generated_output(.key_shares(owner_int_key),
+                           .dest(keymgr_dpe_pkg::Aes),
+                           .version('d1),
+                           .salt({32'hcd887c60, 32'hcc40f919, 32'hdd2972b7, 32'h09cdc35f,
+                                  32'h3a10980c, 32'h4b38fdec, 32'h3d56d980, 32'h25314e07}));
+    wait_for_keymgr_dpe_gen_output_msg("SW", "OwnerIntKey");
+    check_generated_output(.key_shares(owner_int_key),
+                           .dest(keymgr_dpe_pkg::None),
+                           .version('d2),
+                           .salt({32'h72d5886b, 32'h4e359e52, 32'h0d7ff336, 32'h267773cf,
+                                  32'h00c7d10c, 32'h6dea4fb9, 32'h77fa328a, 32'h15779805}));
+    wait_for_keymgr_dpe_gen_output_msg("OTBN", "OwnerIntKey");
+    check_generated_output(.key_shares(owner_int_key),
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version('d3),
+                           .salt({32'h564712d4, 32'h7ab745f5, 32'h5fa8faa9, 32'h77fce728,
+                                  32'hffa3fd3c, 32'h876930f2, 32'h593b54d4, 32'ha75e231b}));
+    wait_for_keymgr_dpe_gen_output_msg("HMAC", "OwnerIntKey");
+    check_generated_output(.key_shares(owner_int_key),
+                           .dest(keymgr_dpe_pkg::Hmac),
+                           .version('d3),
+                           .salt({32'ha467cafe, 32'h42e0ef13, 32'he64101ba, 32'he0221071,
+                                  32'h46ef443e, 32'hbbc3700a, 32'hccb2a0d4, 32'hb2354a72}));
+
+    // Wait for keymgr_dpe to have advanced to boot stage 4 and thus have consumed the owner seed
+    // and the owner SW binding.
+    cfg.sw_logger_vif.wait_for_log_message("KeymgrDpe derived OwnerKey");
+    // At this point, exactly one key slot should contain the boot stage 4 key. Verify that this
+    // holds.
+    begin
+      bit key_found = 1'b0;
+      owner_key_slot_idx = 0;
+      for (int i = 0; i < num_hw_slots; i++) begin
+        keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+        if (slot.valid && slot.boot_stage == keymgr_dpe_pkg::BootStageRuntime) begin
+          `DV_CHECK_EQ(key_found, 1'b0, "Expecting only one boot stage 4 key")
+          key_found = 1'b1;
+          owner_key = slot.key;
+          owner_key_slot_idx = i;
+        end
+      end
+      `DV_CHECK_EQ(key_found, 1'b1, "Expecting one boot stage 4 key")
+    end
+    `uvm_info(`gfn, $sformatf("OwnerKey in slot %0d:\n%s",
+        owner_key_slot_idx, key_shares_str(owner_key)), UVM_LOW)
+
+    // Verify that the key was derived from the owner data as expected.
+    check_derived_key(owner_int_key, get_owner_data(), owner_key);
+
+    // Verify that the outputs generated from the boot stage 4 key match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_msg("SW", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::None),
+                           .version('d0),
+                           .salt({32'he1b3f29c, 32'ha3bc4d2a, 32'h458fdc76, 32'h1b1c0c2e,
+                                  32'h1a128785, 32'h69ce2d2f, 32'h8a60fd60, 32'h5307745c}));
+    wait_for_keymgr_dpe_gen_output_msg("AES", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::Aes),
+                           .version('d1),
+                           .salt({32'h0f20f37e, 32'hb951b619, 32'hcb815e8d, 32'h77e17fa4,
+                                  32'h3074e3db, 32'he7482b04, 32'hed12d4ee, 32'ha34fba3c}));
+    wait_for_keymgr_dpe_gen_output_msg("KMAC", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::Kmac),
+                           .version('d2),
+                           .salt({32'hb31031a3, 32'h59fe6e8e, 32'h4171de6b, 32'ha3f3d397,
+                                  32'h7bb7800b, 32'h8f8f8cda, 32'hb697609d, 32'h122eb3b7}));
+    wait_for_keymgr_dpe_gen_output_msg("OTBN", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version('d3),
+                           .salt({32'h3f184f9b, 32'hd4af6765, 32'h8abeb221, 32'haae3ca52,
+                                  32'h29f7114f, 32'hf5bf3e01, 32'h6a961bc2, 32'hec932d64}));
+    wait_for_keymgr_dpe_gen_output_msg("HMAC", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::Hmac),
+                           .version('d3),
+                           .salt({32'h2bdb8455, 32'h849e3f58, 32'he6bfa71a, 32'h922813d2,
+                                  32'h36f3d03f, 32'h05e900bc, 32'heecc922c, 32'h79c94846}));
+
+    // Wait for keymgr_dpe to have derived a new DPE context which stays in boot stage 4.
+    cfg.sw_logger_vif.wait_for_log_message("KeymgrDpe derived new DPE context from OwnerKey");
+    // At this point, an additional key slot should contain a boot stage 4 key. Verify that this
+    // holds.
+    begin
+     bit key_found = 1'b0;
+     derived_key_slot_idx = 0;
+     for (int i = 0; i < num_hw_slots; i++) begin
+       keymgr_dpe_pkg::keymgr_dpe_slot_t slot = get_key_slot(i);
+       if (slot.valid && slot.boot_stage == keymgr_dpe_pkg::BootStageRuntime) begin
+          if (i != owner_key_slot_idx) begin
+            derived_key = slot.key;
+            derived_key_slot_idx = i;
+          end
+       end
+     end
+    end
+    `uvm_info(`gfn, $sformatf("KeymgrDpe generated new DPE context key in slot %0d:\n%s",
+        derived_key_slot_idx, key_shares_str(derived_key)), UVM_LOW)
+
+    // Verify that the key was derived from software data as expected.
+    begin
+     // These values must match those passed in SW. (Ideally, we would backdoor-load them into SW
+     // to remove the redundancy, but that's no immediate priority.)
+     adv_sw_data_t adv_sw_data = '{
+         SoftwareBinding: {32'h952b5a35, 32'h28b4520e, 32'h1f310db2, 32'h832b8477,
+                           32'h75b81191, 32'h0668dc27, 32'ha226160d, 32'h45790409},
+         default: '0
+     };
+     check_derived_key(owner_key, adv_sw_data, derived_key);
+    end
+
+    // Verify that the outputs generated from the boot stage 4 key match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_slot_msg("AES", derived_key_slot_idx);
+    check_generated_output(.key_shares(derived_key),
+                           .dest(keymgr_dpe_pkg::Aes),
+                           .version(32'h10),
+                           .salt({32'h30059d96, 32'h97436d9c, 32'hf539a20a, 32'h6838564e,
+                                  32'h74ad4bb7, 32'h78000277, 32'h423025af, 32'h732e53a9}));
+    wait_for_keymgr_dpe_gen_output_slot_msg("OTBN", derived_key_slot_idx);
+    check_generated_output(.key_shares(derived_key),
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version(32'h20),
+                           .salt({32'h2cd82d66, 32'h24275e98, 32'he0344ab2, 32'hc048d59e,
+                                  32'h139694c3, 32'h0043f9b4, 32'h413a2212, 32'hc2dcfbc8}));
+    wait_for_keymgr_dpe_gen_output_slot_msg("SW", derived_key_slot_idx);
+    check_generated_output(.key_shares(derived_key),
+                           .dest(keymgr_dpe_pkg::None),
+                           .version(32'h30),
+                           .salt({32'h23c20696, 32'hebaf62f0, 32'ha2ff413f, 32'h22d65603,
+                                  32'h91155c24, 32'hda1269fc, 32'hc8611986, 32'hf129041f}));
+    wait_for_keymgr_dpe_gen_output_slot_msg("KMAC", derived_key_slot_idx);
+    check_generated_output(.key_shares(derived_key),
+                           .dest(keymgr_dpe_pkg::Kmac),
+                           .version(32'h40),
+                           .salt({32'h06896da3, 32'h9ce2c0da, 32'haa23a965, 32'h108e57ca,
+                                  32'hd926d474, 32'hb6ae40fc, 32'ha65d1375, 32'h6ee7be64}));
+    wait_for_keymgr_dpe_gen_output_slot_msg("HMAC", derived_key_slot_idx);
+    check_generated_output(.key_shares(derived_key),
+                           .dest(keymgr_dpe_pkg::Hmac),
+                           .version(32'h40),
+                           .salt({32'h4fd6e6ae, 32'h8fd4b340, 32'h81cc5630, 32'hc421ac99,
+                                  32'h618befcf, 32'h33fb5e4e, 32'h7a500515, 32'h7666861f}));
+
+    // Verify that the additional outputs generated from the OwnerKey, which should still be
+    // available, match the expectation.
+    // Note that the values for version and salt must match those passed in SW. (Ideally, we would
+    // backdoor-load them into SW to remove the redundancy, but that's no immediate priority.)
+    wait_for_keymgr_dpe_gen_output_msg("SW", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::None),
+                           .version(32'd42),
+                           .salt({32'h2488d617, 32'h99227306, 32'hcd789bc0, 32'h9787039b,
+                                  32'h9869544a, 32'hb28b9fc7, 32'h69ab6f9d, 32'hfb11f188}));
+    wait_for_keymgr_dpe_gen_output_msg("OTBN", "OwnerKey");
+    check_generated_output(.key_shares(owner_key),
+                           .dest(keymgr_dpe_pkg::Otbn),
+                           .version(32'd7),
+                           .salt({32'hfa94162c, 32'hd039a40f, 32'hc2b81d98, 32'h999ce18d,
+                                  32'hbf8fb838, 32'h589544ce, 32'hee7790c4, 32'h0de6bdcf}));
+
+    `uvm_info(`gfn, "chip_sw_keymgr_dpe_key_derivation_vseq successful finished!", UVM_LOW)
+
+  endtask
+
+  // Wait for a SW log message that describes KeymgrDpe generating a specific type of output from a
+  // particular thing. If output_type is T and source is S, we expect to see:
+  //
+  //        KeymgrDpe generated T output from S
+  local task wait_for_keymgr_dpe_gen_output_msg(string output_type, string source);
+    string msg = $sformatf("KeymgrDpe generated %0s output from %0s", output_type, source);
+    cfg.sw_logger_vif.wait_for_log_message(msg);
+  endtask
+
+  // Wait for a SW log message that describes KeymgrDpe generating a specific type of output from
+  // the DPE context in the given slot. If output_type is T and slot_idx is N, we expect to see:
+  //
+  //        KeymgrDpe generated T output from DPE context in slot N
+  local task wait_for_keymgr_dpe_gen_output_slot_msg(string output_type, int unsigned slot_idx);
+    wait_for_keymgr_dpe_gen_output_msg(output_type,
+                                       $sformatf("DPE context in slot %0d", slot_idx));
+  endtask
+
+  // Backdoor-read a given keymgr-internal key slot.
+  virtual function keymgr_dpe_pkg::keymgr_dpe_slot_t get_key_slot(int unsigned slot_idx);
+    string path = $sformatf(
+        "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.u_ctrl.key_slots_q[%0d]", slot_idx);
+    keymgr_dpe_pkg::keymgr_dpe_slot_t result;
+    `DV_CHECK_FATAL(uvm_hdl_read(path, result))
+    return result;
+  endfunction
+
+  // Combine the two shares of a masked key to get an unmasked key.
+  virtual function key_t get_unmasked_key(key_shares_t two_share_key);
+    return two_share_key[0] ^ two_share_key[1];
+  endfunction
+
+  // Combine the two shares of a masked wide key to get an unmasked key.
+  virtual function wide_key_t get_unmasked_wide_key(wide_key_shares_t two_share_key);
+    return two_share_key[0] ^ two_share_key[1];
+  endfunction
+
+  // Collect data used as 'message' to derive the CreatorRootKey (boot stage 1).
+  virtual function adv_data_t get_creator_data();
+    adv_creator_data_t creator_data;
+    lc_ctrl_pkg::lc_keymgr_div_t lifcecycle_val;
+    rom_ctrl_pkg::keymgr_data_t rom_digest;
+    string path_health;
+    string path_rom;
+
+    // SoftwareBinding must match the value passed in SW. (Ideally, we would backdoor-load it into
+    // SW to remove the redundancy, but that's no immediate priority.)
+    // Values are currently stored under:
+    // ./sw/device/lib/testing/keymgr_dpe_testutils.h:kCreatorRootKeyParams
+    // Reversed order as otherwise the bindings value do not match
+    creator_data.SoftwareBinding = {
+        32'h4ec9c6d6, 32'h19f5cff7, 32'h426dc745, 32'hb8a8379d,
+        32'he92f76e2, 32'hcb68ff71, 32'haf36e268, 32'hdc96c23d
+    };
+
+    // HardwareRevisionSeed is a netlist constant.
+    creator_data.HardwareRevisionSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeRevisionSeed;
+
+    // DeviceIdentifier is stored in OTP; (backdoor-)read it from CSRs.
+    for (int i = 0; i < keymgr_dpe_pkg::DeviceIdWidth / TL_DW; i++) begin
+      uvm_reg_data_t rdata = csr_peek(ral.lc_ctrl_regs.device_id[i]);
+      creator_data.DeviceIdentifier[TL_DW * i +: TL_DW] = rdata;
+    end
+    `uvm_info(`gfn, $sformatf("DeviceIdentifier:\n%s", key_str(creator_data.DeviceIdentifier)),
+              UVM_LOW)
+
+    // HealthMeasurement is a life-cycle-dependent netlist constant.
+    // Copy Life cycle state directly from the old chip_sw_keymgr_key_derivation_vseq
+    creator_data.HealthMeasurement =
+        lc_at_prod ? top_earlgrey_rnd_cnst_pkg::RndCnstLcCtrlLcKeymgrDivProduction
+                   : top_earlgrey_rnd_cnst_pkg::RndCnstLcCtrlLcKeymgrDivRma;
+    `uvm_info(`gfn, $sformatf("HealthMeasurement:\n128'h%032h", creator_data.HealthMeasurement),
+              UVM_LOW)
+
+    // Easier Debug: Read life cycle input at beginning from DUT and compare with offical value
+    // Allows to detect misconfigurations more easily!
+    path_health = $sformatf("tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.lc_keymgr_div_i");
+    `DV_CHECK_FATAL(uvm_hdl_read(path_health, lifcecycle_val))
+    `DV_CHECK_EQ(creator_data.HealthMeasurement, lifcecycle_val,
+        "HealthMeasurement value at the input of keymgr dpe diverges from the expected value")
+
+    // RomDigest come from the ROM Controller; (backdoor-)read them from CSRs.
+    for (int i = 0; i < keymgr_dpe_pkg::KeyWidth / TL_DW; i++) begin
+      bit [TL_DW-1:0] rdata = csr_peek(ral.rom_ctrl_regs.digest[i]);
+      creator_data.RomDigest[TL_DW * i +: TL_DW] = rdata;
+    end
+    `uvm_info(`gfn, $sformatf("RomDigest:\n128'h%032h", creator_data.RomDigest),
+              UVM_LOW)
+
+    return adv_data_t'(creator_data);
+  endfunction
+
+  // Collect data used as 'message' to derive the CreatorIntKey (boot stage 2).
+  virtual function adv_data_t get_creator_int_data();
+    adv_creator_int_data_t creator_int_data;
+
+    // Zero-pad unused bits.
+    creator_int_data.unused = '0;
+
+    // SoftwareBinding must match the value passed in SW. (Ideally, we would backdoor-load it into
+    // SW to remove the redundancy, but that's no immediate priority.)
+    // Values are currently stored under:
+    // ./sw/device/lib/testing/keymgr_dpe_testutils.h:kCreatorIntKeyParams
+    creator_int_data.SoftwareBinding = {
+        32'h47a1cf58, 32'he6d2093b, 32'h3f85b26d, 32'h91e47c0a,
+        32'h2d6b18f4, 32'hc70e5a93, 32'h8b2f41d6, 32'h5a3c9e17
+    };
+
+    // The field entropy is provided by the OTP.
+    creator_int_data.FieldEntropy = get_field_entropy();
+
+    return adv_data_t'(creator_int_data);
+  endfunction
+
+  // Collect data used as 'message' to derive the OwnerIntKey (boot stage 3).
+  virtual function adv_data_t get_owner_int_data();
+    adv_owner_int_data_t owner_int_data;
+
+    // Zero-pad unused bits.
+    owner_int_data.unused = '0;
+
+    // SoftwareBinding must match the value passed in SW. (Ideally, we would backdoor-load it into
+    // SW to remove the redundancy, but that's no immediate priority.)
+    // Values are currently stored under:
+    // ./sw/device/lib/testing/keymgr_dpe_testutils.h:kOwnerIntKeyParams
+    owner_int_data.SoftwareBinding = {
+        32'h1940ceeb, 32'hf1394d28, 32'hb012ae5e, 32'h23fb480c,
+        32'h3195dbfa, 32'hc2f3bbaf, 32'h3f83d390, 32'he4987b39
+    };
+
+    // CreatorSeed is stored in Flash.
+    owner_int_data.CreatorSeed = get_nvm_creator_seed();
+
+    return adv_data_t'(owner_int_data);
+  endfunction
+
+  // Collect data used as 'message' to derive the OwnerKey (boot stage 4).
+  virtual function adv_data_t get_owner_data();
+    adv_owner_data_t owner_data;
+
+    // Zero-pad unused bits.
+    owner_data.unused = '0;
+
+    // SoftwareBinding must match the value passed in SW. (Ideally, we would backdoor-load it into
+    // SW to remove the redundancy, but that's no immediate priority.)
+    // Values are currently stored under:
+    // ./sw/device/lib/testing/keymgr_dpe_testutils.h:kOwnerRootKeyParams
+    owner_data.SoftwareBinding = {
+        32'ha02ad81d, 32'h1803199e, 32'h1f7dec77, 32'hec8298be,
+        32'h35b37c77, 32'h217773d4, 32'hb6ebe129, 32'hd8a812ea
+    };
+
+    // OwnerSeed is stored in Flash.
+    owner_data.OwnerSeed = get_nvm_owner_seed();
+
+    return adv_data_t'(owner_data);
+  endfunction
+
+  // Read OwnerSeed from OTP via backdoor and descramble it.
+  virtual function key_t get_nvm_owner_seed();
+    key_t flash_owner_seed;
+
+    // TODO(#30688) rewrite this section with flash backdoor
+    string path = $sformatf("tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.owner_seed_i.seed");
+    `DV_CHECK_FATAL(uvm_hdl_read(path, flash_owner_seed))
+
+    `uvm_info(`gfn, $sformatf("OwnerSeed:\n%s", key_str(flash_owner_seed)), UVM_LOW)
+    return flash_owner_seed;
+  endfunction
+
+  // Read the field entropy at the input of the keymgr_dpe via backdoor. If the field entropy is
+  // not provisioned the keymgr_dpe falls back to the netlist constant.
+  virtual function key_t get_field_entropy();
+    keymgr_dpe_pkg::keymgr_dpe_field_entropy_t field_entropy;
+    key_t field_entropy_sel;
+
+    string path = $sformatf(
+        "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.field_entropy_i");
+    `DV_CHECK_FATAL(uvm_hdl_read(path, field_entropy))
+
+    if (field_entropy.secret_valid) begin
+      field_entropy_sel = field_entropy.secret;
+    end else begin
+      field_entropy_sel = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeFieldEntropySeed;
+    end
+
+    `uvm_info(`gfn, $sformatf("FieldEntropy:\n%s", key_str(field_entropy_sel)), UVM_LOW)
+    return field_entropy_sel;
+  endfunction
+
+  // Read CreatorSeed from OTP via backdoor and descramble it.
+  virtual function key_t get_nvm_creator_seed();
+    key_t flash_creator_seed;
+
+    // TODO(#30688) rewrite this section with flash backdoor
+    string path = $sformatf(
+        "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.creator_seed_i.seed");
+    `DV_CHECK_FATAL(uvm_hdl_read(path, flash_creator_seed))
+
+    `uvm_info(`gfn, $sformatf("CreatorSeed:\n%s", key_str(flash_creator_seed)), UVM_LOW)
+    return flash_creator_seed;
+  endfunction
+
+  // Read CreatorRootKey from OTP via backdoor and descramble it.
+  virtual function key_shares_t get_otp_root_key();
+    key_shares_t otp_root_key;
+    for (int i = 0; i < otp_ctrl_reg_pkg::CreatorRootKeyShare0Size / 4; i++) begin
+      otp_root_key[0][i * 32 +: 32] =
+          cfg.mem_bkdr_util_h[Otp].read32(otp_ctrl_reg_pkg::CreatorRootKeyShare0Offset + i * 4);
+    end
+    for (int i = 0; i < otp_ctrl_reg_pkg::CreatorRootKeyShare0Size / 4 / 2; i++) begin
+      otp_root_key[0][i * 64 +: 64] =
+          otp_scrambler_pkg::descramble_data(otp_root_key[0][i * 64 +: 64],
+                                             otp_ctrl_part_pkg::Secret2Idx);
+    end
+    for (int i = 0; i < otp_ctrl_reg_pkg::CreatorRootKeyShare1Size / 4; i++) begin
+      otp_root_key[1][i * 32 +: 32] =
+          cfg.mem_bkdr_util_h[Otp].read32(otp_ctrl_reg_pkg::CreatorRootKeyShare1Offset + i * 4);
+    end
+    for (int i = 0; i < otp_ctrl_reg_pkg::CreatorRootKeyShare1Size / 4 / 2; i++) begin
+      otp_root_key[1][i * 64 +: 64] =
+          otp_scrambler_pkg::descramble_data(otp_root_key[1][i * 64 +: 64],
+                                             otp_ctrl_part_pkg::Secret2Idx);
+    end
+    `uvm_info(`gfn, $sformatf("CreatorRootKey:\n%s", key_shares_str(otp_root_key)), UVM_LOW)
+    return otp_root_key;
+  endfunction
+
+  // Collect data used as 'message' for versioned output key generation.
+  virtual function gen_data_t get_gen_data(tl_data_t key_version,
+                                           salt_t salt,
+                                           keymgr_dpe_pkg::keymgr_dpe_key_dest_e dest);
+    gen_data_t gen_data;
+
+    gen_data.KeyVersion = key_version;
+    gen_data.Salt = salt;
+    gen_data.OutputSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeHardOutputSeed;
+
+    unique case (dest)
+      keymgr_dpe_pkg::None: begin // SW
+        gen_data.HwDestSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeNoneSeed;
+        gen_data.OutputSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeSoftOutputSeed;
+      end
+
+      keymgr_dpe_pkg::Aes: begin // HW -> AES
+        gen_data.HwDestSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeAesSeed;
+      end
+
+      keymgr_dpe_pkg::Kmac: begin // HW -> KMAC
+        gen_data.HwDestSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeKmacSeed;
+      end
+
+      keymgr_dpe_pkg::Otbn: begin // HW -> OTBN
+        gen_data.HwDestSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeOtbnSeed;
+      end
+
+      keymgr_dpe_pkg::Hmac: begin // HW -> HMAC
+        gen_data.HwDestSeed = top_earlgrey_rnd_cnst_pkg::RndCnstKeymgrDpeHmacSeed;
+      end
+
+      default: `dv_fatal("Illegal destination (DV bug)!")
+    endcase
+
+    return gen_data;
+  endfunction
+
+  // Check that a given KMAC digest (`act_digest`) matches the expectation for a given key
+  // (`kmac_key`) and data bytes (`data_arr`).
+  virtual function void check_kmac_digest(key_t     kmac_key,
+                                          bit [7:0] data_arr[],
+                                          key_t     act_digest);
+    `DV_CHECK_EQ(keymgr_dpe_pkg::KeyWidth'(get_kmac_digest(kmac_key, data_arr)),
+                 act_digest)
+  endfunction
+
+  // Same as `check_kmac_digest` but for wide keys
+  virtual function void check_kmac_wide_digest(key_t      kmac_key,
+                                               bit [7:0]  data_arr[],
+                                               wide_key_t act_digest);
+    `DV_CHECK_EQ(keymgr_dpe_pkg::WideHwKeyWidth'(get_kmac_digest(kmac_key, data_arr)),
+                 act_digest)
+  endfunction
+
+  // Compute KMAC digest (with a DPI call) for a given a key and data bytes.
+  virtual function digest_t get_kmac_digest(key_t     kmac_key,
+                                            bit [7:0] data_arr[]);
+    bit [7:0] key_arr[];
+    string custom_str = "";
+    bit [7:0] digest_arr[KmacDigestBytes];
+    bit [kmac_pkg::AppDigestW-1:0] digest;
+
+    {<< byte {key_arr}} = kmac_key;
+
+    digestpp_dpi_pkg::c_dpi_kmac256(data_arr, data_arr.size(),
+                                    key_arr, key_arr.size(),
+                                    custom_str,
+                                    KmacDigestBytes, digest_arr);
+    digest  = {<< byte {digest_arr}};
+
+    return digest;
+  endfunction
+
+  // Check that a derived key (`act_digest_shares`, in shares) matches the expected outcome of a key
+  // derivation operation from the source key (`key_shares`, in shares) given the data to use as
+  // message to KMAC (`kmac_data`).
+  virtual function void check_derived_key(key_shares_t key_shares,
+                                          adv_data_t   kmac_data,
+                                          key_shares_t act_digest_shares);
+    bit [7:0] data_arr[];
+    {<< byte {data_arr}} = kmac_data;
+    check_kmac_digest(get_unmasked_key(key_shares), data_arr, get_unmasked_key(act_digest_shares));
+  endfunction
+
+  // Check that a generated output matches the expected outcome of a versioned output key generation
+  // operation from the source key (`key_shares`, in shares) to the destination (`dest`) given
+  // `version` and `salt` to use in the message to KMAC.
+  virtual function void check_generated_output(key_shares_t                  key_shares,
+                                               keymgr_dpe_pkg::keymgr_dpe_key_dest_e dest,
+                                               tl_data_t                     version,
+                                               salt_t                        salt);
+    bit [7:0] data_arr[];
+    {<< byte {data_arr}} = get_gen_data(.key_version(version), .salt(salt), .dest(dest));
+    // Outputs generated for OTBN / HMAC have a different width.
+    if (dest inside {keymgr_dpe_pkg::Otbn, keymgr_dpe_pkg::Hmac}) begin
+      check_kmac_wide_digest(get_unmasked_key(key_shares),
+                             data_arr,
+                             get_unmasked_wide_key(get_wide_output(.dest(dest))));
+    end else begin
+      check_kmac_digest(get_unmasked_key(key_shares),
+                        data_arr,
+                        get_unmasked_key(get_output(.dest(dest))));
+    end
+  endfunction
+
+  // Backdoor-read the output from keymgr_dpe to SW a given `dest`ination.
+  virtual function key_shares_t get_output(keymgr_dpe_pkg::keymgr_dpe_key_dest_e dest);
+    unique case (dest)
+      keymgr_dpe_pkg::None: return get_sw_output();
+      keymgr_dpe_pkg::Aes:  return get_hw_output(
+          "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.aes_key_o");
+      keymgr_dpe_pkg::Kmac: return get_hw_output(
+          "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.kmac_key_o");
+      keymgr_dpe_pkg::Otbn,
+      keymgr_dpe_pkg::Hmac:
+        `dv_fatal("Illegal use of this function; use `get_wide_output` instead!")
+      default: `dv_fatal("Illegal destination (DV bug)!")
+    endcase
+  endfunction
+
+  virtual function wide_key_shares_t get_wide_output(keymgr_dpe_pkg::keymgr_dpe_key_dest_e dest);
+    unique case (dest)
+      keymgr_dpe_pkg::Otbn: return get_wide_hw_output(
+          "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.otbn_key_o");
+      keymgr_dpe_pkg::Hmac: return get_wide_hw_output(
+          "tb.dut.top_earlgrey.earlgrey_pd_main.u_keymgr_dpe.hmac_key_o");
+      keymgr_dpe_pkg::None,
+      keymgr_dpe_pkg::Aes,
+      keymgr_dpe_pkg::Kmac:
+        `dv_fatal("Illegal use of this function; use `get_output` instead!")
+      default: `dv_fatal("Illegal destination (DV bug)!")
+    endcase
+  endfunction
+
+  // Backdoor-read keymgr_dpe's SW output.
+  virtual function key_shares_t get_sw_output();
+    key_shares_t key_shares;
+    for (int i = 0; i < keymgr_dpe_pkg::KeyWidth / TL_DW; i++) begin
+      uvm_reg_data_t rdata = csr_peek(ral.keymgr_dpe.sw_share0_output[i]);
+      key_shares[0][TL_DW * i +: TL_DW] = rdata;
+      rdata = csr_peek(ral.keymgr_dpe.sw_share1_output[i]);
+      key_shares[1][TL_DW * i +: TL_DW] = rdata;
+    end
+    `uvm_info(`gfn, $sformatf("SW Output:\n%s", key_shares_str(key_shares)), UVM_LOW)
+    return key_shares;
+  endfunction
+
+  // Backdoor-read keymgr_dpe's HW output at a given path.
+  virtual function key_shares_t get_hw_output(string path);
+    keymgr_dpe_pkg::hw_key_req_t hw_key;
+    `DV_CHECK_FATAL(uvm_hdl_read(path, hw_key))
+    `DV_CHECK_EQ(hw_key.valid, 1, "Expected HW output key to be valid")
+    `uvm_info(`gfn, $sformatf("HW Output at %s:\n%s", path, key_shares_str(hw_key.key)), UVM_LOW)
+    return hw_key.key;
+  endfunction
+
+  virtual function wide_key_shares_t get_wide_hw_output(string path);
+    wide_key_shares_t key_shares;
+    logic             valid;
+    string            field_path;
+    // `wide_hw_key_req_t` is wider than what `uvm_hdl_read` can return in one go (1024 bits by
+    // default), so read `valid` and each key share separately.
+    // `DV_CHECK_FATAL can't take "" as an input, so build the path separately.
+    field_path = {path, ".valid"};
+    `DV_CHECK_FATAL(uvm_hdl_read(field_path, valid))
+    `DV_CHECK_EQ(valid, 1, "Expected wide HW output key to be valid")
+    for (int i = 0; i < keymgr_dpe_pkg::Shares; i++) begin
+      field_path = $sformatf("%s.key[%0d]", path, i);
+      `DV_CHECK_FATAL(uvm_hdl_read(field_path, key_shares[i]))
+    end
+    `uvm_info(`gfn, $sformatf("HW Output at %s:\n%s", path, wide_key_shares_str(key_shares)),
+              UVM_LOW)
+    return key_shares;
+  endfunction
+
+  // Format a key.
+  virtual function string key_str(key_t key);
+    return $sformatf("256'h%064h", key);
+  endfunction
+
+  // Format the two shares of a key with a `separator`.
+  virtual function string key_shares_str(key_shares_t key_shares, string separator = "\n");
+    return $sformatf("%s%s%s", key_str(key_shares[0]), separator, key_str(key_shares[1]));
+  endfunction
+
+  // Format two shares of an wide HW key.
+  virtual function string wide_key_shares_str(wide_key_shares_t shares, string separator = "\n");
+    return $sformatf("512'h%128h%s512'h%128h", shares[0], separator, shares[1]);
+  endfunction
+
+endclass : chip_sw_keymgr_dpe_key_derivation_vseq

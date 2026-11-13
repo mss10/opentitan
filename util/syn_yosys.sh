@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,7 +19,7 @@
 # use fusesoc to generate files and file list
 #-------------------------------------------------------------------------
 \rm -Rf build syn_out
-fusesoc --cores-root .. run --target=syn \
+fusesoc --cores-root ../hw run --target=syn \
   --setup lowrisc:systems:top_earlgrey > /dev/null 2>&1
 
 # copy all files into directory "syn_out"
@@ -29,7 +29,7 @@ cp \
   build/*/src/*/*/*.sv* \
   build/*/src/*/*/*/*.sv* \
   syn_out
-cd syn_out
+cd syn_out || exit
 
 # copy file list, remove incdir and pins_if, and flatten pathnames
 grep -Ev 'incdir|pins_if' ../build/*/*/*.scr | sed 's!.*/!!' > flist_gold
@@ -91,7 +91,7 @@ declare -a modules=(
   "flash_phy"
 )
 
-# TODO: top_earlgrey appears to be too large for verification under the currrent
+# TODO: top_earlgrey appears to be too large for verification under the current
 # setup. Consider adding verification using `hier_compare`.
 
 for module in "${modules[@]}"; do

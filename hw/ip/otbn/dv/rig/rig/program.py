@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -212,7 +212,7 @@ class Program:
         self.loop_warps = {}  # type: Dict[Tuple[int, int], int]
 
     def copy(self) -> 'Program':
-        '''Return a a shallow copy of the program
+        '''Return a shallow copy of the program
 
         This is a shallow copy, so shares ProgInsn instances, but it can be
         modified by adding instructions without affecting the original.
@@ -340,12 +340,13 @@ class Program:
 
         seg_descs = []
         for idx, (addr, values) in enumerate(sorted(dsegs.items())):
+            top_addr = addr + 4 * len(values) - 1
             seg_descs.append(('dseg{:04}'.format(idx),
                               addr,
                               addr + self.dmem_lma,
                               '.data.sec{:04}'.format(idx),
                               ('/* Data section {} ({:#06x}-{:#06x}) */'
-                               .format(idx, addr, addr + 4 * len(values) - 1))))
+                               .format(idx, addr, top_addr))))
         for idx, (addr, insns) in enumerate(sorted(self._sections.items())):
             seg_descs.append(('iseg{:04}'.format(idx),
                               addr,

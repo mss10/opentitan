@@ -1,14 +1,15 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //############################################################################
 // *Name: aon_osc
-// *Module Description: AON Clock Oscilator
+// *Module Description: AON Clock Oscillator
 //############################################################################
 
 module aon_osc (
   input vcore_pok_h_i,    // VCORE POK @3.3V
   input aon_en_i,         // AON Source Clock Enable
+  input aon_osc_cal_i,    // AON Oscillator Calibrated
 `ifdef AST_BYPASS_CLK
   input clk_aon_ext_i,    // FPGA/VERILATOR Clock input\
 `endif
@@ -16,39 +17,72 @@ module aon_osc (
 );
 
 `ifndef AST_BYPASS_CLK
+`ifndef SYNTHESIS
 // Behavioral Model
 ////////////////////////////////////////
 timeunit 1ns / 10ps;
-import ast_bhv_pkg::* ;
 
-localparam time AonClkPeriod = 5000ns; // 5000ns (200Khz)
-logic clk, en_dly;
+real CLK_PERIOD, ckmul;
+
+reg init_start;
+initial init_start = 1'b0;
 
 initial begin
-  clk = 1'b0;
-  $display("\nAON Clock Period: %0dns", AonClkPeriod);
-  en_dly = 1'b0;  // to block init X
-  #(AON_EN_RDLY + VCAON_POK_RDLY +1) en_dly = 1'b1;
+  if ( !$value$plusargs("osc200k_freq_multiplier=%f", ckmul) ) ckmul = 1.0;
+  #1;
+  init_start = 1'b1;
+  #1;
+  $display("\n%m: AON Base Clock Power-up Frequency: %0d Hz", $rtoi(10**9/(CLK_PERIOD*ckmul)));
+  $display("%m: AON %0.1fxBase Clock Power-up Frequency: %0d Hz", ckmul, $rtoi(10**9/CLK_PERIOD));
 end
 
-// Enable 5us RC Delay
-logic aon_en_dly, aon_clk_dly;
-
-assign #(AON_EN_RDLY) aon_en_dly = aon_en_i;
-assign aon_clk_dly = aon_en_dly && en_dly;
+// Enable 5us RC Delay on rise
+wire en_osc_re_buf, en_osc_re;
+buf #(ast_bhv_pkg::AON_EN_RDLY, 0) b0 (en_osc_re_buf, (vcore_pok_h_i && aon_en_i));
+assign en_osc_re = en_osc_re_buf && init_start;
 
 // Clock Oscillator
 ////////////////////////////////////////
-logic en_osc;
+real CalAonClkPeriod, UncAonClkPeriod, AonClkPeriod;
+
+initial CalAonClkPeriod = $itor( 5000 );                         // 5000ns (200KHz)
+initial UncAonClkPeriod = $itor( $urandom_range(10000, 5555) );  // 10000-5555ps (100-180KHz)
+
+assign AonClkPeriod = (aon_osc_cal_i && init_start) ? CalAonClkPeriod : UncAonClkPeriod;
+assign CLK_PERIOD = AonClkPeriod/ckmul;
+
+// Free running oscillator
+reg clk_osc;
+initial clk_osc = 1'b1;
 
 always begin
-  #(AonClkPeriod/2) clk = ~clk && en_osc;
+  #(CLK_PERIOD/2) clk_osc = ~clk_osc;
 end
-`else  // of AST_BYPASS_CLK
-// SYNTHESIS/VERILATOR/LINTER/FPGA
+
+logic en_osc;
+
+// HDL Clock Gate
+logic en_clk, clk;
+
+always_latch begin
+  if ( !clk_osc ) en_clk = en_osc;
+end
+
+assign clk = clk_osc && en_clk;
+`else  // of SYNTHESIS
+// SYNTHESIS/LINTER
 ///////////////////////////////////////
-logic aon_clk_dly;
-assign aon_clk_dly = 1'b1;
+logic clk, en_osc;
+assign clk = 1'b0;
+
+logic en_osc_re;
+assign en_osc_re = vcore_pok_h_i && aon_en_i;
+`endif  // of SYNTHESIS
+`else  // of AST_BYPASS_CLK
+// VERILATOR/FPGA
+///////////////////////////////////////
+logic en_osc_re;
+assign en_osc_re = vcore_pok_h_i && aon_en_i;
 
 // Clock Oscillator
 ////////////////////////////////////////
@@ -64,11 +98,9 @@ prim_clock_gating #(
 );
 `endif
 
-logic en_osc_re, en_osc_fe;
+logic en_osc_fe;
 
-assign en_osc_re = vcore_pok_h_i && aon_en_i && aon_clk_dly;
-
-// Syncronize en_osc to clk FE for glitch free disable
+// Synchronize en_osc to clk FE for glitch free disable
 always_ff @( negedge clk, negedge vcore_pok_h_i ) begin
   if ( !vcore_pok_h_i ) begin
     en_osc_fe <= 1'b0;
@@ -87,5 +119,14 @@ prim_clock_buf #(
   .clk_i ( clk ),
   .clk_o ( aon_clk_o )
 );
+
+
+`ifdef SYNTHESIS
+///////////////////////
+// Unused Signals
+///////////////////////
+logic unused_sigs;
+assign unused_sigs = ^{ aon_osc_cal_i, en_osc, en_osc_fe };
+`endif
 
 endmodule : aon_osc

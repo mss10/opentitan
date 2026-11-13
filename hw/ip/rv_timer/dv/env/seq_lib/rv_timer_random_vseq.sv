@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -18,7 +18,7 @@ class rv_timer_random_vseq extends rv_timer_base_vseq;
   rand uint ticks[NUM_HARTS];
   rand bit  assert_reset;
 
-  uint64 max_clks_until_expiry = 5_000_000;
+  uint64 max_clks_until_expiry = 5_000;
 
   constraint assert_reset_c {
     (assert_reset == 1'b0);
@@ -100,7 +100,45 @@ class rv_timer_random_vseq extends rv_timer_base_vseq;
     num_trans.rand_mode(0);
   endtask
 
+  // Repeatedly read each hart's intr_state register until its bits exactly equal the set of enabled
+  // timers (en_timers), meaning that the right interrupts have been asserted.
+  //
+  // The spinwait calls have timeouts derived from timeout_ns. The task will exit immediately on
+  // reset.
+  task intr_state_spinwait_all_harts(int unsigned timeout_ns);
+    fork : isolation_fork begin
+      for (int i = 0; i < NUM_HARTS; i++) begin
+        automatic int a_i = i;
+        if (en_harts[a_i]) begin
+          fork begin
+            // Poll intr_status continuously until it reads the expected value. If the interrupt
+            // will happen in timeout_ns nanoseconds and we happen to read the state just
+            // beforehand, we'll see the high value on the next read (delay nanoseconds later). As
+            // such, we set the spinwait timeout to the sum of the two numbers plus an extra 100ns
+            // for a few extra clock ticks.
+            int unsigned actual_timeout_ns;
+
+            `DV_CHECK_MEMBER_RANDOMIZE_FATAL(delay)
+
+            actual_timeout_ns = 100 + delay + timeout_ns;
+            intr_state_spinwait(.hart(a_i), .exp_data(en_timers),
+                                .spinwait_delay_ns(delay), .timeout_ns(actual_timeout_ns));
+          end join_none
+        end
+      end
+
+      // Wait for all of the interrupt polling tasks to complete. If a reset is asserted, they will
+      // all complete immediately.
+      wait fork;
+    end join
+  endtask
+
   task body();
+    // This task will run timers and wait until they raise an interrupt. This timeout gives an upper
+    // bound on how long to wait.
+    int unsigned intr_timeout_ns = delay * 2 + (max_clks_until_expiry *
+                                                (cfg.clk_rst_vif.clk_period_ps / 1000.0));
+
     for (int trans = 1; trans <= num_trans; trans++) begin
       `uvm_info(`gfn, $sformatf("Running test iteration %0d/%0d", trans, num_trans), UVM_LOW)
 
@@ -108,46 +146,25 @@ class rv_timer_random_vseq extends rv_timer_base_vseq;
 
       // disable timers first
       csr_wr(.ptr(ral.ctrl[0]), .value(ral.ctrl[0].get_reset()));
-
       // configure the timers and harts based on rand fields
       cfg_all_timers();
-
       // now enable timers
       for (int i = 0; i < NUM_HARTS; i++) begin
         for (int j = 0; j < NUM_TIMERS; j++) begin
           cfg_timer(.hart(i), .timer(j), .enable(en_timers[j]));
+          if (cfg.under_reset) return;
         end
       end
 
       fork
-        begin : isolation_fork
-          fork
-            // assert reset while timer is running
-            if (assert_reset) begin
-              `DV_CHECK_MEMBER_RANDOMIZE_FATAL(delay)
-              cfg.clk_rst_vif.wait_clks(delay);
-              dut_init("HARD");
-            end
-          join_none
+        // Wait a randomised amount of time and then assert a reset (while the timer is running)
+        if (assert_reset) begin
+          `DV_CHECK_MEMBER_RANDOMIZE_FATAL(delay)
+          cfg.clk_rst_vif.wait_clks_or_rst(delay);
+          dut_init("HARD");
+        end
 
-          for (int i = 0; i < NUM_HARTS; i++) begin
-            automatic int a_i = i;
-            fork
-              // Poll intr_status continuously until it reads the expected value.
-              // The delay value set for the `timeout_ns` arg is mulitplied by two due to
-              // `intr_state_spinwait` task: if the interrupt is set right after csr_rd, then in the
-              // worst case, the code will wait for two `spinwait_delay_ns` before hitting the break
-              // statement.
-              if (en_harts[a_i]) begin
-                `DV_CHECK_MEMBER_RANDOMIZE_FATAL(delay)
-                intr_state_spinwait(.hart(a_i), .exp_data(en_timers), .spinwait_delay_ns(delay),
-                                    .timeout_ns(delay * 2 + (max_clks_until_expiry *
-                                        (cfg.clk_rst_vif.clk_period_ps / 1000.0))));
-              end
-            join_none
-          end
-          wait fork;
-        end : isolation_fork
+        intr_state_spinwait_all_harts(intr_timeout_ns);
       join
 
       // Disable timers.
@@ -161,11 +178,10 @@ class rv_timer_random_vseq extends rv_timer_base_vseq;
           end
         end
       end
-
     end
   endtask : body
 
-  // Function to calculate number of clks to interrup for given hart and timer
+  // Function to calculate number of clks to interrupt for given hart and timer
   function automatic uint calculate_num_clks(int hart = 0, int timer = 0);
     uint64 mtime_dif = compare_val[hart][timer] - timer_val[hart];
     calculate_num_clks = ((mtime_dif / step[hart]) +
@@ -176,10 +192,14 @@ class rv_timer_random_vseq extends rv_timer_base_vseq;
   task cfg_all_timers();
     for (int i = 0; i < NUM_HARTS; i++) begin
       cfg_hart(.hart(i), .prescale(prescale[i]), .step(step[i]));
+      if (cfg.under_reset) return;
       set_timer_val(.hart(i), .val(timer_val[i]));
+      if (cfg.under_reset) return;
       for (int j = 0; j < NUM_TIMERS; j++) begin
         set_compare_val(.hart(i), .timer(j), .val(compare_val[i][j]));
+        if (cfg.under_reset) return;
         cfg_interrupt(.hart(i), .timer(j), .enable(en_interrupt[i][j]));
+        if (cfg.under_reset) return;
       end
     end
   endtask : cfg_all_timers

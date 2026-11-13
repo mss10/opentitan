@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,18 +6,27 @@ module lc_ctrl_bind;
 
   bind lc_ctrl tlul_assert #(
     .EndpointType("Device")
-  ) tlul_assert_device (
+  ) tlul_assert_device_regs (
     .clk_i,
     .rst_ni,
-    .h2d  (tl_i),
-    .d2h  (tl_o)
+    .h2d  (regs_tl_i),
+    .d2h  (regs_tl_o)
   );
 
-  bind lc_ctrl lc_ctrl_csr_assert_fpv lc_ctrl_csr_assert (
+  bind lc_ctrl tlul_assert #(
+    .EndpointType("Device")
+  ) tlul_assert_device_dmi (
     .clk_i,
     .rst_ni,
-    .h2d    (tl_i),
-    .d2h    (tl_o)
+    .h2d  (dmi_tl_i),
+    .d2h  (dmi_tl_o)
+  );
+
+  bind lc_ctrl lc_ctrl_regs_csr_assert_fpv lc_ctrl_csr_assert (
+    .clk_i,
+    .rst_ni,
+    .h2d    (regs_tl_i),
+    .d2h    (regs_tl_o)
   );
 
 endmodule

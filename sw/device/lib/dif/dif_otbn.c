@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,7 +10,7 @@
 #include "sw/device/lib/base/mmio.h"
 #include "sw/device/lib/dif/dif_base.h"
 
-#include "otbn_regs.h"  // Generated.
+#include "hw/top/otbn_regs.h"  // Generated.
 
 static_assert(kDifOtbnErrBitsBadDataAddr ==
                   (1 << OTBN_ERR_BITS_BAD_DATA_ADDR_BIT),
@@ -123,6 +123,27 @@ dif_result_t dif_otbn_get_insn_cnt(const dif_otbn_t *otbn, uint32_t *insn_cnt) {
   return kDifOk;
 }
 
+dif_result_t dif_otbn_get_load_checksum(const dif_otbn_t *otbn,
+                                        uint32_t *checksum) {
+  if (otbn == NULL || checksum == NULL) {
+    return kDifBadArg;
+  }
+
+  *checksum =
+      mmio_region_read32(otbn->base_addr, OTBN_LOAD_CHECKSUM_REG_OFFSET);
+  return kDifOk;
+}
+
+dif_result_t dif_otbn_clear_load_checksum(const dif_otbn_t *otbn) {
+  if (otbn == NULL) {
+    return kDifBadArg;
+  }
+
+  mmio_region_write32(otbn->base_addr, OTBN_LOAD_CHECKSUM_REG_OFFSET, 0);
+
+  return kDifOk;
+}
+
 dif_result_t dif_otbn_imem_write(const dif_otbn_t *otbn, uint32_t offset_bytes,
                                  const void *src, size_t len_bytes) {
   if (otbn == NULL || src == NULL ||
@@ -165,7 +186,7 @@ dif_result_t dif_otbn_dmem_write(const dif_otbn_t *otbn, uint32_t offset_bytes,
 dif_result_t dif_otbn_dmem_read(const dif_otbn_t *otbn, uint32_t offset_bytes,
                                 void *dest, size_t len_bytes) {
   if (otbn == NULL || dest == NULL ||
-      !check_offset_len(offset_bytes, len_bytes, OTBN_IMEM_SIZE_BYTES)) {
+      !check_offset_len(offset_bytes, len_bytes, OTBN_DMEM_SIZE_BYTES)) {
     return kDifBadArg;
   }
 
@@ -175,27 +196,35 @@ dif_result_t dif_otbn_dmem_read(const dif_otbn_t *otbn, uint32_t offset_bytes,
   return kDifOk;
 }
 
-dif_result_t dif_otbn_set_ctrl_software_errs_fatal(const dif_otbn_t *otbn,
-                                                   bool enable) {
+static dif_result_t dif_otbn_set_bin_in_ctrl(const dif_otbn_t *otbn,
+                                             bitfield_bit32_index_t bit_index,
+                                             bool enable) {
   if (otbn == NULL) {
     return kDifBadArg;
   }
 
-  // Only one bit in the CTRL register so no need to read current value.
-  uint32_t new_ctrl;
+  // Preserve the other CTRL fields via a read-modify-write.
+  uint32_t ctrl_reg = mmio_region_read32(otbn->base_addr, OTBN_CTRL_REG_OFFSET);
+  ctrl_reg = bitfield_bit32_write(ctrl_reg, bit_index, enable);
 
-  if (enable) {
-    new_ctrl = 1;
-  } else {
-    new_ctrl = 0;
-  }
-
-  mmio_region_write32(otbn->base_addr, OTBN_CTRL_REG_OFFSET, new_ctrl);
-  if (mmio_region_read32(otbn->base_addr, OTBN_CTRL_REG_OFFSET) != new_ctrl) {
+  mmio_region_write32(otbn->base_addr, OTBN_CTRL_REG_OFFSET, ctrl_reg);
+  // The write is ignored unless OTBN is idle, so read the value back to make
+  // sure it took effect.
+  if (mmio_region_read32(otbn->base_addr, OTBN_CTRL_REG_OFFSET) != ctrl_reg) {
     return kDifUnavailable;
   }
 
   return kDifOk;
+}
+
+dif_result_t dif_otbn_set_ctrl_software_errs_fatal(const dif_otbn_t *otbn,
+                                                   bool enable) {
+  return dif_otbn_set_bin_in_ctrl(otbn, OTBN_CTRL_SOFTWARE_ERRS_FATAL_BIT,
+                                  enable);
+}
+
+dif_result_t dif_otbn_set_ctrl_wfi_enable(const dif_otbn_t *otbn, bool enable) {
+  return dif_otbn_set_bin_in_ctrl(otbn, OTBN_CTRL_WFI_ENABLED_BIT, enable);
 }
 
 size_t dif_otbn_get_dmem_size_bytes(const dif_otbn_t *otbn) {

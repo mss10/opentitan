@@ -3,7 +3,7 @@
 Physical Memory Protection (PMP)
 ================================
 
-The Physical Memory Protection (PMP) unit implements region-based memory access checking in-accordance with the RISC-V Privileged Specification, version 1.11 and includes the Trusted Execution Environment (TEE) working group proposal `PMP Enhancements for memory access and execution prevention on Machine mode (Smepmp) version 0.9.3 <https://github.com/riscv/riscv-tee/blob/61455747230a26002d741f64879dd78cc9689323/Smepmp/Smepmp.pdf>`_.
+The Physical Memory Protection (PMP) unit implements region-based memory access checking in-accordance with the RISC-V Privileged Specification, version 1.12 and implements the `PMP Enhancements for memory access and execution prevention on Machine mode (Smepmp) version 1.0  <https://github.com/riscv/riscv-tee/blob/191b563b08b31cc2974d604a3b670d8666a2e093/Smepmp/Smepmp.pdf>`_ extension.
 The following configuration parameters are available to control PMP checking:
 
 +----------------+---------------+----------------------------------------------------------+
@@ -21,7 +21,13 @@ When PMPEnable is zero, the PMP module is not instantiated and all PMP registers
 PMP Integration
 ---------------
 
-Addresses from the instruction fetch unit and load-store unit are passed to the PMP module for checking, and the output of the PMP check is used to gate the external request.
+Addresses from the instruction fetch unit and load-store unit are passed to the PMP module for checking.
+The output of PMP check is used to gate the external request of the load-store unit.
+This is because both writes and reads can have side-effects on MMIO devices connected to the data memory bus.
+The request coming from the instruction fetch unit are not gated by the PMP check, so integrators must choose carefully what to connect to the instruction fetch bus.
+Specifically, no devices that experience side-effects due to reading should be available on this bus.
+In general, connecting memories to the instruction fetch bus should be safe.
+
 To maintain consistency with external errors, the instruction fetch unit and load-store unit progress with their request as if it was granted externally.
 The PMP error is registered and consumed by the core when the data would have been consumed.
 
@@ -36,11 +42,25 @@ When the granularity is greater than zero, NA4 mode is not available and will be
 PMP Enhancements
 ----------------
 
-These are described in more detail in `PMP Enhancements for memory access and execution prevention on Machine mode (Smepmp) version 0.9.3 <https://github.com/riscv/riscv-tee/blob/61455747230a26002d741f64879dd78cc9689323/Smepmp/Smepmp.pdf>`_.
+These are described in more detail in `PMP Enhancements for memory access and execution prevention on Machine mode (Smepmp) version 1.0 <https://github.com/riscv/riscv-tee/blob/191b563b08b31cc2974d604a3b670d8666a2e093/Smepmp/Smepmp.pdf>`_.
 If Ibex is configured to include PMP (PMPEnable is not zero) the PMP enhancements are always included.
-Use of the enhanced behavior is optional, if no writes to ``mseccfg`` occur PMP behavior will remain exactly as specified in the RISC-V privileged specification.
+Use of the enhanced behavior is optional, if no writes to ``mseccfg`` occur PMP behavior will remain exactly as if Smepmp was not implemented.
 The enhancements add:
 
 * A new CSR ``mseccfg`` providing functionality to allow locked regions to be modified and to implement default deny for M-mode accesses.
 * New PMP region configurations which are U-Mode or M-Mode accessible only with varying read/write/execute settings along with some shared U and M mode accessible configurations.
   These new configurations supersede the original ones and are enabled via ``mseccfg``.
+
+Custom Reset Values
+-------------------
+
+By default all PMP CSRs (include ``mseccfg``) are reset to 0.
+Some applications may want other reset values.
+Default reset values are defined in :file:`ibex_pkg.sv`.
+An implementation can either modify this file or pass custom reset values as a module parameter.
+
+Debug Mode
+----------
+
+In debug mode, the PMP allows all accesses to addresses of the Debug Module, as defined by the `DmBaseAddr` and `DmAddrMask` module parameters.
+This is mandated by the RISC-V Debug Specification (v1.0.0).

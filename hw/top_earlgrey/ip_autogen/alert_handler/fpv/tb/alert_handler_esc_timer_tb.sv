@@ -1,11 +1,11 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Testbench module for alert_handler_esc_timer.
 // Intended to be used with a formal tool.
 
-module alert_handler_esc_timer_tb import alert_pkg::*; (
+module alert_handler_esc_timer_tb import alert_handler_pkg::*; (
   input  clk_i,
   input  rst_ni,
   input  en_i,

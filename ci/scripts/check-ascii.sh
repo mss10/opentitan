@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,9 +19,24 @@ allowed_suffixes=(
     der
     vsdx
     elf
+    woff2
+    o
 
     md
     html
+    css
+
+    # The ECMA Script standard allows unicode:
+    # https://262.ecma-international.org/6.0/#sec-source-text
+    #
+    # There is no OpenTitan JavaScript style guide so all `js`
+    # have not been white listed.
+    #
+    # However, minified Javascript is similar to executables
+    # in that it is not edited directly
+    # but produced by a compiler/minifier for a JavaScript run-time,
+    # and so it makes sense for it to be excluded from this ascii check.
+    min.js
 
     # We don't mandate 7-bit ASCII for Python or C/C++ code. The
     # Google style guide, which we inherit suggests avoiding
@@ -31,6 +46,10 @@ allowed_suffixes=(
     cc
     h
     hh
+
+    # Signature files are binary files.
+    rsa_sig
+    spx_sig
 )
 suff_re=""
 for suff in "${allowed_suffixes[@]}"; do
@@ -45,7 +64,10 @@ excl_paths=(
     '.*/vendor/.*'
     COMMITTERS
     hw/ip/usbdev/pmod/tusb1106pmod-kicad/fp-info-cache
+    'signing/softhsm/tokens/.*'
     site/landing/data/partner_quotes.json
+    'sw/device/silicon_creator/rom/e2e/presigned_images/rom_e2e_self_hash_sim_dv.*'
+    third_party/hsm/patches/0002-slh-dsa.patch
 )
 excl_re=""
 for excl in "${excl_paths[@]}"; do
@@ -64,7 +86,7 @@ git ls-files | \
     grep -v "${suff_re}" | \
     env LC_ALL=C xargs grep -d skip -P '[^\0-\x7f]' >"$TMPFILE" || true
 if [ -s "$TMPFILE" ]; then
-    echo -n "##vso[task.logissue type=error]"
+    echo -n ":error::"
     echo "One or more files have unexpected non-ASCII text:"
     cat "$TMPFILE"
     exit 1

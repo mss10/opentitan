@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,28 +10,79 @@ class aon_timer_env_cfg extends cip_base_env_cfg #(.RAL_T(aon_timer_reg_block));
   virtual pins_if #(1)      sleep_vif;
 
   // ext component cfgs
+  string  path_to_rtl = "tb.dut";
 
   `uvm_object_utils_begin(aon_timer_env_cfg)
   `uvm_object_utils_end
 
-  function new (string name="");
-    super.new(name);
+  extern function new (string name="");
+  extern virtual function void initialize(bit inherit_ral_models = 1'b0);
+  // Set the 'has_prediction' field flag for all the intr_state fields so the comparison
+  // on reads can be carried out in cip_base_scoreboard
+  extern function void set_intr_state_has_prediction();
 
-    // The aon_timer RTL doesn't support a devmode input at the moment.
-    has_devmode = 1'b0;
-  endfunction : new
+  // Convenience wrapper function to avoid calling explictly uvm_hdl_read multiple times
+  // It takes a path relative to the RTL and appends the RTL instance to it
+  extern function bit hdl_read_bit(string path);
+  // Waits for AON signal to become 'value'
+  extern task wait_for_aon_signal(string path, bit value);
+  // Waits for the WE to rise and fall after a TL-UL write access
+  // Does HDL reads to be in sync with when the values are visible in the RTL
+  // It needs to be called the moment the TL-access occurs, otherwise the thread may hang if the WE
+  // has risen and dropped again already
+  extern task wait_for_we_pulse(input string path);
 
-  virtual function void initialize(bit [31:0] csr_base_addr = '1);
-    list_of_alerts = aon_timer_env_pkg::LIST_OF_ALERTS;
-    super.initialize(csr_base_addr);
+endclass : aon_timer_env_cfg
 
-    // set num_interrupts & num_alerts
-    begin
-      uvm_reg rg = ral.get_reg_by_name("intr_state");
-      if (rg != null) begin
-        num_interrupts = ral.intr_state.get_n_used_bits();
+function aon_timer_env_cfg::new (string name="");
+  super.new(name);
+endfunction : new
+
+function void aon_timer_env_cfg::initialize(bit inherit_ral_models = 1'b0);
+  list_of_alerts = aon_timer_env_pkg::LIST_OF_ALERTS;
+  super.initialize(inherit_ral_models);
+
+  m_tl_agent_cfg.max_outstanding_req = 1;
+
+  // set num_interrupts & num_alerts
+  num_interrupts = ral.intr_state.get_n_used_bits();
+  set_intr_state_has_prediction();
+  // Allow mid-TL-US accesses
+  can_reset_with_csr_accesses = 1;
+endfunction : initialize
+
+function bit aon_timer_env_cfg::hdl_read_bit(string path);
+  bit   hdl_bit;
+  if (! uvm_hdl_read({path_to_rtl,path}, hdl_bit))
+    `uvm_error ($sformatf("%m"), $sformatf("HDL Read from %s failed", path))
+  return hdl_bit;
+endfunction
+
+task aon_timer_env_cfg::wait_for_aon_signal(string path, bit value);
+  bit actual_value;
+  do begin
+    actual_value = hdl_read_bit(path);
+    if (actual_value !== value)
+      aon_clk_rst_vif.wait_clks(1);
+  end while (actual_value !== value);
+endtask
+
+task aon_timer_env_cfg::wait_for_we_pulse(input string path);
+  wait_for_aon_signal(path, 1);
+  wait_for_aon_signal(path, 0);
+endtask
+
+function void aon_timer_env_cfg::set_intr_state_has_prediction();
+  foreach (ral_model_names[ral_name]) begin
+    dv_base_reg regs_q[$];
+    ral_models[ral_name].get_dv_base_regs(regs_q);
+    foreach (regs_q[j]) begin
+      if (!uvm_re_match("intr_state*", regs_q[j].get_name())) begin
+        dv_base_reg_field fields_q[$];
+        regs_q[j].get_dv_base_reg_fields(fields_q);
+        foreach (fields_q[k])// Setting all fields to be compared in the base scoreboard
+          fields_q[k].has_prediction = 1;
       end
     end
-  endfunction
-
-endclass
+  end
+endfunction

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -42,4 +42,3 @@ proc vcf_dvsim_report { } {
 	echo "${prop_id},assume,${prop_status},${prop_name},${prop_vacuity},,,,"
     }
 }
-

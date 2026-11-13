@@ -1,9 +1,9 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Covergoups that are dependent on run-time parameters that may be available
+ * Covergroups that are dependent on run-time parameters that may be available
  * only in build_phase can be defined here
  * Covergroups may also be wrapped inside helper classes if needed.
  */
@@ -123,9 +123,9 @@ endgroup
 // We do this so that we can create an array of these covergroups for each app interface
 // present in the testbench environment.
 class app_cg_wrap;
-  // done signal is sent while kecak rounds are running
+  // done signal is sent while Keccak rounds are running
   covergroup app_cg(string name) with function sample(bit single_beat,
-                                                      bit [keymgr_pkg::KmacDataIfWidth/8-1:0] strb,
+                                                      bit [keymgr_dpe_pkg::KmacDataIfWidth/8-1:0] strb,
                                                       bit err,
                                                       bit is_done,
                                                       bit in_keccak);
@@ -165,26 +165,33 @@ class app_cg_wrap;
     }
   endgroup
 
+  covergroup app_cfg_reg_cg(string name) with function sample(sha3_pkg::sha3_mode_e sw_hash_mode);
+    option.per_instance = 1;
+    option.name = name;
+    sw_configured_hash_mode: coverpoint sw_hash_mode {
+      bins sha3   = {sha3_pkg::Sha3};
+      bins shake  = {sha3_pkg::Shake};
+      bins cshake = {sha3_pkg::CShake};
+    }
+  endgroup
+
   function new(string name = "app_cg");
     app_cg = new(name);
+    app_cfg_reg_cg = new(name);
   endfunction
 
-  function void sample(bit single_beat,
-                       bit [keymgr_pkg::KmacDataIfWidth/8-1:0] strb,
-                       bit err,
-                       bit is_done,
-                       bit in_keccak);
+  function void app_sample(bit single_beat,
+                           bit [keymgr_dpe_pkg::KmacDataIfWidth/8-1:0] strb,
+                           bit err,
+                           bit is_done,
+                           bit in_keccak);
     app_cg.sample(single_beat, strb, err, is_done, in_keccak);
   endfunction
+
+  function void app_cfg_reg_sample(sha3_pkg::sha3_mode_e sw_hash_mode);
+    app_cfg_reg_cg.sample(sw_hash_mode);
+  endfunction
 endclass
-
-
-// Covers whether we see an EDN response while keccak rounds are active/inactive.
-// Create this covergroup outside of the class as its instantiation relies on a field in the
-// env.cfg.
-covergroup edn_cg with function sample(bit in_keccak_rounds);
-  edn_in_keccak: coverpoint in_keccak_rounds;
-endgroup
 
 
 class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
@@ -198,9 +205,7 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
   config_masked_cg config_masked_cg;
   config_unmasked_cg config_unmasked_cg;
 
-  edn_cg edn_cg;
-
-  app_cg_wrap app_cg_wrappers[kmac_pkg::NumAppIntf];
+  app_cg_wrap app_cg_wrappers[kmac_env_pkg::NUM_APP_INTF];
 
   covergroup msg_len_cg with function sample(int len);
     msg_len: coverpoint len {
@@ -276,12 +281,6 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
     state_mask_share_cross: cross share, state_read_mask;
   endgroup
 
-  covergroup cmd_process_cg with function sample(bit in_keccak_rounds, bit keccak_complete_cycle);
-    in_keccak: coverpoint in_keccak_rounds;
-
-    in_keccak_complete_cycle: coverpoint keccak_complete_cycle;
-  endgroup
-
   covergroup sideload_cg with function sample(bit en_sideload, bit in_kmac, bit app_keymgr);
     sideload:       coverpoint en_sideload;
     kmac_mode:      coverpoint in_kmac;
@@ -289,16 +288,10 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
 
     sideload_cross: cross sideload, kmac_mode, in_app_keymgr {
       bins sw_kmac_valid_sideload   = binsof(sideload) intersect {1} && binsof(kmac_mode);
-      bins sw_kmac_invalid_sideload = binsof(sideload) intersect {1} && binsof(kmac_mode);
+      bins sw_kmac_invalid_sideload = binsof(sideload) intersect {0} && binsof(kmac_mode);
       bins app_valid_sideload       = binsof(sideload) intersect {1} && binsof(in_app_keymgr);
-      bins app_invalid_sideload     = binsof(sideload) intersect {1} && binsof(in_app_keymgr);
-
-      ignore_bins invalid = !binsof(sideload) intersect {1};
+      bins app_invalid_sideload     = binsof(sideload) intersect {0} && binsof(in_app_keymgr);
     }
-  endgroup
-
-  covergroup app_cg with function sample();
-
   endgroup
 
   covergroup error_cg with function sample(kmac_pkg::err_code_e kmac_err,
@@ -307,6 +300,10 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
                                            sha3_pkg::keccak_strength_e kstrength);
     kmac_err_code: coverpoint kmac_err {
       ignore_bins ignore = {kmac_pkg::ErrNone};
+      // Covered by direct sequence, if scb enabled for those seq, can remove it from this list.
+      illegal_bins il = {kmac_pkg::ErrWaitTimerExpired,
+                         kmac_pkg::ErrIncorrectEntropyMode,
+                         kmac_pkg::ErrSwHashingWithoutEntropyReady};
     }
 
     cmd: coverpoint kcmd {
@@ -367,16 +364,16 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
    }
   endgroup
 
-  function sample_cfg(bit kmac,
-                      bit xof,
-                      sha3_pkg::keccak_strength_e kstrength,
-                      sha3_pkg::sha3_mode_e kmode,
-                      kmac_pkg::key_len_e key_len,
-                      bit msg_endianness,
-                      bit state_endianness,
-                      bit en_sideload,
-                      kmac_pkg::entropy_mode_e entropy_mode,
-                      bit fast_entropy);
+  function void sample_cfg(bit kmac,
+                           bit xof,
+                           sha3_pkg::keccak_strength_e kstrength,
+                           sha3_pkg::sha3_mode_e kmode,
+                           kmac_pkg::key_len_e key_len,
+                           bit msg_endianness,
+                           bit state_endianness,
+                           bit en_sideload,
+                           kmac_pkg::entropy_mode_e entropy_mode,
+                           bit fast_entropy);
 
     if (cfg.enable_masking) begin
       config_masked_cg.sample(kmac, xof, kstrength, kmode, key_len, msg_endianness,
@@ -389,6 +386,22 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
     end
   endfunction
 
+  covergroup entropy_timer_cg with function sample (bit [9:0]  prescaler,
+                                                    bit [15:0] wait_timer,
+                                                    bit        entropy_edn_mode);
+    prescaler_val: coverpoint prescaler {
+      bins zero_val   = {0};
+      bins lower_val  = {[1             : {9{1'b1}} / 2 - 1]};
+      bins higher_val = {[{9{1'b1}} / 2 : {9{1'b1}}]};
+    }
+    wait_timer_val: coverpoint wait_timer {
+      bins zero_val   = {0};
+      bins lower_val  = {[1              : {16{1'b1}} / 2 -1]};
+      bins higher_val = {[{16{1'b1}} / 2 : {16{1'b1}}]};
+    }
+    entropy_edn_mode_enabled: coverpoint entropy_edn_mode;
+    entropy_timer_cross: cross prescaler_val, wait_timer_val, entropy_edn_mode_enabled;
+  endgroup
 
   function new(string name, uvm_component parent);
     kmac_app_e app_name = app_name.first;
@@ -401,9 +414,9 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
     msgfifo_level_cg = new();
     sha3_status_cg = new();
     state_read_mask_cg = new();
-    cmd_process_cg = new();
     sideload_cg = new();
     error_cg = new();
+    entropy_timer_cg = new();
     do begin
       app_cg_wrappers[app_name] = new({app_name.name(), "_cg"});
       app_name = app_name.next;
@@ -417,7 +430,6 @@ class kmac_env_cov extends cip_base_env_cov #(.CFG_T(kmac_env_cfg));
     // See cip_base_env_cov for details
     if (cfg.enable_masking) begin
       config_masked_cg = new();
-      edn_cg = new();
     end else begin
       config_unmasked_cg = new();
     end

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,12 +7,15 @@
 #include <cstring>
 #include <limits>
 #include <ostream>
+#include <tuple>
+#include <vector>
 
 #include "gtest/gtest.h"
 #include "sw/device/lib/base/mmio.h"
-#include "sw/device/lib/base/testing/mock_mmio.h"
+#include "sw/device/lib/base/mock_mmio.h"
+#include "sw/device/lib/dif/dif_test_base.h"
 
-#include "alert_handler_regs.h"  // Generated.
+#include "hw/top/alert_handler_regs.h"  // Generated.
 
 namespace dif_alert_handler_unittest {
 namespace {
@@ -22,725 +25,931 @@ using ::mock_mmio::MockDevice;
 using ::testing::_;
 using ::testing::Return;
 
-constexpr uint32_t kAlerts = ALERT_HANDLER_PARAM_N_ALERTS;
-constexpr uint32_t kAllZeros = 0;
+// If the assert below fails, please look at #14038.
+// A digest is calculated for the configuration of the alerts,
+// so if the number of alerts change, the digest will be changed
+// as well.  This process is not yet automated, so the user
+// must be aware on how to update the value.
+static_assert(ALERT_HANDLER_PARAM_N_ALERTS == 69,
+              "The number of alerts have changed.");
+
+constexpr int kAlerts = ALERT_HANDLER_PARAM_N_ALERTS;
+constexpr int kLocalAlerts = ALERT_HANDLER_PARAM_N_LOC_ALERT;
+constexpr int kClasses = ALERT_HANDLER_PARAM_N_CLASSES;
+constexpr int kEscSignals = ALERT_HANDLER_PARAM_N_ESC_SEV;
 
 class AlertHandlerTest : public testing::Test, public MmioTest {
  protected:
   dif_alert_handler_t alert_handler_ = {.base_addr = dev().region()};
 };
 
-class ConfigTest : public AlertHandlerTest {
-  // We provide our own dev_ member variable in this fixture, in order to
-  // support IgnoreMmioCalls().
-  //
-  // NOTE: This must come before alert_handler_!
- private:
-  std::unique_ptr<MockDevice> dev_ =
-      std::make_unique<testing::StrictMock<MockDevice>>();
+class AlertConfigTest : public AlertHandlerTest,
+                        public testing::WithParamInterface<
+                            std::tuple<int, dif_alert_handler_class_t>> {};
 
- protected:
-  ConfigTest() { alert_handler_.base_addr = dev().region(); }
-  // Non-virtual-override dev(), so that EXPECT_*() functions look this one
-  // up instead of AlertHandlerTest::dev().
-  MockDevice &dev() { return *dev_; }
+TEST_F(AlertConfigTest, BadArgs) {
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_alert(nullptr, 0, kDifAlertHandlerClassA,
+                                        kDifToggleEnabled, kDifToggleDisabled));
 
-  // Disables expectations on MMIO operations. This is useful for configuration
-  // tests that partially configure the device but fail due to a configuration
-  // error, returning kDifError.
-  void IgnoreMmioCalls() {
-    dev_ = std::make_unique<testing::NiceMock<MockDevice>>();
-    alert_handler_.base_addr = dev().region();
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_alert(
+      &alert_handler_, kAlerts, kDifAlertHandlerClassA, kDifToggleEnabled,
+      kDifToggleDisabled));
 
-    // Make sure that the peripheral looks unlocked.
-    ON_CALL(*dev_, Read32(_)).WillByDefault(Return(kAllZeros));
-  }
-};
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_alert(
+      &alert_handler_, 0, static_cast<dif_alert_handler_class_t>(kClasses),
+      kDifToggleEnabled, kDifToggleDisabled));
 
-TEST_F(ConfigTest, Locked) {
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 0,
-  };
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_alert(
+      &alert_handler_, 0, kDifAlertHandlerClassA, static_cast<dif_toggle_t>(2),
+      kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_alert(
+      &alert_handler_, 0, kDifAlertHandlerClassA, kDifToggleEnabled,
+      static_cast<dif_toggle_t>(2)));
+}
+
+TEST_F(AlertConfigTest, Locked) {
+  EXPECT_READ32(ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET, 0);
+  EXPECT_EQ(dif_alert_handler_configure_alert(
+                &alert_handler_, 0, kDifAlertHandlerClassA, kDifToggleEnabled,
+                kDifToggleDisabled),
+            kDifLocked);
+
+  EXPECT_READ32(ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET +
+                    (kAlerts - 1) * sizeof(uint32_t),
+                0);
+  EXPECT_EQ(dif_alert_handler_configure_alert(
+                &alert_handler_, kAlerts - 1, kDifAlertHandlerClassD,
+                kDifToggleEnabled, kDifToggleEnabled),
+            kDifLocked);
+}
+
+TEST_P(AlertConfigTest, EnableOnly) {
+  dif_alert_handler_alert_t alert = std::get<0>(GetParam());
+  dif_alert_handler_class_t alert_class = std::get<1>(GetParam());
 
   EXPECT_READ32(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        true}});
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET + alert * sizeof(uint32_t),
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_RESVAL);
+  EXPECT_WRITE32_SHADOWED(
+      ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
+          alert * sizeof(uint32_t),
+      {{ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_CLASS_A_0_OFFSET, alert_class}});
+  EXPECT_WRITE32_SHADOWED(
+      ALERT_HANDLER_ALERT_EN_SHADOWED_0_REG_OFFSET + alert * sizeof(uint32_t),
+      {{ALERT_HANDLER_ALERT_EN_SHADOWED_0_EN_A_0_BIT, true}});
 
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifLocked);
+  EXPECT_DIF_OK(
+      dif_alert_handler_configure_alert(&alert_handler_, alert, alert_class,
+                                        kDifToggleEnabled, kDifToggleDisabled));
 }
 
-TEST_F(ConfigTest, NoClassInit) {
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-  };
+TEST_P(AlertConfigTest, EnableAndLock) {
+  dif_alert_handler_alert_t alert = std::get<0>(GetParam());
+  dif_alert_handler_class_t alert_class = std::get<1>(GetParam());
 
   EXPECT_READ32(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        false}});
-
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET + alert * sizeof(uint32_t),
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_RESVAL);
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_PING_TIMEOUT_CYC_SHADOWED_OFFSET,
-        50}});
+      ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
+          alert * sizeof(uint32_t),
+      {{ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_CLASS_A_0_OFFSET, alert_class}});
+  EXPECT_WRITE32_SHADOWED(
+      ALERT_HANDLER_ALERT_EN_SHADOWED_0_REG_OFFSET + alert * sizeof(uint32_t),
+      {{ALERT_HANDLER_ALERT_EN_SHADOWED_0_EN_A_0_BIT, true}});
+  EXPECT_WRITE32(
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET + alert * sizeof(uint32_t), 0);
 
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifOk);
+  EXPECT_DIF_OK(
+      dif_alert_handler_configure_alert(&alert_handler_, alert, alert_class,
+                                        kDifToggleEnabled, kDifToggleEnabled));
 }
 
-TEST_F(ConfigTest, TimeoutTooBig) {
-  dif_alert_handler_config_t config = {
-      .ping_timeout =
-          ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_PING_TIMEOUT_CYC_SHADOWED_MASK +
-          1,
-  };
+INSTANTIATE_TEST_SUITE_P(
+    AllAlertsAndClasses, AlertConfigTest,
+    testing::Combine(testing::Range(0, kAlerts),
+                     testing::Values(kDifAlertHandlerClassA,
+                                     kDifAlertHandlerClassB,
+                                     kDifAlertHandlerClassC,
+                                     kDifAlertHandlerClassD)));
 
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifBadArg);
+class LocalAlertConfigTest
+    : public AlertHandlerTest,
+      public testing::WithParamInterface<std::tuple<
+          dif_alert_handler_local_alert_t, dif_alert_handler_class_t>> {};
+
+TEST_F(LocalAlertConfigTest, BadArgs) {
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_local_alert(
+      nullptr, kDifAlertHandlerLocalAlertBusIntegrityFail,
+      kDifAlertHandlerClassA, kDifToggleEnabled, kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_local_alert(
+      &alert_handler_,
+      static_cast<dif_alert_handler_local_alert_t>(kLocalAlerts),
+      kDifAlertHandlerClassA, kDifToggleEnabled, kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_local_alert(
+      &alert_handler_, kDifAlertHandlerLocalAlertAlertPingFail,
+      static_cast<dif_alert_handler_class_t>(kClasses), kDifToggleEnabled,
+      kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_local_alert(
+      &alert_handler_, kDifAlertHandlerLocalAlertAlertPingFail,
+      kDifAlertHandlerClassA, static_cast<dif_toggle_t>(2),
+      kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_local_alert(
+      &alert_handler_, kDifAlertHandlerLocalAlertAlertPingFail,
+      kDifAlertHandlerClassA, kDifToggleEnabled, static_cast<dif_toggle_t>(2)));
 }
 
-TEST_F(ConfigTest, BadClassPtr) {
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = nullptr,
-      .classes_len = 2,
-  };
+TEST_F(LocalAlertConfigTest, Locked) {
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET, 0);
+  EXPECT_EQ(dif_alert_handler_configure_local_alert(
+                &alert_handler_, kDifAlertHandlerLocalAlertAlertPingFail,
+                kDifAlertHandlerClassA, kDifToggleEnabled, kDifToggleDisabled),
+            kDifLocked);
 
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifBadArg);
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_6_REG_OFFSET, 0);
+  EXPECT_EQ(dif_alert_handler_configure_local_alert(
+                &alert_handler_, kDifAlertHandlerLocalAlertShadowedStorageError,
+                kDifAlertHandlerClassD, kDifToggleEnabled, kDifToggleEnabled),
+            kDifLocked);
 }
 
-TEST_F(ConfigTest, ClassInit) {
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, 5};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStatePhase2, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStatePhase1, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
+TEST_P(LocalAlertConfigTest, EnableOnly) {
+  dif_alert_handler_local_alert_t local_alert = std::get<0>(GetParam());
+  dif_alert_handler_class_t alert_class = std::get<1>(GetParam());
 
-  std::vector<dif_alert_handler_alert_t> alerts_b = {9, 6, 11};
-  std::vector<dif_alert_handler_local_alert_t> locals_b = {
-      kDifAlertHandlerLocalAlertAlertPingFail,
-      kDifAlertHandlerLocalAlertAlertIntegrityFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_b = {
-      {.phase = kDifAlertHandlerClassStatePhase1, .signal = 0},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_b = {
-      {.phase = kDifAlertHandlerClassStatePhase1, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-      {.phase = kDifAlertHandlerClassStatePhase3, .cycles = 150000},
-  };
-
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = kDifAlertHandlerClassA,
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-      {
-          .alert_class = kDifAlertHandlerClassB,
-          .alerts = alerts_b.data(),
-          .alerts_len = alerts_b.size(),
-          .local_alerts = locals_b.data(),
-          .local_alerts_len = locals_b.size(),
-          .use_escalation_protocol = kDifToggleEnabled,
-          .automatic_locking = kDifToggleDisabled,
-          .accumulator_threshold = 8,
-          .irq_deadline_cycles = 2000,
-          .phase_signals = signals_b.data(),
-          .phase_signals_len = signals_b.size(),
-          .phase_durations = durations_b.data(),
-          .phase_durations_len = durations_b.size(),
-      },
-  };
-
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  // The alert handler needs to be unlocked for it to be configured.
-  EXPECT_READ32(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        false}});
-
-  // Configure class A alerts.
-  // Unfortunately, we can't use EXPECT_MASK for these reads/writes, since the
-  // target registers are shadowed.
-  for (auto alert : alerts_a) {
-    // The various alerts should be enabled.
-    ptrdiff_t alert_enable_reg_offset =
-        ALERT_HANDLER_ALERT_EN_SHADOWED_0_REG_OFFSET + alert * sizeof(uint32_t);
-    EXPECT_READ32(alert_enable_reg_offset, 0);
-    EXPECT_WRITE32_SHADOWED(
-        alert_enable_reg_offset,
-        {{ALERT_HANDLER_ALERT_EN_SHADOWED_0_EN_A_0_BIT, true}});
-    // The various alerts should be classified.
-    ptrdiff_t alert_class_reg_offset =
-        ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
-        alert * sizeof(uint32_t);
-    EXPECT_READ32(alert_class_reg_offset, 0);
-    EXPECT_WRITE32_SHADOWED(
-        alert_class_reg_offset,
-        ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_CLASS_A_0_VALUE_CLASSA);
-  }
-
-  // Configure class A local alerts.
-  // Unfortunately, we can't use EXPECT_MASK for these reads/writes, since the
-  // target registers are shadowed.
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_1_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_1_REG_RESVAL);
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_1_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_1_REG_RESVAL);
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_RESVAL);
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_1_REG_OFFSET,
-      {{ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_1_EN_LA_1_BIT, true}});
+      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
+          static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+      {{ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_CLASS_LA_0_OFFSET,
+        alert_class}});
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_1_REG_OFFSET,
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_CLASS_LA_0_VALUE_CLASSA);
-
-  // Configure class A control register.
-  EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_CLASSA_CTRL_SHADOWED_REG_OFFSET,
-      {
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_EN_BIT, false},
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_LOCK_BIT, true},
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_EN_E0_BIT, true},
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_MAP_E0_OFFSET, 3},
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_EN_E2_BIT, true},
-          {ALERT_HANDLER_CLASSA_CTRL_SHADOWED_MAP_E2_OFFSET, 1},
-      });
-
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSA_ACCUM_THRESH_SHADOWED_REG_OFFSET,
-                          12);
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSA_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
-                          30000);
-
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSA_PHASE1_CYC_SHADOWED_REG_OFFSET,
-                          20000);
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSA_PHASE2_CYC_SHADOWED_REG_OFFSET,
-                          15000);
-
-  // Configure class B alerts.
-  // Unfortunately, we can't use EXPECT_MASK for these reads/writes, since the
-  // target registers are shadowed.
-  for (auto alert : alerts_b) {
-    // The various alerts should be enabled.
-    ptrdiff_t alert_enable_reg_offset =
-        ALERT_HANDLER_ALERT_EN_SHADOWED_0_REG_OFFSET + alert * sizeof(uint32_t);
-    EXPECT_READ32(alert_enable_reg_offset, 0);
-    EXPECT_WRITE32_SHADOWED(
-        alert_enable_reg_offset,
-        {{ALERT_HANDLER_ALERT_EN_SHADOWED_0_EN_A_0_BIT, true}});
-    // The various alerts should be classified.
-    ptrdiff_t alert_class_reg_offset =
-        ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
-        alert * sizeof(uint32_t);
-    EXPECT_READ32(alert_class_reg_offset, 0);
-    EXPECT_WRITE32_SHADOWED(
-        alert_class_reg_offset,
-        ALERT_HANDLER_ALERT_CLASS_SHADOWED_0_CLASS_A_0_VALUE_CLASSB);
-  }
-
-  // Configure class B local alerts.
-  // Unfortunately, we can't use EXPECT_MASK for these reads/writes, since the
-  // target registers are shadowed.
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_REG_RESVAL);
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_REG_RESVAL);
-  EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_REG_OFFSET,
+      ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_REG_OFFSET +
+          static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
       {{ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_EN_LA_0_BIT, true}});
+
+  EXPECT_DIF_OK(dif_alert_handler_configure_local_alert(
+      &alert_handler_, local_alert, alert_class, kDifToggleEnabled,
+      kDifToggleDisabled));
+}
+
+TEST_P(LocalAlertConfigTest, EnableAndLock) {
+  dif_alert_handler_local_alert_t local_alert = std::get<0>(GetParam());
+  dif_alert_handler_class_t alert_class = std::get<1>(GetParam());
+
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_RESVAL);
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_REG_OFFSET,
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_CLASS_LA_0_VALUE_CLASSB);
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_2_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_2_REG_RESVAL);
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_2_REG_OFFSET,
-                ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_2_REG_RESVAL);
+      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_REG_OFFSET +
+          static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+      {{ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_CLASS_LA_0_OFFSET,
+        alert_class}});
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_2_REG_OFFSET,
-      {{ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_2_EN_LA_2_BIT, true}});
+      ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_REG_OFFSET +
+          static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+      {{ALERT_HANDLER_LOC_ALERT_EN_SHADOWED_0_EN_LA_0_BIT, true}});
+  EXPECT_WRITE32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                     static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                 0);
+
+  EXPECT_DIF_OK(dif_alert_handler_configure_local_alert(
+      &alert_handler_, local_alert, alert_class, kDifToggleEnabled,
+      kDifToggleEnabled));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllLocalAlertsAndClasses, LocalAlertConfigTest,
+    testing::Combine(
+        testing::Values(kDifAlertHandlerLocalAlertAlertPingFail,
+                        kDifAlertHandlerLocalAlertEscalationPingFail,
+                        kDifAlertHandlerLocalAlertAlertIntegrityFail,
+                        kDifAlertHandlerLocalAlertEscalationIntegrityFail,
+                        kDifAlertHandlerLocalAlertBusIntegrityFail,
+                        kDifAlertHandlerLocalAlertShadowedUpdateError,
+                        kDifAlertHandlerLocalAlertShadowedStorageError),
+        testing::Values(kDifAlertHandlerClassA, kDifAlertHandlerClassB,
+                        kDifAlertHandlerClassC, kDifAlertHandlerClassD)));
+
+class ClassConfigTest : public AlertHandlerTest {};
+
+TEST_F(ClassConfigTest, BadArgs) {
+  dif_alert_handler_class_config_t valid_config = {
+      .auto_lock_accumulation_counter = kDifToggleDisabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = nullptr,
+      .escalation_phases_len = 0,
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1,
+  };
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_class(
+      nullptr, kDifAlertHandlerClassB, valid_config, kDifToggleEnabled,
+      kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_class(
+      &alert_handler_, static_cast<dif_alert_handler_class_t>(kClasses),
+      valid_config, kDifToggleEnabled, kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_class(
+      &alert_handler_, static_cast<dif_alert_handler_class_t>(kClasses),
+      valid_config, static_cast<dif_toggle_t>(2), kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_class(
+      &alert_handler_, static_cast<dif_alert_handler_class_t>(kClasses),
+      valid_config, kDifToggleEnabled, static_cast<dif_toggle_t>(2)));
+}
+
+TEST_F(ClassConfigTest, BadConfig) {
+  dif_alert_handler_class_config_t config = {
+      .auto_lock_accumulation_counter = kDifToggleDisabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = nullptr,
+      .escalation_phases_len = 0,
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1};
+  dif_alert_handler_escalation_phase_t esc_phase = {
+      .phase = kDifAlertHandlerClassStatePhase2,
+      .signal = 0,
+      .duration_cycles = 10000};
+
+  // Bad auto_lock_accumulation_counter flag.
+  config.auto_lock_accumulation_counter = static_cast<dif_toggle_t>(2);
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  config.auto_lock_accumulation_counter = kDifToggleDisabled;
+
+  // Bad escalation_phases array dimension.
+  config.escalation_phases_len = 1;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  config.escalation_phases_len = 0;
+  config.escalation_phases = &esc_phase;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  config.escalation_phases = nullptr;
+
+  // Bad crashdump_escalation_phase.
+  config.crashdump_escalation_phase = kDifAlertHandlerClassStateTimeout;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  config.crashdump_escalation_phase = kDifAlertHandlerClassStateTerminal;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  config.crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1;
+}
+
+TEST_F(ClassConfigTest, BadEscPhaseConfig) {
+  std::vector<dif_alert_handler_escalation_phase_t> esc_phases = {
+      {.phase = kDifAlertHandlerClassStatePhase0,
+       .signal = 3,
+       .duration_cycles = 5000},
+      {.phase = kDifAlertHandlerClassStatePhase2,
+       .signal = 1,
+       .duration_cycles = 1000},
+  };
+  dif_alert_handler_class_config_t config = {
+      .auto_lock_accumulation_counter = kDifToggleDisabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = esc_phases.data(),
+      .escalation_phases_len = 1,
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1,
+  };
+
+  // Bad phase.
+  esc_phases[0].phase = kDifAlertHandlerClassStateTerminal;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  esc_phases[0].phase = kDifAlertHandlerClassStatePhase2;
+
+  // Bad signal.
+  esc_phases[0].signal = kEscSignals;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_configure_class(nullptr, kDifAlertHandlerClassB, config,
+                                        kDifToggleEnabled, kDifToggleDisabled));
+  esc_phases[0].signal = 0;
+}
+
+TEST_F(ClassConfigTest, Locked) {
+  dif_alert_handler_class_config_t config = {
+      .auto_lock_accumulation_counter = kDifToggleDisabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = nullptr,
+      .escalation_phases_len = 0,
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1,
+  };
+
+  EXPECT_READ32(ALERT_HANDLER_CLASSC_REGWEN_REG_OFFSET, 0);
+  EXPECT_EQ(dif_alert_handler_configure_class(
+                &alert_handler_, kDifAlertHandlerClassC, config,
+                kDifToggleEnabled, kDifToggleDisabled),
+            kDifLocked);
+}
+
+TEST_F(ClassConfigTest, EnableOnly) {
+  std::vector<dif_alert_handler_escalation_phase_t> esc_phases = {
+      {.phase = kDifAlertHandlerClassStatePhase0,
+       .signal = 3,
+       .duration_cycles = 5000},
+      {.phase = kDifAlertHandlerClassStatePhase2,
+       .signal = 1,
+       .duration_cycles = 1000},
+  };
+  dif_alert_handler_class_config_t config = {
+      .auto_lock_accumulation_counter = kDifToggleDisabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = esc_phases.data(),
+      .escalation_phases_len = esc_phases.size(),
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1,
+  };
+
+  EXPECT_READ32(ALERT_HANDLER_CLASSC_REGWEN_REG_OFFSET, 1);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_PHASE0_CYC_SHADOWED_REG_OFFSET,
+                          esc_phases[0].duration_cycles);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_PHASE2_CYC_SHADOWED_REG_OFFSET,
+                          esc_phases[1].duration_cycles);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_ACCUM_THRESH_SHADOWED_REG_OFFSET,
+                          config.accumulator_threshold);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
+                          config.irq_deadline_cycles);
+
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_2_REG_OFFSET,
-      ALERT_HANDLER_LOC_ALERT_CLASS_SHADOWED_0_CLASS_LA_0_VALUE_CLASSB);
+      ALERT_HANDLER_CLASSC_CRASHDUMP_TRIGGER_SHADOWED_REG_OFFSET, 1);
 
-  // Configure class B control register.
+  uint32_t ctrl_reg = 0;
+  ctrl_reg = bitfield_bit32_write(ctrl_reg,
+                                  ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_BIT, 1);
+  ctrl_reg = bitfield_bit32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_E3_BIT, 1);
+  ctrl_reg = bitfield_bit32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_E1_BIT, 1);
+  ctrl_reg = bitfield_field32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_MAP_E3_FIELD, 0);
+  ctrl_reg = bitfield_field32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_MAP_E1_FIELD, 2);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_CTRL_SHADOWED_REG_OFFSET,
+                          ctrl_reg);
+
+  EXPECT_DIF_OK(dif_alert_handler_configure_class(
+      &alert_handler_, kDifAlertHandlerClassC, config, kDifToggleEnabled,
+      kDifToggleDisabled));
+}
+
+TEST_F(ClassConfigTest, EnableAndLock) {
+  std::vector<dif_alert_handler_escalation_phase_t> esc_phases = {
+      {.phase = kDifAlertHandlerClassStatePhase0,
+       .signal = 1,
+       .duration_cycles = 5000},
+      {.phase = kDifAlertHandlerClassStatePhase2,
+       .signal = 3,
+       .duration_cycles = 1000},
+  };
+  dif_alert_handler_class_config_t config = {
+      .auto_lock_accumulation_counter = kDifToggleEnabled,
+      .accumulator_threshold = 10,
+      .irq_deadline_cycles = 10000,
+      .escalation_phases = esc_phases.data(),
+      .escalation_phases_len = esc_phases.size(),
+      .crashdump_escalation_phase = kDifAlertHandlerClassStatePhase1,
+  };
+
+  EXPECT_READ32(ALERT_HANDLER_CLASSC_REGWEN_REG_OFFSET, 1);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_PHASE0_CYC_SHADOWED_REG_OFFSET,
+                          esc_phases[0].duration_cycles);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_PHASE2_CYC_SHADOWED_REG_OFFSET,
+                          esc_phases[1].duration_cycles);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_ACCUM_THRESH_SHADOWED_REG_OFFSET,
+                          config.accumulator_threshold);
+
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
+                          config.irq_deadline_cycles);
+
   EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_CLASSB_CTRL_SHADOWED_REG_OFFSET,
-      {
-          {ALERT_HANDLER_CLASSB_CTRL_SHADOWED_EN_BIT, true},
-          {ALERT_HANDLER_CLASSB_CTRL_SHADOWED_LOCK_BIT, false},
-          {ALERT_HANDLER_CLASSB_CTRL_SHADOWED_EN_E1_BIT, true},
-          {ALERT_HANDLER_CLASSB_CTRL_SHADOWED_MAP_E1_OFFSET, 0},
-      });
+      ALERT_HANDLER_CLASSC_CRASHDUMP_TRIGGER_SHADOWED_REG_OFFSET, 1);
 
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSB_ACCUM_THRESH_SHADOWED_REG_OFFSET,
-                          8);
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSB_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
-                          2000);
+  uint32_t ctrl_reg = 0;
+  ctrl_reg = bitfield_bit32_write(ctrl_reg,
+                                  ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_BIT, 1);
+  ctrl_reg = bitfield_bit32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_LOCK_BIT, 1);
+  ctrl_reg = bitfield_bit32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_E1_BIT, 1);
+  ctrl_reg = bitfield_bit32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_EN_E3_BIT, 1);
+  ctrl_reg = bitfield_field32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_MAP_E1_FIELD, 0);
+  ctrl_reg = bitfield_field32_write(
+      ctrl_reg, ALERT_HANDLER_CLASSC_CTRL_SHADOWED_MAP_E3_FIELD, 2);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSC_CTRL_SHADOWED_REG_OFFSET,
+                          ctrl_reg);
 
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSB_PHASE1_CYC_SHADOWED_REG_OFFSET,
-                          20000);
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSB_PHASE2_CYC_SHADOWED_REG_OFFSET,
-                          15000);
-  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSB_PHASE3_CYC_SHADOWED_REG_OFFSET,
-                          150000);
+  EXPECT_WRITE32(ALERT_HANDLER_CLASSC_REGWEN_REG_OFFSET, 0);
 
-  EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_PING_TIMEOUT_CYC_SHADOWED_OFFSET,
-        50}});
-
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifOk);
+  EXPECT_DIF_OK(dif_alert_handler_configure_class(
+      &alert_handler_, kDifAlertHandlerClassC, config, kDifToggleEnabled,
+      kDifToggleEnabled));
 }
 
-TEST_F(ConfigTest, BadAlert) {
-  IgnoreMmioCalls();
+class PingTimerConfigTest : public AlertHandlerTest {};
 
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, kAlerts + 1};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStatePhase2, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStatePhase1, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
+TEST_F(PingTimerConfigTest, BadArgs) {
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_ping_timer(
+      nullptr, 0, kDifToggleDisabled, kDifToggleDisabled));
 
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = kDifAlertHandlerClassA,
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-  };
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_ping_timer(
+      &alert_handler_, 0, static_cast<dif_toggle_t>(2), kDifToggleDisabled));
 
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_ping_timer(
+      &alert_handler_, 0, kDifToggleDisabled, static_cast<dif_toggle_t>(2)));
 }
 
-TEST_F(ConfigTest, BadSignalPhase) {
-  IgnoreMmioCalls();
+TEST_F(PingTimerConfigTest, TimeoutTooBig) {
+  uint32_t ping_timeout =
+      ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_PING_TIMEOUT_CYC_SHADOWED_MASK +
+      1;
 
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, 5};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStateTerminal, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStatePhase1, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
-
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = kDifAlertHandlerClassA,
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-  };
-
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
+  EXPECT_DIF_BADARG(dif_alert_handler_configure_ping_timer(
+      &alert_handler_, ping_timeout, kDifToggleDisabled, kDifToggleDisabled));
 }
 
-TEST_F(ConfigTest, BadDurationPhase) {
-  IgnoreMmioCalls();
+TEST_F(PingTimerConfigTest, Locked) {
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
 
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, 5};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStatePhase2, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStateTerminal, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
-
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = kDifAlertHandlerClassA,
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-  };
-
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
+  EXPECT_EQ(dif_alert_handler_configure_ping_timer(
+                &alert_handler_, 5000, kDifToggleDisabled, kDifToggleDisabled),
+            kDifLocked);
 }
 
-TEST_F(ConfigTest, BadPointers) {
-  IgnoreMmioCalls();
+TEST_F(PingTimerConfigTest, ConfigureAndEnable) {
+  uint32_t ping_timeout = 5000;
 
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, 5};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStatePhase2, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStateTerminal, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 1);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
+                          ping_timeout);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET, 1);
 
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = kDifAlertHandlerClassA,
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-  };
-
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  classes[0].alerts = nullptr;
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
-  classes[0].alerts = alerts_a.data();
-
-  classes[0].local_alerts = nullptr;
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
-  classes[0].local_alerts = locals_a.data();
-
-  classes[0].phase_signals = nullptr;
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
-  classes[0].phase_signals = signals_a.data();
-
-  classes[0].phase_durations = nullptr;
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
+  EXPECT_DIF_OK(dif_alert_handler_configure_ping_timer(
+      &alert_handler_, ping_timeout, kDifToggleEnabled, kDifToggleDisabled));
 }
 
-TEST_F(ConfigTest, BadClass) {
-  IgnoreMmioCalls();
+TEST_F(PingTimerConfigTest, ConfigureEnableAndLock) {
+  uint32_t ping_timeout = 5000;
 
-  std::vector<dif_alert_handler_alert_t> alerts_a = {1, 2, 5};
-  std::vector<dif_alert_handler_local_alert_t> locals_a = {
-      kDifAlertHandlerLocalAlertEscalationPingFail,
-  };
-  std::vector<dif_alert_handler_class_phase_signal_t> signals_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .signal = 3},
-      {.phase = kDifAlertHandlerClassStatePhase2, .signal = 1},
-  };
-  std::vector<dif_alert_handler_class_phase_duration_t> durations_a = {
-      {.phase = kDifAlertHandlerClassStatePhase0, .cycles = 20000},
-      {.phase = kDifAlertHandlerClassStatePhase2, .cycles = 15000},
-  };
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 1);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMEOUT_CYC_SHADOWED_REG_OFFSET,
+                          ping_timeout);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET, 1);
+  EXPECT_WRITE32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
 
-  std::vector<dif_alert_handler_class_config_t> classes = {
-      {
-          .alert_class = static_cast<dif_alert_handler_class_t>(12),
-          .alerts = alerts_a.data(),
-          .alerts_len = alerts_a.size(),
-          .local_alerts = locals_a.data(),
-          .local_alerts_len = locals_a.size(),
-          .use_escalation_protocol = kDifToggleDisabled,
-          .automatic_locking = kDifToggleEnabled,
-          .accumulator_threshold = 12,
-          .irq_deadline_cycles = 30000,
-          .phase_signals = signals_a.data(),
-          .phase_signals_len = signals_a.size(),
-          .phase_durations = durations_a.data(),
-          .phase_durations_len = durations_a.size(),
-      },
-  };
-
-  dif_alert_handler_config_t config = {
-      .ping_timeout = 50,
-      .classes = classes.data(),
-      .classes_len = classes.size(),
-  };
-
-  EXPECT_EQ(dif_alert_handler_configure(&alert_handler_, config), kDifError);
+  EXPECT_DIF_OK(dif_alert_handler_configure_ping_timer(
+      &alert_handler_, ping_timeout, kDifToggleEnabled, kDifToggleEnabled));
 }
 
-TEST_F(ConfigTest, NullArgs) {
-  EXPECT_EQ(dif_alert_handler_configure(nullptr, {}), kDifBadArg);
+class PingTimerSetEnabledTest : public AlertHandlerTest {};
+
+TEST_F(PingTimerSetEnabledTest, BadArgs) {
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_ping_timer_set_enabled(nullptr, kDifToggleDisabled));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_ping_timer_set_enabled(
+      &alert_handler_, static_cast<dif_toggle_t>(2)));
 }
 
-class LockTest : public AlertHandlerTest {};
+TEST_F(PingTimerSetEnabledTest, Locked) {
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
 
-TEST_F(LockTest, IsLocked) {
+  EXPECT_EQ(dif_alert_handler_ping_timer_set_enabled(&alert_handler_,
+                                                     kDifToggleDisabled),
+            kDifLocked);
+}
+
+TEST_F(PingTimerSetEnabledTest, SetEnabled) {
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 1);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET, 1);
+
+  EXPECT_DIF_OK(dif_alert_handler_ping_timer_set_enabled(&alert_handler_,
+                                                         kDifToggleDisabled));
+}
+
+TEST_F(PingTimerSetEnabledTest, SetEnabledAndLock) {
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 1);
+  EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET, 1);
+  EXPECT_WRITE32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
+
+  EXPECT_DIF_OK(dif_alert_handler_ping_timer_set_enabled(&alert_handler_,
+                                                         kDifToggleEnabled));
+}
+
+class AlertLockTest : public AlertHandlerTest,
+                      public testing::WithParamInterface<int> {};
+
+TEST_P(AlertLockTest, IsAlertLocked) {
+  dif_alert_handler_alert_t alert = GetParam();
+  bool is_locked = true;
+
+  ptrdiff_t regwen_offset =
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET + alert * sizeof(uint32_t);
+  EXPECT_READ32(regwen_offset, ALERT_HANDLER_ALERT_REGWEN_0_REG_RESVAL);
+  EXPECT_DIF_OK(
+      dif_alert_handler_is_alert_locked(&alert_handler_, alert, &is_locked));
+  EXPECT_FALSE(is_locked);
+
+  is_locked = false;
+  EXPECT_READ32(regwen_offset, 0);
+  EXPECT_DIF_OK(
+      dif_alert_handler_is_alert_locked(&alert_handler_, alert, &is_locked));
+  EXPECT_TRUE(is_locked);
+}
+
+INSTANTIATE_TEST_SUITE_P(AllAlertsLockedAndUnlocked, AlertLockTest,
+                         testing::Range(0, kAlerts));
+
+TEST_P(AlertLockTest, LockAlert) {
+  dif_alert_handler_alert_t alert = GetParam();
+
+  ptrdiff_t regwen_offset =
+      ALERT_HANDLER_ALERT_REGWEN_0_REG_OFFSET + alert * sizeof(uint32_t);
+  EXPECT_WRITE32(regwen_offset, 0);
+  EXPECT_DIF_OK(dif_alert_handler_lock_alert(&alert_handler_, alert));
+}
+
+INSTANTIATE_TEST_SUITE_P(LockAllAlerts, AlertLockTest,
+                         testing::Range(0, kAlerts));
+
+TEST_F(AlertLockTest, BadArgs) {
+  bool is_locked;
+  EXPECT_DIF_BADARG(dif_alert_handler_is_alert_locked(nullptr, 0, &is_locked));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_is_alert_locked(&alert_handler_, kAlerts, &is_locked));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_is_alert_locked(&alert_handler_, 0, nullptr));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_alert(nullptr, 0));
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_alert(&alert_handler_, kAlerts));
+}
+
+class LocalAlertLockTest
+    : public AlertHandlerTest,
+      public testing::WithParamInterface<dif_alert_handler_local_alert_t> {};
+
+TEST_P(LocalAlertLockTest, IsLocalAlertLocked) {
+  dif_alert_handler_local_alert_t local_alert = GetParam();
+  bool is_locked = true;
+
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_RESVAL);
+  EXPECT_DIF_OK(dif_alert_handler_is_local_alert_locked(
+      &alert_handler_, local_alert, &is_locked));
+  EXPECT_FALSE(is_locked);
+
+  is_locked = false;
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                0);
+  EXPECT_DIF_OK(dif_alert_handler_is_local_alert_locked(
+      &alert_handler_, local_alert, &is_locked));
+  EXPECT_TRUE(is_locked);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllLocalAlertsLockedAndUnlocked, LocalAlertLockTest,
+    testing::Values(kDifAlertHandlerLocalAlertAlertPingFail,
+                    kDifAlertHandlerLocalAlertEscalationPingFail,
+                    kDifAlertHandlerLocalAlertAlertIntegrityFail,
+                    kDifAlertHandlerLocalAlertEscalationIntegrityFail,
+                    kDifAlertHandlerLocalAlertBusIntegrityFail,
+                    kDifAlertHandlerLocalAlertShadowedUpdateError,
+                    kDifAlertHandlerLocalAlertShadowedStorageError));
+
+TEST_P(LocalAlertLockTest, LockLocalAlert) {
+  dif_alert_handler_local_alert_t local_alert = GetParam();
+
+  EXPECT_WRITE32(ALERT_HANDLER_LOC_ALERT_REGWEN_0_REG_OFFSET +
+                     static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                 0);
+  EXPECT_DIF_OK(
+      dif_alert_handler_lock_local_alert(&alert_handler_, local_alert));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    LockAllLocalAlerts, LocalAlertLockTest,
+    testing::Values(kDifAlertHandlerLocalAlertAlertPingFail,
+                    kDifAlertHandlerLocalAlertEscalationPingFail,
+                    kDifAlertHandlerLocalAlertAlertIntegrityFail,
+                    kDifAlertHandlerLocalAlertEscalationIntegrityFail,
+                    kDifAlertHandlerLocalAlertBusIntegrityFail,
+                    kDifAlertHandlerLocalAlertShadowedUpdateError,
+                    kDifAlertHandlerLocalAlertShadowedStorageError));
+
+TEST_F(LocalAlertLockTest, BadArgs) {
+  bool is_locked;
+  EXPECT_DIF_BADARG(dif_alert_handler_is_local_alert_locked(
+      nullptr, kDifAlertHandlerLocalAlertShadowedStorageError, &is_locked));
+  EXPECT_DIF_BADARG(dif_alert_handler_is_local_alert_locked(
+      &alert_handler_,
+      static_cast<dif_alert_handler_local_alert_t>(kLocalAlerts), &is_locked));
+  EXPECT_DIF_BADARG(dif_alert_handler_is_local_alert_locked(
+      &alert_handler_, kDifAlertHandlerLocalAlertAlertPingFail, nullptr));
+
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_local_alert(
+      nullptr, kDifAlertHandlerLocalAlertAlertPingFail));
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_local_alert(
+      &alert_handler_,
+      static_cast<dif_alert_handler_local_alert_t>(kLocalAlerts)));
+}
+
+class ClassLockTest : public AlertHandlerTest,
+                      public testing::WithParamInterface<
+                          std::tuple<dif_alert_handler_class_t, uint32_t>> {};
+
+static std::vector<std::tuple<dif_alert_handler_class_t, uint32_t>>
+    class_regwen_pairs{
+        std::tuple<dif_alert_handler_class_t, uint32_t>{
+            kDifAlertHandlerClassA, ALERT_HANDLER_CLASSA_REGWEN_REG_OFFSET},
+        std::tuple<dif_alert_handler_class_t, uint32_t>{
+            kDifAlertHandlerClassB, ALERT_HANDLER_CLASSB_REGWEN_REG_OFFSET},
+        std::tuple<dif_alert_handler_class_t, uint32_t>{
+            kDifAlertHandlerClassC, ALERT_HANDLER_CLASSC_REGWEN_REG_OFFSET},
+        std::tuple<dif_alert_handler_class_t, uint32_t>{
+            kDifAlertHandlerClassD, ALERT_HANDLER_CLASSD_REGWEN_REG_OFFSET}};
+
+TEST_P(ClassLockTest, IsClassLocked) {
+  dif_alert_handler_class_t alert_class = std::get<0>(GetParam());
+  uint32_t regwen_offset = std::get<1>(GetParam());
+  bool is_locked = true;
+
+  EXPECT_READ32(regwen_offset, ALERT_HANDLER_CLASSA_REGWEN_REG_RESVAL);
+  EXPECT_DIF_OK(dif_alert_handler_is_class_locked(&alert_handler_, alert_class,
+                                                  &is_locked));
+  EXPECT_FALSE(is_locked);
+
+  is_locked = false;
+  EXPECT_READ32(regwen_offset, 0);
+  EXPECT_DIF_OK(dif_alert_handler_is_class_locked(&alert_handler_, alert_class,
+                                                  &is_locked));
+  EXPECT_TRUE(is_locked);
+}
+
+INSTANTIATE_TEST_SUITE_P(AllClassesLockedAndUnlocked, ClassLockTest,
+                         testing::ValuesIn(class_regwen_pairs));
+
+TEST_P(ClassLockTest, LockClass) {
+  dif_alert_handler_class_t alert_class = std::get<0>(GetParam());
+  uint32_t regwen_offset = std::get<1>(GetParam());
+
+  EXPECT_WRITE32(regwen_offset, 0);
+  EXPECT_DIF_OK(dif_alert_handler_lock_class(&alert_handler_, alert_class));
+}
+
+INSTANTIATE_TEST_SUITE_P(LockAllClasses, ClassLockTest,
+                         testing::ValuesIn(class_regwen_pairs));
+
+TEST_F(ClassLockTest, BadArgs) {
+  bool is_locked;
+  EXPECT_DIF_BADARG(dif_alert_handler_is_class_locked(
+      nullptr, kDifAlertHandlerClassA, &is_locked));
+  EXPECT_DIF_BADARG(dif_alert_handler_is_class_locked(
+      &alert_handler_, static_cast<dif_alert_handler_class_t>(kClasses),
+      &is_locked));
+  EXPECT_DIF_BADARG(dif_alert_handler_is_class_locked(
+      &alert_handler_, kDifAlertHandlerClassD, nullptr));
+
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_lock_class(nullptr, kDifAlertHandlerClassA));
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_class(
+      &alert_handler_, static_cast<dif_alert_handler_class_t>(kClasses)));
+}
+
+class PingTimerLockTest : public AlertHandlerTest {};
+
+TEST_F(PingTimerLockTest, IsPingTimerLocked) {
   bool flag;
 
-  EXPECT_READ32(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        false}});
-  EXPECT_EQ(dif_alert_handler_is_locked(&alert_handler_, &flag), kDifOk);
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 1);
+  EXPECT_DIF_OK(dif_alert_handler_is_ping_timer_locked(&alert_handler_, &flag));
   EXPECT_FALSE(flag);
 
-  EXPECT_READ32(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        true}});
-  EXPECT_EQ(dif_alert_handler_is_locked(&alert_handler_, &flag), kDifOk);
+  EXPECT_READ32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
+  EXPECT_DIF_OK(dif_alert_handler_is_ping_timer_locked(&alert_handler_, &flag));
   EXPECT_TRUE(flag);
 }
 
-TEST_F(LockTest, Lock) {
-  EXPECT_WRITE32_SHADOWED(
-      ALERT_HANDLER_PING_TIMER_EN_SHADOWED_REG_OFFSET,
-      {{ALERT_HANDLER_PING_TIMER_EN_SHADOWED_PING_TIMER_EN_SHADOWED_BIT,
-        true}});
-  EXPECT_EQ(dif_alert_handler_lock(&alert_handler_), kDifOk);
+TEST_F(PingTimerLockTest, LockPingTimer) {
+  EXPECT_WRITE32(ALERT_HANDLER_PING_TIMER_REGWEN_REG_OFFSET, 0);
+  EXPECT_DIF_OK(dif_alert_handler_lock_ping_timer(&alert_handler_));
 }
 
-TEST_F(LockTest, NullArgs) {
+TEST_F(PingTimerLockTest, NullArgs) {
   bool flag;
-  EXPECT_EQ(dif_alert_handler_is_locked(nullptr, &flag), kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_is_locked(&alert_handler_, nullptr), kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_is_ping_timer_locked(nullptr, &flag));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_is_ping_timer_locked(&alert_handler_, nullptr));
 
-  EXPECT_EQ(dif_alert_handler_lock(nullptr), kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_lock_ping_timer(nullptr));
 }
 
-class CauseTest : public AlertHandlerTest {};
+class AlertCauseTest : public AlertHandlerTest,
+                       public testing::WithParamInterface<int> {};
 
-TEST_F(CauseTest, IsCause) {
-  bool flag;
+TEST_P(AlertCauseTest, IsCause) {
+  dif_alert_handler_alert_t alert = GetParam();
+  bool is_cause;
 
-  EXPECT_READ32(ALERT_HANDLER_ALERT_CAUSE_5_REG_OFFSET, {{0, true}});
-  EXPECT_EQ(dif_alert_handler_alert_is_cause(&alert_handler_, 5, &flag),
-            kDifOk);
-  EXPECT_TRUE(flag);
+  ptrdiff_t cause_offset =
+      ALERT_HANDLER_ALERT_CAUSE_0_REG_OFFSET + alert * sizeof(uint32_t);
 
-  EXPECT_READ32(ALERT_HANDLER_ALERT_CAUSE_6_REG_OFFSET, {{0, false}});
-  EXPECT_EQ(dif_alert_handler_alert_is_cause(&alert_handler_, 6, &flag),
-            kDifOk);
-  EXPECT_FALSE(flag);
+  EXPECT_READ32(cause_offset, 0x1);
+  EXPECT_DIF_OK(
+      dif_alert_handler_alert_is_cause(&alert_handler_, alert, &is_cause));
+  EXPECT_TRUE(is_cause);
+
+  EXPECT_READ32(cause_offset, 0x0);
+  EXPECT_DIF_OK(
+      dif_alert_handler_alert_is_cause(&alert_handler_, alert, &is_cause));
+  EXPECT_FALSE(is_cause);
 }
 
-TEST_F(CauseTest, Ack) {
-  EXPECT_WRITE32(ALERT_HANDLER_ALERT_CAUSE_0_REG_OFFSET,
-                 {{ALERT_HANDLER_ALERT_CAUSE_0_A_0_BIT, true}});
-  EXPECT_EQ(dif_alert_handler_alert_acknowledge(&alert_handler_, 0), kDifOk);
+INSTANTIATE_TEST_SUITE_P(AllCauses, AlertCauseTest, testing::Range(0, kAlerts));
 
-  EXPECT_WRITE32(ALERT_HANDLER_ALERT_CAUSE_11_REG_OFFSET,
-                 {{ALERT_HANDLER_ALERT_CAUSE_11_A_11_BIT, true}});
-  EXPECT_EQ(dif_alert_handler_alert_acknowledge(&alert_handler_, 11), kDifOk);
+TEST_P(AlertCauseTest, Ack) {
+  dif_alert_handler_alert_t alert = GetParam();
+
+  ptrdiff_t cause_offset =
+      ALERT_HANDLER_ALERT_CAUSE_0_REG_OFFSET + alert * sizeof(uint32_t);
+  EXPECT_WRITE32(cause_offset, 0x1);
+  EXPECT_DIF_OK(dif_alert_handler_alert_acknowledge(&alert_handler_, alert));
 }
 
-TEST_F(CauseTest, BadAlert) {
-  bool flag;
-  EXPECT_EQ(dif_alert_handler_alert_is_cause(&alert_handler_, kAlerts, &flag),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_alert_acknowledge(&alert_handler_, kAlerts),
-            kDifBadArg);
+INSTANTIATE_TEST_SUITE_P(AllAcks, AlertCauseTest, testing::Range(0, kAlerts));
+
+TEST_F(AlertCauseTest, BadAlert) {
+  bool is_cause;
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_alert_is_cause(&alert_handler_, kAlerts, &is_cause));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_alert_acknowledge(&alert_handler_, kAlerts));
 }
 
-TEST_F(CauseTest, IsCauseLocal) {
-  bool flag;
-
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CAUSE_1_REG_OFFSET,
-                {{ALERT_HANDLER_LOC_ALERT_CAUSE_1_LA_1_BIT, true}});
-  EXPECT_EQ(
-      dif_alert_handler_local_alert_is_cause(
-          &alert_handler_, kDifAlertHandlerLocalAlertEscalationPingFail, &flag),
-      kDifOk);
-  EXPECT_TRUE(flag);
-
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CAUSE_4_REG_OFFSET,
-                {{ALERT_HANDLER_LOC_ALERT_CAUSE_4_LA_4_BIT, true}});
-  EXPECT_EQ(
-      dif_alert_handler_local_alert_is_cause(
-          &alert_handler_, kDifAlertHandlerLocalAlertBusIntegrityFail, &flag),
-      kDifOk);
-  EXPECT_TRUE(flag);
-
-  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CAUSE_3_REG_OFFSET,
-                {{ALERT_HANDLER_LOC_ALERT_CAUSE_3_LA_3_BIT, false}});
-  EXPECT_EQ(dif_alert_handler_local_alert_is_cause(
-                &alert_handler_,
-                kDifAlertHandlerLocalAlertEscalationIntegrityFail, &flag),
-            kDifOk);
-  EXPECT_FALSE(flag);
+TEST_F(AlertCauseTest, NullArgs) {
+  bool is_cause;
+  EXPECT_DIF_BADARG(dif_alert_handler_alert_is_cause(nullptr, 5, &is_cause));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_alert_is_cause(&alert_handler_, 5, nullptr));
+  EXPECT_DIF_BADARG(dif_alert_handler_alert_acknowledge(nullptr, 11));
 }
 
-TEST_F(CauseTest, AckLocal) {
-  EXPECT_WRITE32(ALERT_HANDLER_LOC_ALERT_CAUSE_3_REG_OFFSET,
-                 {{ALERT_HANDLER_LOC_ALERT_CAUSE_3_LA_3_BIT, true}});
-  EXPECT_EQ(
-      dif_alert_handler_local_alert_acknowledge(
-          &alert_handler_, kDifAlertHandlerLocalAlertEscalationIntegrityFail),
-      kDifOk);
+class LocalAlertCauseTest
+    : public AlertHandlerTest,
+      public testing::WithParamInterface<dif_alert_handler_local_alert_t> {};
 
-  EXPECT_WRITE32(ALERT_HANDLER_LOC_ALERT_CAUSE_4_REG_OFFSET,
-                 {{ALERT_HANDLER_LOC_ALERT_CAUSE_4_LA_4_BIT, true}});
-  EXPECT_EQ(dif_alert_handler_local_alert_acknowledge(
-                &alert_handler_, kDifAlertHandlerLocalAlertBusIntegrityFail),
-            kDifOk);
+TEST_P(LocalAlertCauseTest, IsCause) {
+  dif_alert_handler_local_alert_t local_alert = GetParam();
+  bool is_cause;
+
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CAUSE_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                0x1);
+  EXPECT_DIF_OK(dif_alert_handler_local_alert_is_cause(&alert_handler_,
+                                                       local_alert, &is_cause));
+  EXPECT_TRUE(is_cause);
+
+  EXPECT_READ32(ALERT_HANDLER_LOC_ALERT_CAUSE_0_REG_OFFSET +
+                    static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                0x0);
+  EXPECT_DIF_OK(dif_alert_handler_local_alert_is_cause(&alert_handler_,
+                                                       local_alert, &is_cause));
+  EXPECT_FALSE(is_cause);
 }
 
-TEST_F(CauseTest, NullArgs) {
-  bool flag;
-  EXPECT_EQ(dif_alert_handler_alert_is_cause(nullptr, 5, &flag), kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_alert_is_cause(&alert_handler_, 5, nullptr),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_alert_acknowledge(nullptr, 11), kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_local_alert_is_cause(
-                nullptr, kDifAlertHandlerLocalAlertEscalationPingFail, &flag),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_local_alert_is_cause(
-                &alert_handler_, kDifAlertHandlerLocalAlertEscalationPingFail,
-                nullptr),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_local_alert_acknowledge(
-                nullptr, kDifAlertHandlerLocalAlertEscalationIntegrityFail),
-            kDifBadArg);
+INSTANTIATE_TEST_SUITE_P(
+    AllCauses, LocalAlertCauseTest,
+    testing::Values(kDifAlertHandlerLocalAlertAlertPingFail,
+                    kDifAlertHandlerLocalAlertEscalationPingFail,
+                    kDifAlertHandlerLocalAlertAlertIntegrityFail,
+                    kDifAlertHandlerLocalAlertEscalationIntegrityFail,
+                    kDifAlertHandlerLocalAlertBusIntegrityFail,
+                    kDifAlertHandlerLocalAlertShadowedUpdateError,
+                    kDifAlertHandlerLocalAlertShadowedStorageError));
+
+TEST_P(LocalAlertCauseTest, Ack) {
+  dif_alert_handler_local_alert_t local_alert = GetParam();
+
+  EXPECT_WRITE32(ALERT_HANDLER_LOC_ALERT_CAUSE_0_REG_OFFSET +
+                     static_cast<uint32_t>(local_alert) * sizeof(uint32_t),
+                 0x1);
+  EXPECT_DIF_OK(
+      dif_alert_handler_local_alert_acknowledge(&alert_handler_, local_alert));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllAcks, LocalAlertCauseTest,
+    testing::Values(kDifAlertHandlerLocalAlertAlertPingFail,
+                    kDifAlertHandlerLocalAlertEscalationPingFail,
+                    kDifAlertHandlerLocalAlertAlertIntegrityFail,
+                    kDifAlertHandlerLocalAlertEscalationIntegrityFail,
+                    kDifAlertHandlerLocalAlertBusIntegrityFail,
+                    kDifAlertHandlerLocalAlertShadowedUpdateError,
+                    kDifAlertHandlerLocalAlertShadowedStorageError));
+
+TEST_F(LocalAlertCauseTest, BadLocalAlert) {
+  bool is_cause;
+  EXPECT_DIF_BADARG(dif_alert_handler_local_alert_is_cause(
+      &alert_handler_,
+      static_cast<dif_alert_handler_local_alert_t>(kLocalAlerts), &is_cause));
+  EXPECT_DIF_BADARG(dif_alert_handler_local_alert_acknowledge(
+      &alert_handler_,
+      static_cast<dif_alert_handler_local_alert_t>(kLocalAlerts)));
+}
+
+TEST_F(LocalAlertCauseTest, NullArgs) {
+  bool is_cause;
+  EXPECT_DIF_BADARG(dif_alert_handler_local_alert_is_cause(
+      nullptr, kDifAlertHandlerLocalAlertEscalationPingFail, &is_cause));
+  EXPECT_DIF_BADARG(dif_alert_handler_local_alert_is_cause(
+      &alert_handler_, kDifAlertHandlerLocalAlertEscalationPingFail, nullptr));
+  EXPECT_DIF_BADARG(dif_alert_handler_local_alert_acknowledge(
+      nullptr, kDifAlertHandlerLocalAlertEscalationIntegrityFail));
 }
 
 class EscalationTest : public AlertHandlerTest {};
 
 TEST_F(EscalationTest, CanClear) {
-  bool flag;
+  bool can_clear;
 
   EXPECT_READ32(ALERT_HANDLER_CLASSB_CLR_REGWEN_REG_OFFSET, true);
-  EXPECT_EQ(dif_alert_handler_escalation_can_clear(
-                &alert_handler_, kDifAlertHandlerClassB, &flag),
-            kDifOk);
-  EXPECT_TRUE(flag);
+  EXPECT_DIF_OK(dif_alert_handler_escalation_can_clear(
+      &alert_handler_, kDifAlertHandlerClassB, &can_clear));
+  EXPECT_TRUE(can_clear);
 
   EXPECT_READ32(ALERT_HANDLER_CLASSA_CLR_REGWEN_REG_OFFSET, false);
-  EXPECT_EQ(dif_alert_handler_escalation_can_clear(
-                &alert_handler_, kDifAlertHandlerClassA, &flag),
-            kDifOk);
-  EXPECT_FALSE(flag);
+  EXPECT_DIF_OK(dif_alert_handler_escalation_can_clear(
+      &alert_handler_, kDifAlertHandlerClassA, &can_clear));
+  EXPECT_FALSE(can_clear);
 }
 
 TEST_F(EscalationTest, Disable) {
-  EXPECT_WRITE32(ALERT_HANDLER_CLASSC_CLR_REGWEN_REG_OFFSET, true);
-  EXPECT_EQ(dif_alert_handler_escalation_disable_clearing(
-                &alert_handler_, kDifAlertHandlerClassC),
-            kDifOk);
+  EXPECT_WRITE32(ALERT_HANDLER_CLASSC_CLR_REGWEN_REG_OFFSET, 0);
+  EXPECT_DIF_OK(dif_alert_handler_escalation_disable_clearing(
+      &alert_handler_, kDifAlertHandlerClassC));
 }
 
 TEST_F(EscalationTest, Clear) {
   EXPECT_WRITE32_SHADOWED(ALERT_HANDLER_CLASSD_CLR_SHADOWED_REG_OFFSET, true);
-  EXPECT_EQ(dif_alert_handler_escalation_clear(&alert_handler_,
-                                               kDifAlertHandlerClassD),
-            kDifOk);
+  EXPECT_DIF_OK(dif_alert_handler_escalation_clear(&alert_handler_,
+                                                   kDifAlertHandlerClassD));
 }
 
 TEST_F(EscalationTest, NullArgs) {
-  bool flag;
+  bool can_clear;
 
-  EXPECT_EQ(dif_alert_handler_escalation_can_clear(
-                nullptr, kDifAlertHandlerClassB, &flag),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_escalation_can_clear(
-                &alert_handler_, kDifAlertHandlerClassB, nullptr),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_escalation_disable_clearing(
-                nullptr, kDifAlertHandlerClassC),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_escalation_clear(nullptr, kDifAlertHandlerClassD),
-            kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_escalation_can_clear(
+      nullptr, kDifAlertHandlerClassB, &can_clear));
+  EXPECT_DIF_BADARG(dif_alert_handler_escalation_can_clear(
+      &alert_handler_, kDifAlertHandlerClassB, nullptr));
+  EXPECT_DIF_BADARG(dif_alert_handler_escalation_disable_clearing(
+      nullptr, kDifAlertHandlerClassC));
+  EXPECT_DIF_BADARG(
+      dif_alert_handler_escalation_clear(nullptr, kDifAlertHandlerClassD));
 }
 
 class GetterTest : public AlertHandlerTest {};
 
 TEST_F(GetterTest, GetAcc) {
-  uint16_t alerts;
+  uint16_t num_alerts;
   EXPECT_READ32(ALERT_HANDLER_CLASSB_ACCUM_CNT_REG_OFFSET, 0xaaaa);
-  EXPECT_EQ(dif_alert_handler_get_accumulator(&alert_handler_,
-                                              kDifAlertHandlerClassB, &alerts),
-            kDifOk);
-  EXPECT_EQ(alerts, 0xaaaa);
+  EXPECT_DIF_OK(dif_alert_handler_get_accumulator(
+      &alert_handler_, kDifAlertHandlerClassB, &num_alerts));
+  EXPECT_EQ(num_alerts, 0xaaaa);
 }
 
 TEST_F(GetterTest, GetCycles) {
   uint32_t cycles;
   EXPECT_READ32(ALERT_HANDLER_CLASSD_ESC_CNT_REG_OFFSET, 0xaaaaaaaa);
-  EXPECT_EQ(dif_alert_handler_get_escalation_counter(
-                &alert_handler_, kDifAlertHandlerClassD, &cycles),
-            kDifOk);
+  EXPECT_DIF_OK(dif_alert_handler_get_escalation_counter(
+      &alert_handler_, kDifAlertHandlerClassD, &cycles));
   EXPECT_EQ(cycles, 0xaaaaaaaa);
 }
 
@@ -749,43 +958,35 @@ TEST_F(GetterTest, GetState) {
 
   EXPECT_READ32(ALERT_HANDLER_CLASSC_STATE_REG_OFFSET,
                 ALERT_HANDLER_CLASSA_STATE_CLASSA_STATE_VALUE_TIMEOUT);
-  EXPECT_EQ(dif_alert_handler_get_class_state(&alert_handler_,
-                                              kDifAlertHandlerClassC, &state),
-            kDifOk);
+  EXPECT_DIF_OK(dif_alert_handler_get_class_state(
+      &alert_handler_, kDifAlertHandlerClassC, &state));
   EXPECT_EQ(state, kDifAlertHandlerClassStateTimeout);
 
   EXPECT_READ32(ALERT_HANDLER_CLASSA_STATE_REG_OFFSET,
                 ALERT_HANDLER_CLASSA_STATE_CLASSA_STATE_VALUE_PHASE2);
-  EXPECT_EQ(dif_alert_handler_get_class_state(&alert_handler_,
-                                              kDifAlertHandlerClassA, &state),
-            kDifOk);
+  EXPECT_DIF_OK(dif_alert_handler_get_class_state(
+      &alert_handler_, kDifAlertHandlerClassA, &state));
   EXPECT_EQ(state, kDifAlertHandlerClassStatePhase2);
 }
 
 TEST_F(GetterTest, NullArgs) {
   uint16_t alerts;
-  EXPECT_EQ(dif_alert_handler_get_accumulator(nullptr, kDifAlertHandlerClassB,
-                                              &alerts),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_get_accumulator(&alert_handler_,
-                                              kDifAlertHandlerClassB, nullptr),
-            kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_get_accumulator(
+      nullptr, kDifAlertHandlerClassB, &alerts));
+  EXPECT_DIF_BADARG(dif_alert_handler_get_accumulator(
+      &alert_handler_, kDifAlertHandlerClassB, nullptr));
 
   uint32_t cycles;
-  EXPECT_EQ(dif_alert_handler_get_escalation_counter(
-                nullptr, kDifAlertHandlerClassB, &cycles),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_get_escalation_counter(
-                &alert_handler_, kDifAlertHandlerClassB, nullptr),
-            kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_get_escalation_counter(
+      nullptr, kDifAlertHandlerClassB, &cycles));
+  EXPECT_DIF_BADARG(dif_alert_handler_get_escalation_counter(
+      &alert_handler_, kDifAlertHandlerClassB, nullptr));
 
   dif_alert_handler_class_state_t state;
-  EXPECT_EQ(dif_alert_handler_get_class_state(nullptr, kDifAlertHandlerClassC,
-                                              &state),
-            kDifBadArg);
-  EXPECT_EQ(dif_alert_handler_get_class_state(&alert_handler_,
-                                              kDifAlertHandlerClassC, nullptr),
-            kDifBadArg);
+  EXPECT_DIF_BADARG(dif_alert_handler_get_class_state(
+      nullptr, kDifAlertHandlerClassC, &state));
+  EXPECT_DIF_BADARG(dif_alert_handler_get_class_state(
+      &alert_handler_, kDifAlertHandlerClassC, nullptr));
 }
 
 }  // namespace

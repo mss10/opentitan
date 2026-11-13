@@ -1,0 +1,52 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+{
+  "entrypoint": "p384_masked_scalar_reblind",
+  "input": {
+    "regs": {
+      # 1st scalar share d0 (768-bit)
+      "w0": "0x1e9d19e796d2f9e05b7d3b0f4de8344e6e0012819a0c1b763eb17c275c832a51",
+      "w1": "0x000000000000000032f9e2b08677a5f2adb9ce1be14cd8df800a4c9416f5c1ee",
+      "w2": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      # 2nd scalar share d1 (768-bit)
+      "w3": "0x4ad22b6e9cb814d944676e619ef51898ab8fb14d507568cdd31b18d533eae098",
+      "w4": "0x00000000000000009e5dc5989ec9b43013e7014aa9da1611b706d6828930f243",
+      "w5": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      # P-384 domain parameter n (order of base point)
+      "w10": "0xffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+      "w11": "0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      # All zero reg
+      "w31": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    }
+  }
+
+  "output": {
+    "regs": {
+      # Verified that the reblinded shares still hide the same scalar as the
+      # input shares, i.e. (d0_out + d1_out) mod n == (d0_in + d1_in) mod n:
+      # >>> n = 0xffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973
+      # >>> d0_in = 0x1e9d19e796d2f9e05b7d3b0f4de8344e6e0012819a0c1b763eb17c275c832a51
+      # >>> d0_in += (0x32f9e2b08677a5f2adb9ce1be14cd8df800a4c9416f5c1ee << 256)
+      # >>> d1_in = 0x4ad22b6e9cb814d944676e619ef51898ab8fb14d507568cdd31b18d533eae098
+      # >>> d1_in += (0x9e5dc5989ec9b43013e7014aa9da1611b706d6828930f243 << 256)
+      # >>> d0_out = 0x1cb8891caac7f7824b11972cc834de8d3ca94e0842cdfda8c466e233411a288b
+      # >>> d0_out += (0x8f474345053a36901569d54394e54850329b169fc7bb07e588630d2dd2897ac5 << 256)
+      # >>> d0_out += (0x22cbfaff46f14f3f1 << 512)
+      # >>> d1_out = 0xbb769b3e1755eda50d95d54b5f5d92c9ae406c0216720f8a1ecf4497547fc2ca
+      # >>> d1_out += (0x9bad56a956bffce6f054395c3a57c4b5f29ae32ddf77e58cb0d8522105e18a8e << 256)
+      # >>> d1_out += (0x969212d08f774d3e << 512)
+      # >>> (d0_in + d1_in) % n == (d0_out + d1_out) % n
+      # Expected values (shares d0 and d1 of result):
+      # [w2, w1, w0] is the first share d0 of the hidden scalar d
+      "w0": "0x1cb8891caac7f7824b11972cc834de8d3ca94e0842cdfda8c466e233411a288b",
+      "w1": "0x8f474345053a36901569d54394e54850329b169fc7bb07e588630d2dd2897ac5",
+      "w2": "0x0000000000000000000000000000000000000000000000022cbfaff46f14f3f1",
+      # [w5, w4, w3] is the second share d1 of the hidden scalar d
+      "w3": "0xbb769b3e1755eda50d95d54b5f5d92c9ae406c0216720f8a1ecf4497547fc2ca",
+      "w4": "0x9bad56a956bffce6f054395c3a57c4b5f29ae32ddf77e58cb0d8522105e18a8e",
+      "w5": "0x000000000000000000000000000000000000000000000000969212d08f774d3e",
+    }
+  }
+}

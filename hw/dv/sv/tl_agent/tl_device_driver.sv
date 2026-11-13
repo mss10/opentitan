@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -19,18 +19,14 @@ class tl_device_driver extends tl_base_driver;
       a_channel_thread();
       d_channel_thread();
     join_none
- endtask
+  endtask
 
-  // reset signals every time reset occurs.
-  virtual task reset_signals();
-    forever begin
-      @(negedge cfg.vif.rst_n);
-      invalidate_d_channel();
-      cfg.vif.d2h_int.a_ready <= 1'b0;
-      // Check for seq_item_port FIFO is empty when coming out of reset
-      `DV_CHECK_EQ(seq_item_port.has_do_available(), 0);
-      @(posedge cfg.vif.rst_n);
-    end
+  task on_enter_reset();
+    invalidate_d_channel();
+    cfg.vif.d2h_int.a_ready <= 1'b0;
+
+    // Make sure that seq_item_port FIFO will be empty when coming out of reset
+    `DV_CHECK_EQ(seq_item_port.has_do_available(), 0);
   endtask
 
   virtual task a_channel_thread();
@@ -39,9 +35,9 @@ class tl_device_driver extends tl_base_driver;
     forever begin
       ready_delay = $urandom_range(cfg.a_ready_delay_min, cfg.a_ready_delay_max);
       repeat(ready_delay) @(cfg.vif.device_cb);
-      cfg.vif.device_cb.d2h_int.a_ready <= 1'b1;
+      cfg.vif.device_cb.d2h.a_ready <= 1'b1;
       @(cfg.vif.device_cb);
-      cfg.vif.device_cb.d2h_int.a_ready <= 1'b0;
+      cfg.vif.device_cb.d2h.a_ready <= 1'b0;
     end
   endtask
 
@@ -111,15 +107,22 @@ class tl_device_driver extends tl_base_driver;
   endtask : d_channel_thread
 
   function void invalidate_d_channel();
-    cfg.vif.d2h_int.d_opcode <= tlul_pkg::tl_d_op_e'('x);
-    cfg.vif.d2h_int.d_param <= '{default:'x};
-    cfg.vif.d2h_int.d_size <= '{default:'x};
-    cfg.vif.d2h_int.d_source <= '{default:'x};
-    cfg.vif.d2h_int.d_sink <= '{default:'x};
-    cfg.vif.d2h_int.d_data <= '{default:'x};
-    cfg.vif.d2h_int.d_user <= '{default:'x};
-    cfg.vif.d2h_int.d_error <= 1'bx;
-    cfg.vif.d2h_int.d_valid <= 1'b0;
+    if (cfg.invalidate_d_x) begin
+      cfg.vif.d2h_int.d_opcode <= tlul_pkg::tl_d_op_e'('x);
+      cfg.vif.d2h_int.d_param <= '{default:'x};
+      cfg.vif.d2h_int.d_size <= '{default:'x};
+      cfg.vif.d2h_int.d_source <= '{default:'x};
+      cfg.vif.d2h_int.d_sink <= '{default:'x};
+      cfg.vif.d2h_int.d_data <= '{default:'x};
+      cfg.vif.d2h_int.d_user <= '{default:'x};
+      cfg.vif.d2h_int.d_error <= 1'bx;
+      cfg.vif.d2h_int.d_valid <= 1'b0;
+    end else begin // if (cfg.invalidate_d_x)
+      tlul_pkg::tl_d2h_t d2h;
+      `DV_CHECK_STD_RANDOMIZE_FATAL(d2h)
+      d2h.d_valid = 1'b0;
+      cfg.vif.d2h_int <= d2h;
+    end
   endfunction : invalidate_d_channel
 
 endclass

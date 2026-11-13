@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,43 +6,35 @@
 { name: "englishbreakfast",
   type: "top",
 
-  /////////////////////////////////////////////////////////////
-  // Seed for compile-time random constants                  //
-  // NOTE: REPLACE THIS WITH A NEW VALUE BEFORE THE TAPEOUT  //
-  /////////////////////////////////////////////////////////////
-  rnd_cnst_seed: 4881560218908238235
-
   // 32-bit datawidth
   datawidth: "32",
 
   // Power information for the design
   power: {
     // Power domains supported by the design
-    // Aon represents domain aon
-    // 0 represents domain 0
-    domains: ["Aon", "0"],
+    domains: ["Aon", "Main"],
 
     // Default power domain used for the design
-    default: "0"
+    default: "Main"
+
+    // Discrete OpenTitan does not need to wait for external resets
+    wait_for_external_reset: false
   },
 
+  // List of unmanaged external clocks
+  unmanaged_clocks: [
+    // { name: "my_ext" }
+  ]
+
   // This is the clock data structure of the design.
-  // The hier path refers to the clock reference path (struct / port)
-  //   - The top/ext desgination follows the same scheme as inter-module
   // The src key indicates the raw clock sources in the design
   // The groups key indicates the various clock groupings in the design
   clocks: {
 
-    hier_paths: {
-      top: "clkmgr_aon_clocks.", // top level is a struct
-      ext: "",                   // ext is a port of the clock name
-      lpg: "clkmgr_aon_cg_en.",  // top level struct for alert lpg reset enables
-    },
-
     // Clock Source attributes
     // name: Name of group.
     // aon:  Whether the clock is free running all the time.
-    //       If it is, the clock is not hanlded by clkmgr.
+    //       If it is, the clock is not handled by clkmgr.
     // freq: Absolute frequency of clk in Hz
     srcs: [
       { name: "main", aon: "no",  freq: "100000000" }
@@ -54,12 +46,11 @@
     // Derived clock source attributes
     // name: Name of group.
     // aon:  Whether the clock is free running all the time.
-    //       If it is, the clock is not hanlded by clkmgr.
+    //       If it is, the clock is not handled by clkmgr.
     // freq: Absolute frequency of clk in Hz
     // src:  From which clock source is the clock derived
     // div:  Ratio between derived clock and source clock
     derived_srcs: [
-      { name: "io_div2", aon: "no", div: 2, src: "io", freq: "48000000" }
       { name: "io_div4", aon: "no", div: 4, src: "io", freq: "24000000" }
     ],
 
@@ -107,17 +98,14 @@
     ],
   },
 
+  // List of unmanaged external resets
+  unmanaged_resets: [
+    // { name: "my_ext" }
+  ]
+
   // This is the reset data structure of the design.
-  // The hier path refers to the reset reference path (struct / port)
-  //   - The top/ext desgination follows the same scheme as inter-module
   // The node key represents all the known resets in the design
   resets: {
-
-    hier_paths: {
-      top: "rstmgr_aon_resets.", // top level is a struct
-      ext: "",                   // ext is a port of the clock name
-      lpg: "rstmgr_aon_rst_en.", // top level struct for alert lpg reset enables
-    },
 
     // Reset node attributes
     // name: name of reset.
@@ -136,7 +124,7 @@
     // If type is "ext", there is no root, since it is external
     //
     // domains: The power domains of a particular reset
-    // This is a list of of the supported power domains.
+    // This is a list of the supported power domains.
     // Valid values are Aon and (power domain)0 ~ (power domain)1.
     // If no value is supplied, the default is only the Aon version.
     //
@@ -145,27 +133,99 @@
     // likely external or generated from a voltage comparator
     //
     nodes: [
-      { name: "por_aon",     gen: false, type: "top",                    clk: "aon"     }
-      { name: "lc_src",      gen: false, type: "int",                    clk: "io_div4" }
-      { name: "sys_src",     gen: false, type: "int",                    clk: "io_div4" }
-      { name: "por",         gen: true,  type: "top", parent: "por_aon", clk: "main"    }
-      { name: "por_io",      gen: true,  type: "top", parent: "por_aon", clk: "io"      }
-      { name: "por_io_div2", gen: true,  type: "top", parent: "por_aon", clk: "io_div2" }
-      { name: "por_io_div4", gen: true , type: "top", parent: "por_aon", clk: "io_div4" }
-      { name: "por_usb",     gen: true,  type: "top", parent: "por_aon", clk: "usb"     }
-      { name: "lc",          gen: true,  type: "top", parent: "lc_src",  clk: "main"    }
-      { name: "lc_io_div4",  gen: true,  type: "top", parent: "lc_src",  clk: "io_div4" }
-      { name: "sys",         gen: true,  type: "top", parent: "sys_src", clk: "main"    }
-      { name: "sys_io_div4", gen: true,  type: "top", parent: "sys_src", clk: "io_div4" }
-      { name: "sys_aon",     gen: true,  type: "top", parent: "sys_src", clk: "aon"     }
-      { name: "spi_device",  gen: true,  type: "top", parent: "sys_src", clk: "io_div2", sw: true }
-      { name: "spi_host0",   gen: true,  type: "top", parent: "sys_src", clk: "io",      sw: true }
-      { name: "usb",         gen: true,  type: "top", parent: "sys_src", clk: "usb",     sw: true }
+      { name: "por_aon",     gen: false, type: "top",                    clock: "aon"     }
+      { name: "lc_src",      gen: false, type: "int",                    clock: "io_div4" }
+      { name: "sys_src",     gen: false, type: "int",                    clock: "io_div4" }
+      { name: "por",         gen: true,  type: "top", parent: "por_aon", clock: "main"    }
+      { name: "por_io",      gen: true,  type: "top", parent: "por_aon", clock: "io"      }
+      { name: "por_io_div4", gen: true , type: "top", parent: "por_aon", clock: "io_div4" }
+      { name: "por_usb",     gen: true,  type: "top", parent: "por_aon", clock: "usb"     }
+      { name: "lc",          gen: true,  type: "top", parent: "lc_src",  clock: "main"    }
+      { name: "lc_io_div4",  gen: true,  type: "top", parent: "lc_src",  clock: "io_div4" }
+      { name: "sys",         gen: true,  type: "top", parent: "sys_src", clock: "main"    }
+      { name: "sys_io_div4", gen: true,  type: "top", parent: "sys_src", clock: "io_div4" }
+      { name: "sys_aon",     gen: true,  type: "top", parent: "sys_src", clock: "aon"     }
+      { name: "spi_device",  gen: true,  type: "top", parent: "sys_src", clock: "io_div4", sw: true }
+      { name: "spi_host0",   gen: true,  type: "top", parent: "sys_src", clock: "io",      sw: true }
+      { name: "usb",         gen: true,  type: "top", parent: "sys_src", clock: "usb",     sw: true }
     ]
   }
+  // The reset requests: peripherals are deduced, but internal and debug need
+  // to be configure in hjson file.
+  reset_requests: {
+    int: [
+      {
+        "name": "MainPwr",
+        "desc": "main power glitch reset request",
+        "module": "pwrmgr"
+      },
+      {
+        "name": "Esc",
+        "desc": "escalation reset request",
+        "module": "alert_handler"
+      }
+    ],
+    debug: [
+      {
+        "name": "Ndm",
+        "desc": "non-debug-module reset request",
+        "module": "rv_dm"
+      }
+    ],
+  },
 
   // Number of cores: used in rv_plic and timer
   num_cores: "1",
+
+  // Any module with interrupts that doesn't specify plic
+  // will have its interrupts sent here
+  default_plic: "rv_plic"
+
+  // Any module with alerts that doesn't specify alert_handler
+  // will have its alerts sent here
+  default_alert_handler: null
+
+
+  // `addr_spaces` names the distinct address spaces present in the device.
+  // All hosts in the same address space share the same base addresses for
+  // all peripherals, though not every peripheral will be accessible to every
+  // host in that address space--Access privileges are separate from addresses.
+  addr_spaces: [
+    { name: "hart",
+      desc: "The main address space, shared between the CPU and DM"
+      subspaces: [
+        { name: "mmio",
+          desc: '''
+                MMIO region excludes any memory that is separate from the module configuration
+                space, i.e. ROM, main SRAM, and flash are excluded but retention SRAM, spi_device
+                memory, or usbdev memory are included.
+                '''
+          nodes: [
+            "uart0",
+            "uart1",
+            "gpio0",
+            "spi_device",
+            "rv_timer"
+            "spi_host0",
+            "usbdev",
+            "pwrmgr",
+            "rstmgr",
+            "clkmgr",
+            "pinmux",
+            "aon_timer",
+            "ast",
+            "flash_ctrl.core",
+            "flash_ctrl.prim",
+            "rv_plic",
+            "aes",
+            "sram_ctrl_main.regs"
+            "rom_ctrl.regs",
+            "rv_core_ibex"
+          ]
+        }
+      ]
+    },
+  ]
 
   // `module` defines the peripherals.
   // Details are coming from each modules' config file `ip.hjson`
@@ -179,82 +239,135 @@
      //   reggen_only: Similar to reggen_top, but are not instantiated in the top level.
   module: [
     { name: "uart0",    // instance name
-      type: "uart",     // Must be matched to the ip name in `ip.hson` (_reg, _cfg permitted)
+      type: "uart",     // Must be matched to the ip name in `ip.hjson` (_reg, _cfg permitted)
                         // and `hw/ip/{type}`
 
       // clock connections defines the port to top level clock connection
       // the ip.hjson will declare the clock port names
       // If none are defined at ip.hjson, clk_i is used by default
       clock_srcs: {clk_i: "io_div4"},
-
+      clock_group: "peri",
       // reset connections defines the port to top level reset connection
       // the ip.hjson will declare the reset port names
       // If none are defined at ip.hjson, rst_ni is used by default
-      reset_connections: {rst_ni: "sys_io_div4"},
-      base_addr: "0x40000000",
+      reset_connections: {rst_ni: "lc_io_div4"},
+      base_addr: {
+        hart: "0x40000000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "gpio",
+    { name: "uart1",    // instance name
+      type: "uart",     // Must be matched to the ip name in `ip.hjson` (_reg, _cfg permitted)
+                        // and `hw/ip/{type}`
+
+      // clock connections defines the port to top level clock connection
+      // the ip.hjson will declare the clock port names
+      // If none are defined at ip.hjson, clk_i is used by default
+      clock_srcs: {clk_i: "io_div4"},
+      clock_group: "peri",
+      // reset connections defines the port to top level reset connection
+      // the ip.hjson will declare the reset port names
+      // If none are defined at ip.hjson, rst_ni is used by default
+      reset_connections: {rst_ni: "lc_io_div4"},
+      base_addr: {
+        hart: "0x40010000",
+      },
+      outgoing_alert: "englishbreakfast",
+    },
+    { name: "gpio0",
       type: "gpio",
+      template_type: "gpio",
       clock_srcs: {clk_i: "io_div4"},
       clock_group: "peri",
       reset_connections: {rst_ni: "sys_io_div4"},
-      base_addr: "0x40040000",
+      base_addr: {
+        hart: "0x40040000",
+      },
+      param_decl: {
+        GpioAsyncOn: "1"
+      },
+      attr: "ipgen"
+      outgoing_alert: "englishbreakfast",
     }
     { name: "spi_device",
       type: "spi_device",
-      clock_srcs: {clk_i: "io_div4", scan_clk_i: "io_div2"},
+      clock_srcs: {clk_i: "io_div4", scan_clk_i: "io_div4"},
       clock_group: "peri",
       reset_connections: {rst_ni: "spi_device"},
-      base_addr: "0x40050000",
+      base_addr: {
+        hart: "0x40050000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
     { name: "spi_host0",
       type: "spi_host",
       clock_srcs: {clk_i: "io"},
       clock_group: "peri",
       reset_connections: {rst_ni: "spi_host0"},
-      base_addr: "0x40060000",
+      base_addr: {
+        hart: "0x40060000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
     { name: "rv_timer",
       type: "rv_timer",
       clock_srcs: {clk_i: "io_div4"},
       clock_group: "timers",
       reset_connections: {rst_ni: "sys_io_div4"},
-      base_addr: "0x40100000",
+      base_addr: {
+        hart: "0x40100000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
     { name: "usbdev",
       type: "usbdev",
-      clock_srcs: {clk_i: "io_div4", clk_aon_i: "aon", clk_usb_48mhz_i: "usb"},
+      clock_srcs: {clk_i: "usb", clk_aon_i: "aon"},
       clock_group: "peri",
-      reset_connections: {rst_ni: "sys_io_div4", rst_aon_ni: "sys_aon", rst_usb_48mhz_ni: "usb"},
-      base_addr: "0x40110000",
+      reset_connections: {rst_ni: "usb", rst_aon_ni: "sys_aon"},
+      base_addr: {
+        hart: "0x40320000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "pwrmgr_aon",
+    { name: "pwrmgr",
       type: "pwrmgr",
-      clock_srcs: {clk_i: "io_div4", clk_slow_i: "aon", clk_esc_i: "io_div4"},
+      template_type: "pwrmgr",
+      clock_srcs: {clk_i: "io_div4", clk_slow_i: "aon", clk_lc_i: "io_div4", clk_esc_i: "io_div4"},
       clock_group: "powerup",
       reset_connections: {
         rst_ni: "por_io_div4",
+        rst_lc_ni: "lc_io_div4",
         rst_esc_ni: "lc_io_div4",
         rst_main_ni: "por_aon",
         rst_slow_ni: "por_aon"
       },
-      domain: ["Aon"],
-      base_addr: "0x40400000",
-      attr: "templated",
-
+      domain: "Aon",
+      base_addr: {
+        hart: "0x40400000",
+      },
+      attr: "ipgen",
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "rstmgr_aon",
+    { name: "rstmgr",
       type: "rstmgr",
-      clock_srcs: {clk_i: "io_div4", clk_aon_i: "aon", clk_main_i: "main", clk_io_i: "io", clk_usb_i: "usb",
-                   clk_io_div2_i: "io_div2", clk_io_div4_i: "io_div4"},
+      template_type: "rstmgr",
+      clock_srcs: {clk_i: "io_div4", clk_por_i: "io_div4", clk_aon_i: "aon", clk_main_i: "main", clk_io_i: "io", clk_usb_i: "usb",
+                   clk_io_div4_i: "io_div4"},
       clock_group: "powerup",
-      reset_connections: {rst_ni: "por_io_div4"},
-      domain: ["Aon"],
-      base_addr: "0x40410000",
-      attr: "templated",
+      reset_connections: {rst_ni: "lc_io_div4", rst_por_ni: "por_io_div4"},
+      domain: "Aon",
+      base_addr: {
+        hart: "0x40410000",
+      },
+      param_decl: {
+        SecCheck: "0",
+      }
+      attr: "ipgen",
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "clkmgr_aon",
+    { name: "clkmgr",
       type: "clkmgr",
+      template_type: "clkmgr",
       clock_srcs: {
         clk_i: "io_div4",
         clk_main_i: {
@@ -276,43 +389,88 @@
       },
       clock_group: "powerup",
       reset_connections: {rst_ni: "por_io_div4",
-                          rst_main_ni: "por",
+                          rst_aon_ni: "por_aon",
                           rst_io_ni: "por_io",
-                          rst_usb_ni: "por_usb",
-                          rst_io_div2_ni: "por_io_div2",
                           rst_io_div4_ni: "por_io_div4",
-                          rst_aon_ni: "por_aon"},
-      domain: ["Aon"],
-      base_addr: "0x40420000",
-      attr: "templated",
+                          rst_main_ni: "por",
+                          rst_usb_ni: "por_usb",
+                          rst_root_ni: "por_io_div4",
+                          rst_root_io_ni: "por_io",
+                          rst_root_io_div4_ni: "por_io_div4",
+                          rst_root_main_ni: "por",
+                          rst_root_usb_ni: "por_usb",
+                         },
+      domain: "Aon",
+      base_addr: {
+        hart: "0x40420000",
+      },
+      attr: "ipgen",
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "pinmux_aon",
+    { name: "pinmux",
       type: "pinmux",
+      template_type: "pinmux",
       clock_srcs: {clk_i: "io_div4", clk_aon_i: "aon"},
       clock_group: "powerup",
-      reset_connections: {rst_ni: "sys_io_div4", rst_aon_ni: "sys_aon"},
-      domain: ["Aon"],
-      base_addr: "0x40460000",
-      attr: "templated",
+      reset_connections: {
+        rst_ni: {
+          name: "lc_io_div4",
+          domain: "Aon",
+        },
+        rst_aon_ni: {
+          name: "sys_aon",
+          domain: "Aon"
+        },
+        rst_sys_ni: {
+          name: "sys_io_div4",
+          domain: "Aon",
+        },
+      }
+      domain: "Main",
+      base_addr: {
+        hart: "0x40460000",
+      },
+      attr: "ipgen",
+      outgoing_alert: "englishbreakfast",
     },
-    { name: "aon_timer_aon",
+    { name: "aon_timer",
       type: "aon_timer",
       clock_srcs: {clk_i: "io_div4", clk_aon_i: "aon"},
       clock_group: "timers",
       reset_connections: {rst_ni: "sys_io_div4", rst_aon_ni: "sys_aon"},
-      domain: ["Aon"],
-      base_addr: "0x40470000",
-      attr: "templated",
+      domain: "Aon",
+      base_addr: {
+        hart: "0x40470000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
     { name: "ast",
       type: "ast",
       clock_srcs: {
-        clk_ast_tlul_i: "io_div4",
-        clk_ast_adc_i: "aon",
-        clk_ast_alert_i: "io_div4",
-        clk_ast_es_i: "main",
-        clk_ast_rng_i: "main",
-        clk_ast_usb_i: "usb"
+        clk_ast_tlul_i: {
+          clock: "io_div4",
+          group: "secure"
+        },
+        clk_ast_adc_i: {
+          clock: "aon",
+          group: "secure"
+        },
+        clk_ast_alert_i: {
+          clock: "io_div4",
+          group: "secure"
+        },
+        clk_ast_es_i: {
+          clock: "main",
+          group: "secure"
+        },
+        clk_ast_rng_i: {
+          clock: "main",
+          group: "secure"
+        },
+        clk_ast_usb_i: {
+          clock: "usb",
+          group: "peri"
+        }
       },
       clock_group: "secure",
       reset_connections: {
@@ -323,37 +481,25 @@
         rst_ast_rng_ni: "sys",
         rst_ast_usb_ni: "usb"
       },
-      base_addr: "0x40480000",
+      base_addr: {
+        hart: "0x40480000",
+      },
       attr: "reggen_only",
-    },
-    { name: "sram_ctrl_ret_aon",
-      type: "sram_ctrl",
-      clock_srcs: {clk_i: "io_div4", clk_otp_i: "io_div4"},
-      clock_group: "infra",
-      reset_connections: {rst_ni: "sys_io_div4", rst_otp_ni: "lc_io_div4"},
-      domain: ["Aon"],
-      param_decl: {
-        InstrExec: "0",
-      }
-      base_addrs: {regs: "0x40500000", ram: "0x40600000"},
-      // Memory regions must be associated with a dedicated
-      // TL-UL device interface.
-      memory: {
-        ram: {
-          label:    "ram_ret_aon",
-          swaccess:   "rw",
-          exec:       "True",
-          byte_write: "True",
-          size:     "0x1000"
-        }
-      }
     },
     { name: "flash_ctrl",
       type: "flash_ctrl",
+      template_type: "flash_ctrl",
       clock_srcs: {clk_i: "main", clk_otp_i: "io_div4"},
       clock_group: "infra",
       reset_connections: {rst_ni: "lc", rst_otp_ni: "lc_io_div4"},
-      base_addrs: {core: "0x41000000", prim: "0x41008000", mem: "0x20000000"}
+      base_addrs: {
+        core: {hart: "0x41000000"},
+        prim: {hart: "0x41008000"},
+        mem:  {hart: "0x20000000"}
+      }
+      param_decl: {
+        SecScrambleEn: "0"
+      }
       memory: {
         mem: {
           label:      "eflash",
@@ -368,23 +514,21 @@
           }
         }
       }
-      attr: "templated",
-    },
-    { name: "rv_dm",
-      type: "rv_dm",
-      clock_srcs: {clk_i: "main"},
-      clock_group: "infra",
-      reset_connections: {rst_ni: "lc"},
-      // Note that this module also contains a bus host.
-      base_addrs: {rom: "0x00010000", regs: "0x41200000"}
+      attr: "ipgen",
+      outgoing_alert: "englishbreakfast",
     },
     { name: "rv_plic",
       type: "rv_plic",
+      template_type: "rv_plic",
       clock_srcs: {clk_i: "main"},
       clock_group: "secure",
       reset_connections: {rst_ni: "sys"},
-      base_addr: "0x48000000",
-      attr: "templated",
+      base_addr: {
+        hart: "0x48000000",
+      },
+      attr: "ipgen",
+      targets: ["rv_core_ibex"]
+      outgoing_alert: "englishbreakfast",
     },
     { name: "aes",
       type: "aes",
@@ -392,17 +536,14 @@
       clock_group: "trans",
       reset_connections: {rst_ni: "sys", rst_edn_ni: "sys"},
       param_decl: {
-        Masking: "1",
-        SBoxImpl: "aes_pkg::SBoxImplDom"
+        AESGCMEnable: "1",
+        SecMasking: "1",
+        SecSBoxImpl: "aes_pkg::SBoxImplDom"
       }
-      base_addr: "0x41100000",
-    },
-    { name: "hmac",
-      type: "hmac",
-      clock_srcs: {clk_i: "main"},
-      clock_group: "trans",
-      reset_connections: {rst_ni: "sys"},
-      base_addr: "0x41110000",
+      base_addr: {
+        hart: "0x41100000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
     { name: "sram_ctrl_main",
       type: "sram_ctrl",
@@ -412,7 +553,10 @@
       param_decl: {
         InstrExec: "1",
       }
-      base_addrs: {regs: "0x411C0000", ram: "0x10000000"},
+      base_addrs: {
+        regs: {hart: "0x411C0000"},
+        ram:  {hart: "0x10000000"},
+      },
       // Memory regions must be associated with a dedicated
       // TL-UL device interface.
       memory: {
@@ -424,13 +568,17 @@
           size:       "0x20000"
         }
       }
+      outgoing_alert: "englishbreakfast",
     },
     { name: "rom_ctrl",
       type: "rom_ctrl",
       clock_srcs: {clk_i: "main"},
       clock_group: "infra",
       reset_connections: {rst_ni: "sys"},
-      base_addrs: {rom: "0x00008000", regs: "0x411e0000"}
+      base_addrs: {
+        rom:  {hart: "0x00008000"},
+        regs: {hart: "0x411e0000"},
+      }
       memory: {
         rom: {
           label:      "rom",
@@ -443,38 +591,51 @@
       param_decl: {
         SecDisableScrambling: "1'b1"
       }
+      outgoing_alert: "englishbreakfast",
     },
     { name: "rv_core_ibex",
       type: "rv_core_ibex",
-      param_decl: {PMPEnable: "1",
+      template_type: "rv_core_ibex",
+      attr: "ipgen",
+      ipgen_params: {
+        num_regions: 2
+      }
+      param_decl: {PMPEnable: "0",
                    PMPGranularity: "0",
                    PMPNumRegions: "16",
-                   MHPMCounterNum: "10",
+                   MHPMCounterNum: "0",
                    MHPMCounterWidth: "32",
                    RV32E: "0",
                    RV32M: "ibex_pkg::RV32MSingleCycle",
                    RV32B: "ibex_pkg::RV32BNone",
+                   RV32ZC: "ibex_pkg::RV32ZcaZcbZcmp",
                    RegFile: "ibex_pkg::RegFileFF",
                    BranchTargetALU: "1",
                    WritebackStage: "1",
-                   ICache: "1",
-                   ICacheECC: "1",
+                   ICache: "0",
+                   ICacheECC: "0",
                    BranchPredictor: "0",
                    DbgTriggerEn: "1",
-                   SecureIbex: "1",
-                   DmHaltAddr: "tl_main_pkg::ADDR_SPACE_RV_DM__ROM + dm::HaltAddress[31:0]",
-                   DmExceptionAddr: "tl_main_pkg::ADDR_SPACE_RV_DM__ROM + dm::ExceptionAddress[31:0]",
+                   SecureIbex: "0",
+                   DmHaltAddr: "0",
+                   DmExceptionAddr: "0",
                    PipeLine: "0"
                   }
-      clock_srcs: {clk_i: "main", clk_esc_i: "io_div4"},
+      clock_srcs: {clk_i: "main",
+                   clk_edn_i: "main",
+                   clk_esc_i: "io_div4",
+                   clk_otp_i: "io_div4"},
       clock_group: "infra",
-      reset_connections: {rst_ni: "sys", rst_esc_ni: "lc_io_div4"},
-      base_addr: "0x411F0000",
+      reset_connections: {rst_ni: "sys",
+                          rst_edn_ni: "sys",
+                          rst_esc_ni: "lc_io_div4",
+                          rst_otp_ni: "lc_io_div4"},
+      base_addr: {
+        hart: "0x411F0000",
+      },
+      outgoing_alert: "englishbreakfast",
     },
   ]
-
-  // All memories wrapped up in relevant controllers
-  memory: [],
 
   // The port data structure is not something that should be used liberally.
   // It is used specifically to assign special attributes to specific ports.
@@ -501,7 +662,7 @@
           package: "lc_ctrl_pkg",
         },
 
-        { struct:  "ram_1p_cfg",
+        { struct:  "ram_1p_cfg_req",
           package: "prim_ram_1p_pkg",
           type:    "uni",
           name:    "ram_1p_cfg",
@@ -510,23 +671,24 @@
           act:     "rcv"
         },
 
-        { struct:  "ram_2p_cfg",
-          package: "prim_ram_2p_pkg",
+        { struct:  "ram_1r1w_cfg_req",
+          package: "prim_ram_1r1w_pkg",
           type:    "uni",
-          name:    "ram_2p_cfg",
+          name:    "ram_1r1w_cfg",
           // The activity direction for a port inter-signal is "opposite" of
           // what the external module actually needs.
           act:     "rcv"
         },
 
-        { struct:  "rom_cfg",
+
+        { struct:  "rom_cfg_req",
           package: "prim_rom_pkg",
           type:    "uni",
           name:    "rom_cfg",
           // The activity direction for a port inter-signal is "opposite" of
           // what the external module actually needs.
           act:     "rcv"
-        }
+        },
       ]
     },
   ]
@@ -539,52 +701,44 @@
   //  e.g flash_ctrl0.flash: [flash_phy0.flash_ctrl]
   inter_module: {
     'connect': {
-      'pwrmgr_aon.pwr_flash'    : ['flash_ctrl.pwrmgr'],
-      'pwrmgr_aon.pwr_rst'      : ['rstmgr_aon.pwr'],
-      'pwrmgr_aon.pwr_clk'      : ['clkmgr_aon.pwr'],
-      'pwrmgr_aon.strap'        : ['pinmux_aon.strap_en'],
-      'pwrmgr_aon.low_power'    : ['pinmux_aon.sleep_en',
-                                   'aon_timer_aon.sleep_mode'],
-      'pwrmgr_aon.fetch_en'     : ['rv_core_ibex.pwrmgr_cpu_en'],
+      'pwrmgr.pwr_nvm'          : ['flash_ctrl.pwrmgr'],
+      'pwrmgr.pwr_rst'          : ['rstmgr.pwr'],
+      'pwrmgr.pwr_clk'          : ['clkmgr.pwr'],
+      'pwrmgr.strap'            : ['pinmux.strap_en'],
+      'pwrmgr.low_power'        : ['pinmux.sleep_en',
+                                   'aon_timer.sleep_mode'],
+      'pwrmgr.fetch_en'         : ['rv_core_ibex.pwrmgr_cpu_en'],
 
       // usbdev connection to pinmux
-      'usbdev.usb_out_of_rst'   : ['pinmux_aon.usb_out_of_rst'],
-      'usbdev.usb_aon_wake_en'  : ['pinmux_aon.usb_aon_wake_en'],
-      'usbdev.usb_aon_wake_ack' : ['pinmux_aon.usb_aon_wake_ack'],
-      'usbdev.usb_suspend'      : ['pinmux_aon.usb_suspend'],
-      'pinmux_aon.usb_state_debug' : ['usbdev.usb_state_debug'],
+      'usbdev.usb_dp_pullup'      : ['pinmux.usbdev_dppullup_en'],
+      'usbdev.usb_dn_pullup'      : ['pinmux.usbdev_dnpullup_en'],
+      'usbdev.usb_aon_suspend_req': ['pinmux.usbdev_suspend_req'],
+      'usbdev.usb_aon_wake_ack'   : ['pinmux.usbdev_wake_ack'],
+      'usbdev.usb_aon_bus_reset'  : ['pinmux.usbdev_bus_reset'],
+      'usbdev.usb_aon_sense_lost' : ['pinmux.usbdev_sense_lost'],
+      'pinmux.usbdev_wake_detect_active' : ['usbdev.usb_aon_wake_detect_active'],
 
       // The idle connection is automatically connected through topgen.
       // The user does not need to explicitly declare anything other than
       // an empty list.
-      'clkmgr_aon.idle'         : [],
-
-      // Pinmux JTAG signals
-      'pinmux_aon.rv_jtag' : ['rv_dm.jtag'],
+      'clkmgr.idle'             : [],
 
       // rv_plic connections
       'rv_plic.msip' : ['rv_core_ibex.irq_software'],
       'rv_plic.irq'  : ['rv_core_ibex.irq_external'],
 
-      // rv_dm connections
-      'rv_dm.debug_req': ['rv_core_ibex.debug_req'],
-
       // rv_timer connections
 
 
       // rv core ibex connections
-      'rv_core_ibex.rst_cpu_n'  : ['rstmgr_aon.rst_cpu_n'],
-      'rv_core_ibex.crash_dump' : ['rstmgr_aon.cpu_dump'],
-      'rv_core_ibex.pwrmgr'     : ['pwrmgr_aon.pwr_cpu'],
+      'rv_core_ibex.crash_dump' : ['rstmgr.cpu_dump'],
+      'rv_core_ibex.pwrmgr'     : ['pwrmgr.pwr_cpu'],
 
       // spi passthrough connection
       'spi_device.passthrough'     : ['spi_host0.passthrough']
 
-      // Debug module reset request to reset manager
-      'rv_dm.ndmreset_req' : ['rstmgr_aon.ndmreset_req']
-
       // Reset manager software reset request to pwrmgr
-      'rstmgr_aon.sw_rst_req' : ['pwrmgr_aon.sw_rst_req'],
+      'rstmgr.sw_rst_req' : ['pwrmgr.sw_rst_req'],
     }
 
     // top is to connect to top net/struct.
@@ -592,16 +746,16 @@
     // use of the signal is up to top template
     'top': [
         // top level net for clocks
-        'clkmgr_aon.clocks',
+        'clkmgr.clocks',
 
         // top level clock gating indications for alert subsystem
-        'clkmgr_aon.cg_en',
+        'clkmgr.cg_en',
 
         // top level net for reset
-        'rstmgr_aon.resets',
+        'rstmgr.resets',
 
         // top level reset asserted indications for alert subsystem
-        'rstmgr_aon.rst_en',
+        'rstmgr.rst_en',
 
         // dedicated timer interrupt
         'rv_core_ibex.irq_timer',
@@ -609,46 +763,42 @@
         // hardwired connections
         'rv_core_ibex.hart_id', 'rv_core_ibex.boot_addr',
 
-        // lc_ctrl.lc_cpu_en - always enabled for English Breakfast
-        'rv_core_ibex.lc_cpu_en'
-
         // Xbars
 
         // Pinmux JTAG signals for the tool-inserted DFT TAP
-        'pinmux_aon.dft_jtag',
-
-        // OTP HW_CFG Broadcast signals.
-        // TODO(#6713): The actual struct breakout and mapping currently needs to
-        // be performed by hand in the toplevel template.
-        'sram_ctrl_main.otp_en_sram_ifetch',
-        'sram_ctrl_ret_aon.otp_en_sram_ifetch'
+        'pinmux.dft_jtag'
     ],
 
     // ext is to create port in the top.
     'external': {
-        # 'adc_ctrl_aon.adc'             : 'adc'
-        'ast.edn'                      : '',
-        'ast.lc_dft_en'                : '',
-        'ast.ram_1p_cfg'               : 'ram_1p_cfg',
-        'ast.ram_2p_cfg'               : 'ram_2p_cfg',
-        'ast.rom_cfg'                  : 'rom_cfg',
-        'clkmgr_aon.jitter_en'         : 'clk_main_jitter_en',
-        'clkmgr_aon.ast_clk_byp_req'   : 'ast_clk_byp_req',
-        'clkmgr_aon.ast_clk_byp_ack'   : 'ast_clk_byp_ack',
-        'flash_ctrl.flash_alert'           : 'flash_alert',
-        'flash_ctrl.flash_bist_enable'     : 'flash_bist_enable',
-        'flash_ctrl.flash_power_down_h'    : 'flash_power_down_h',
-        'flash_ctrl.flash_power_ready_h'   : 'flash_power_ready_h',
-        # 'entropy_src.entropy_src_rng'  : '',
-        # 'entropy_src.rng_fips'         : '',
-        'peri.tl_ast'                  : 'ast_tl',
-        'pinmux_aon.dft_strap_test'    : 'dft_strap_test'
-        'pinmux_aon.dft_hold_tap_sel'  : 'dft_hold_tap_sel',
-        'pwrmgr_aon.pwr_ast'           : 'pwrmgr_ast',
-        # 'otp_ctrl.otp_ast_pwr_seq'     : '',
-        # 'otp_ctrl.otp_ast_pwr_seq_h'   : '',
-        # 'otp_ctrl.otp_alert'           : 'otp_alert',
-        'rstmgr_aon.por_n'               : 'por_n'
+        'clkmgr.clocks'                  : '',
+        'clkmgr.cg_en'                   : '',
+        'clkmgr.jitter_en'               : 'clk_main_jitter_en',
+        'clkmgr.hi_speed_sel'            : 'hi_speed_sel',
+        'clkmgr.div_step_down_req'       : 'div_step_down_req',
+        'clkmgr.all_clk_byp_req'         : 'all_clk_byp_req',
+        'clkmgr.all_clk_byp_ack'         : 'all_clk_byp_ack',
+        'clkmgr.io_clk_byp_req'          : 'io_clk_byp_req',
+        'clkmgr.io_clk_byp_ack'          : 'io_clk_byp_ack',
+        'flash_ctrl.flash_bist_enable'   : 'flash_bist_enable',
+        'flash_ctrl.flash_power_down_h'  : 'flash_power_down_h',
+        'flash_ctrl.flash_power_ready_h' : 'flash_power_ready_h',
+        'flash_ctrl.obs_ctrl'            : 'obs_ctrl',
+        'flash_ctrl.fla_obs'             : 'flash_obs',
+        'peri.tl_ast'                    : 'ast_tl',
+        'pinmux.dft_strap_test'          : 'dft_strap_test'
+        'pinmux.dft_hold_tap_sel'        : 'dft_hold_tap_sel',
+        'pinmux.usb_dppullup_en'         : 'usb_dp_pullup_en',
+        'pinmux.usb_dnpullup_en'         : 'usb_dn_pullup_en',
+        'pwrmgr.pwr_ast'                 : 'pwrmgr_ast',
+        'rstmgr.por_n'                   : 'por_n',
+        'rstmgr.resets'                  : '',
+        'rstmgr.rst_en'                  : '',
+        'usbdev.usb_rx_d'                : '',
+        'usbdev.usb_tx_d'                : '',
+        'usbdev.usb_tx_se0'              : '',
+        'usbdev.usb_tx_use_d_se0'        : '',
+        'usbdev.usb_rx_enable'           : '',
         'usbdev.usb_ref_val'             : '',
         'usbdev.usb_ref_pulse'           : '',
         'spi_device.sck_monitor'         : 'sck_monitor',
@@ -666,25 +816,25 @@
       reset_connections: {rst_main_ni: "sys", rst_fixed_ni: "sys_io_div4"}
     },
     { name: "peri",
-      clock_srcs: {clk_peri_i: "io_div4", clk_spi_host0_i: "io"},
+      clock_srcs: {clk_peri_i: "io_div4", clk_spi_host0_i: "io", clk_usb_i: "usb"},
       clock_group: "infra",
       reset: "sys_io_div4",
-      reset_connections: {rst_peri_ni: "sys_io_div4", rst_spi_host0_ni: "spi_host0"},
+      reset_connections: {rst_peri_ni: "sys_io_div4", rst_spi_host0_ni: "spi_host0", rst_usb_ni: "usb"},
     }
   ],
 
   // Modules whose interrupts are connected to RV_PLIC.
   interrupt_module: [
     "uart0",
-    "gpio",
+    "uart1",
+    "gpio0",
     "spi_device",
     "spi_host0",
     // "rv_timer", connected to a dedicated interrupt input in rv_core_ibex.
     "usbdev",
-    "pwrmgr_aon",
-    "aon_timer_aon",
+    "pwrmgr",
+    "aon_timer",
     "flash_ctrl",
-    "hmac",
   ]
 
   // ===== PINMUX & PINOUT ======================================================
@@ -843,16 +993,22 @@
       { instance: 'spi_device',      port: 'sd[2]', connection: 'direct', pad: 'SPI_DEV_D2'   , desc: ''},
       { instance: 'spi_device',      port: 'sd[3]', connection: 'direct', pad: 'SPI_DEV_D3'   , desc: ''},
       // USBDEV
-      { instance: 'usbdev',          port: '',      connection: 'manual', pad: ''             , desc: '', attr: 'BidirTol'},
+      { instance: 'usbdev',          port: 'usb_dp', connection: 'manual', pad: ''             , desc: ''},
+      { instance: 'usbdev',          port: 'usb_dn', connection: 'manual', pad: ''             , desc: ''},
       // MIOs
-      { instance: "gpio",            port: '',      connection: 'muxed' , pad: ''             , desc: ''},
+      { instance: "gpio0",           port: '',      connection: 'muxed' , pad: ''             , desc: ''},
       { instance: "uart0",           port: '',      connection: 'muxed' , pad: ''             , desc: ''},
+      { instance: "uart1",           port: '',      connection: 'muxed' , pad: ''             , desc: ''},
       { instance: "flash_ctrl",      port: '',      connection: 'muxed' , pad: ''             , desc: ''},
+      { instance: 'usbdev',          port: 'sense', connection: 'muxed' , pad: ''             , desc: ''},
     ],
 
     // Number of wakeup detectors to instantiate, and bitwidth for the wakeup counters.
     num_wkup_detect: 8
     wkup_cnt_width:  8
+    // Enable USB wakeup and hardware strap sampling for discrete OpenTitan
+    enable_usb_wakeup: true
+    enable_strap_sampling: true
   }
 
   // Implementation targets.
@@ -869,7 +1025,30 @@
   // setups may differ among the targets.
   targets: [
     { name: 'cw305',
+
+      // Chip level changes
+      chiplevel: {
+        port_overrides: {
+          'pinmux.dft_hold_tap_sel'        : { unused: true },
+          'pinmux.dft_strap_test'          : { unused: true },
+          'pinmux.usb_dppullup_en'         : { signal: 'usb_dp_pullup_en' },
+          'pinmux.usb_dnpullup_en'         : { signal: 'usb_dn_pullup_en' },
+          'clkmgr.cg_en'                   : { unused: true },
+          'rstmgr.rst_en'                  : { unused: true },
+          'usbdev.usb_tx_d'                : { unused: true },
+          'usbdev.usb_tx_se0'              : { unused: true },
+          'usbdev.usb_tx_use_d_se0'        : { unused: true },
+          'usbdev.usb_rx_d'                : { unused: true },
+          'usbdev.usb_rx_enable'           : { unused: true },
+          'usbdev.usb_ref_val'             : { signal: 'usb_ref_val'   },
+          'usbdev.usb_ref_pulse'           : { signal: 'usb_ref_pulse' },
+          'flash_ctrl.flash_power_down_h'  : { unused: true },
+          'flash_ctrl.flash_power_ready_h' : { unused: true, tie_value: "1'b1" },
+        }
+      }
+
       pinout: {
+        remove_ports: [],
         remove_pads: [
           'CC1', 'CC2',
           'SPI_DEV_D2', 'SPI_DEV_D3'
@@ -877,15 +1056,15 @@
           'SPI_HOST_D0', 'SPI_HOST_D1', 'SPI_HOST_D2', 'SPI_HOST_D3',
           'FLASH_TEST_VOLT',
           'FLASH_TEST_MODE0', 'FLASH_TEST_MODE1',
-          'IOB10', 'IOB11', 'IOB12',
-          'IOC0', 'IOC1', 'IOC2', 'IOC3', 'IOC4', 'IOC5', 'IOC6', 'IOC7', 'IOC8', 'IOC9', 'IOC12',
-          'IOR0', 'IOR1', 'IOR2', 'IOR3', 'IOR4', 'IOR5', 'IOR6', 'IOR7', 'IOR10', 'IOR11', 'IOR12', 'IOR13'
+          'IOB7', 'IOB8', 'IOB9', 'IOB10', 'IOB11', 'IOB12',
+          'IOC6', 'IOC7', 'IOC9', 'IOC10', 'IOC11', 'IOC12',
+          'IOR0', 'IOR1', 'IOR2', 'IOR3', 'IOR5', 'IOR6', 'IOR7', 'IOR10', 'IOR11', 'IOR12', 'IOR13'
         ],
 
         add_pads: [
-          // Additional infrastucture pads
+          // Additional infrastructure pads
           { name: 'IO_CLK',           type: 'InputStd', bank: 'VCC', connection: 'manual', desc: 'Extra clock input for FPGA target'}
-          { name: 'IO_JSRST_N',       type: 'InputStd', bank: 'VCC', connection: 'manual', desc: 'Dedicated JTAG system reset input'}
+          { name: 'POR_BUTTON_N',     type: 'InputStd', bank: 'VCC', connection: 'manual', desc: 'POR from the push-button'}
           // Custom USB pads
           { name: 'IO_USB_SENSE0',    type: 'BidirStd', bank: 'VCC', connection: 'manual', desc: 'Manual USB signal for FPGA target'}
           { name: 'IO_USB_DNPULLUP0', type: 'BidirStd', bank: 'VCC', connection: 'manual', desc: 'Manual USB signal for FPGA target'}
@@ -893,21 +1072,71 @@
           // ChipWhisperer IO
           { name: 'IO_CLKOUT',        type: 'BidirStd', bank: 'VCC', connection: 'manual', desc: 'Manual clock output for SCA setup'}
           { name: 'IO_TRIGGER',       type: 'BidirStd', bank: 'VCC', connection: 'manual', desc: 'Manual trigger output for SCA setup'}
-          { name: 'IO_UTX_DEBUG',     type: 'BidirStd', bank: 'VCC', connection: 'manual', desc: 'Manual UART TX debug output'}
         ],
       }
 
       pinmux: {
         special_signals: [
           // Straps
-          { name: 'tap0',   pad: 'IOC0' ,        desc: 'TAP strap signal, maps to a stubbed-off MIO.'  },
-          { name: 'tap1',   pad: 'IOB7',         desc: 'TAP strap signal, maps to MIO pad 16.'         },
-          { name: 'dft0',   pad: 'IOC1' ,        desc: 'DFT strap signal, maps to a stubbed-off MIO.'  },
-          { name: 'dft1',   pad: 'IOC12',        desc: 'DFT strap signal, maps to a stubbed-off MIO.'  },
+          { name: 'tap0',   pad: 'IOC8',         desc: 'TAP strap signal.'                       },
+          { name: 'tap1',   pad: 'IOC5',         desc: 'TAP strap signal.'                       },
+          { name: 'dft0',   pad: 'IOR5',         desc: 'DFT strap signal.'                       },
+          { name: 'dft1',   pad: 'IOR7',         desc: 'DFT strap signal.'                       },
           // JTAG
           { name: 'tck',    pad: 'SPI_DEV_CLK' , desc: 'JTAG tck signal, overlaid on SPI_DEV.'   },
           { name: 'tms',    pad: 'SPI_DEV_CS_L', desc: 'JTAG tms signal, overlaid on SPI_DEV.'   },
-          { name: 'trst_n', pad: 'IOB9'        , desc: 'JTAG trst_n signal, maps to MIO pad 18.' },
+          { name: 'trst_n', pad: 'IOR4',         desc: 'JTAG trst_n signal.'                     },
+          { name: 'tdi',    pad: 'SPI_DEV_D0'  , desc: 'JTAG tdi signal, overlaid on SPI_DEV.'   },
+          { name: 'tdo',    pad: 'SPI_DEV_D1'  , desc: 'JTAG tdo signal, overlaid on SPI_DEV.'   },
+        ],
+      }
+    },
+    { name: 'verilator',
+
+      // The verilator chip-level has no physical pads: The flat per-peripheral
+      // signals are connected to the testbench DPI models through the
+      // padring_verilator module. As in the earlgrey verilator target, only the
+      // USB signals observed/driven by the usbdpi model are overridden; all
+      // other signals (incl. the USB Dn pull-up, the DFT strap test bus and the
+      // AST-driven flash power controls) flow through the common ASIC path so
+      // they are driven/consumed identically to the earlgrey verilator top.
+      chiplevel: {
+        port_overrides: {
+          'pinmux.dft_hold_tap_sel' : { unused: true              },
+          'pinmux.usb_dppullup_en'  : { signal: 'usb_dp_pullup_en'},
+          'pinmux.usb_dnpullup_en'  : { signal: 'usb_dn_pullup_en'},
+          'clkmgr.cg_en'            : { unused: true              },
+          'rstmgr.rst_en'           : { unused: true              },
+          'usbdev.usb_rx_d'         : { signal: 'usb_rx_d'        },
+          'usbdev.usb_rx_enable'    : { signal: 'usb_rx_enable'   },
+          'usbdev.usb_tx_d'         : { signal: 'usb_tx_d'        },
+          'usbdev.usb_tx_se0'       : { signal: 'usb_tx_se0'      },
+          'usbdev.usb_tx_use_d_se0' : { signal: 'usb_tx_use_d_se0'},
+          'usbdev.usb_ref_val'      : { signal: 'usb_ref_val'     },
+          'usbdev.usb_ref_pulse'    : { signal: 'usb_ref_pulse'   },
+        }
+      }
+
+      // The verilator target has no physical pads, so there is nothing to
+      // remove or add here.
+      pinout: {
+        remove_ports: [],
+        remove_pads: [],
+        add_pads: [],
+      }
+
+      pinmux: {
+        // Same special signal (JTAG / strap) positions as the cw305 target.
+        special_signals: [
+          // Straps
+          { name: 'tap0',   pad: 'IOC8',         desc: 'TAP strap signal.'                       },
+          { name: 'tap1',   pad: 'IOC5',         desc: 'TAP strap signal.'                       },
+          { name: 'dft0',   pad: 'IOR5',         desc: 'DFT strap signal.'                       },
+          { name: 'dft1',   pad: 'IOR7',         desc: 'DFT strap signal.'                       },
+          // JTAG
+          { name: 'tck',    pad: 'SPI_DEV_CLK' , desc: 'JTAG tck signal, overlaid on SPI_DEV.'   },
+          { name: 'tms',    pad: 'SPI_DEV_CS_L', desc: 'JTAG tms signal, overlaid on SPI_DEV.'   },
+          { name: 'trst_n', pad: 'IOR4',         desc: 'JTAG trst_n signal.'                     },
           { name: 'tdi',    pad: 'SPI_DEV_D0'  , desc: 'JTAG tdi signal, overlaid on SPI_DEV.'   },
           { name: 'tdo',    pad: 'SPI_DEV_D1'  , desc: 'JTAG tdo signal, overlaid on SPI_DEV.'   },
         ],

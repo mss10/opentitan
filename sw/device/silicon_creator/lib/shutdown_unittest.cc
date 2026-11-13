@@ -1,27 +1,31 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "sw/device/silicon_creator/lib/shutdown.h"
 
+#include <array>
+
 #include "gtest/gtest.h"
+#include "hw/top/dt/lc_ctrl.h"
+#include "hw/top/dt/otp_ctrl.h"
+#include "hw/top/dt/rv_core_ibex.h"
+#include "sw/device/lib/base/global_mock.h"
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/base/mmio.h"
-#include "sw/device/silicon_creator/lib/base/mock_abs_mmio.h"
+#include "sw/device/lib/base/mock_abs_mmio.h"
 #include "sw/device/silicon_creator/lib/drivers/lifecycle.h"
 #include "sw/device/silicon_creator/lib/drivers/mock_alert.h"
 #include "sw/device/silicon_creator/lib/drivers/mock_otp.h"
 #include "sw/device/silicon_creator/lib/error.h"
-#include "sw/device/silicon_creator/testing/mask_rom_test.h"
+#include "sw/device/silicon_creator/testing/rom_test.h"
 
-#include "alert_handler_regs.h"
-#include "flash_ctrl_regs.h"
+#include "hw/top/alert_handler_regs.h"
+#include "hw/top/flash_ctrl_regs.h"
+#include "hw/top/lc_ctrl_regs.h"
+#include "hw/top/otp_ctrl_regs.h"
+#include "hw/top/rv_core_ibex_regs.h"
 #include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
-#include "lc_ctrl_regs.h"
-#include "otp_ctrl_regs.h"
-
-// FIXME: I can't get ARRAYSIZE from `memory.h` because the definitions of
-// memcpy and friends there conflict with the standard definitions.
-#define ARRAYSIZE(x) ((sizeof x) / (sizeof x[0]))
 
 namespace shutdown_unittest {
 
@@ -31,45 +35,44 @@ using ::testing::Return;
 using ::testing::Test;
 
 namespace {
-extern "C" {
-// Dummy out base_printf.
-int base_printf(const char *fmt, ...) { return 0; }
-}  // extern "C"
 
-// TODO(lowRISC/opentitan#7148): Refactor mocks into their own headers.
 namespace internal {
-// Create a mock for shutdown functions.
-class MockShutdown : public ::mask_rom_test::GlobalMock<MockShutdown> {
+// Create a mock for internal shutdown functions.
+class MockShutdownImpl : public ::global_mock::GlobalMock<MockShutdownImpl> {
  public:
   MOCK_METHOD(void, shutdown_report_error, (rom_error_t));
   MOCK_METHOD(void, shutdown_software_escalate, ());
-  MOCK_METHOD(void, shutdown_keymgr_kill, ());
-  MOCK_METHOD(void, shutdown_flash_kill, ());
+  MOCK_METHOD(void, shutdown_keymgr_dpe_kill, ());
+  MOCK_METHOD(void, shutdown_reset, ());
+  MOCK_METHOD(void, shutdown_nvm_kill, ());
   MOCK_METHOD(void, shutdown_hang, ());
-
- protected:
-  mask_rom_test::MockAbsMmio mmio_;
 };
 
 }  // namespace internal
-using MockShutdown = testing::StrictMock<internal::MockShutdown>;
+using MockShutdownImpl = testing::StrictMock<internal::MockShutdownImpl>;
 extern "C" {
 void shutdown_report_error(rom_error_t error) {
-  return MockShutdown::Instance().shutdown_report_error(error);
+  return MockShutdownImpl::Instance().shutdown_report_error(error);
 }
 void shutdown_software_escalate(void) {
-  return MockShutdown::Instance().shutdown_software_escalate();
+  return MockShutdownImpl::Instance().shutdown_software_escalate();
 }
-void shutdown_keymgr_kill(void) {
-  return MockShutdown::Instance().shutdown_keymgr_kill();
+void shutdown_keymgr_dpe_kill(void) {
+  return MockShutdownImpl::Instance().shutdown_keymgr_dpe_kill();
 }
-void shutdown_flash_kill(void) {
-  return MockShutdown::Instance().shutdown_flash_kill();
+void shutdown_reset(void) {
+  return MockShutdownImpl::Instance().shutdown_reset();
 }
-void shutdown_hang(void) { return MockShutdown::Instance().shutdown_hang(); }
+void shutdown_nvm_kill(void) {
+  return MockShutdownImpl::Instance().shutdown_nvm_kill();
+}
+void shutdown_hang(void) {
+  return MockShutdownImpl::Instance().shutdown_hang();
+}
 
 // Real implementations of the above mocks.
-extern void unmocked_shutdown_flash_kill(void);
+extern void unmocked_shutdown_nvm_kill(void);
+extern void unmocked_shutdown_software_escalate(void);
 }  // extern "C"
 
 constexpr uint32_t Pack32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
@@ -77,17 +80,15 @@ constexpr uint32_t Pack32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   return result;
 }
 
-#define FULL(name, prod, prodend, dev, rma)                          \
-  {                                                                  \
-    name, kAlertClass##prod, kAlertClass##prodend, kAlertClass##dev, \
-        kAlertClass##rma                                             \
-  }
+#define FULL(name, prod, prodend, dev, rma)                         \
+  {name, kAlertClass##prod, kAlertClass##prodend, kAlertClass##dev, \
+   kAlertClass##rma}
 
 #define CLASSIFY(name, prod, prodend, dev, rma)                     \
   Pack32(kAlertClass##prod, kAlertClass##prodend, kAlertClass##dev, \
          kAlertClass##rma)
 
-// This alert configuration is described in the Mask ROM Shutdown specification:
+// This alert configuration is described in the ROM Shutdown specification:
 // https://docs.google.com/document/d/1V8hRvQnJhsvddieJbRHS3azbPZvoBWxfxPZV_0YA1QU/edit#
 // Dummy alerts have been added to prevent the tests breaking when new alerts
 // are added (see #7183). These lists of alerts and local alerts are for test
@@ -105,35 +106,33 @@ constexpr uint32_t Pack32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
       Xmacro("I2c0FatalFault",                 C, C, X, X), \
       Xmacro("I2c1FatalFault",                 C, C, X, X), \
       Xmacro("I2c2FatalFault",                 C, C, X, X), \
-      Xmacro("PattgenFatalFault",              C, C, X, X), \
       Xmacro("OtpCtrlFatalMacroError",         A, A, X, X), \
       Xmacro("OtpCtrlFatalCheckError",         A, A, X, X), \
       Xmacro("LcCtrlFatalProgError",           A, A, X, X), \
       Xmacro("LcCtrlFatalStateError",          A, A, X, X), \
       Xmacro("LcCtrlFatalBusIntegError",       A, A, X, X), \
-      Xmacro("PwrmgrAonFatalFault",            C, C, X, X), \
-      Xmacro("RstmgrAonFatalFault",            C, C, X, X), \
-      Xmacro("ClkmgrAonFatalFault",            C, C, X, X), \
-      Xmacro("SysrstCtrlAonFatalFault",        C, C, X, X), \
-      Xmacro("AdcCtrlAonFatalFault",           C, C, X, X), \
-      Xmacro("PwmAonFatalFault",               C, C, X, X), \
-      Xmacro("PinmuxAonFatalFault",            C, C, X, X), \
-      Xmacro("AonTimerAonFatalFault",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovAs",           B, B, X, X), \
-      Xmacro("SensorCtrlAonRecovCg",           C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovGd",           C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovTsHi",         C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovTsLo",         C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovFla",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOtp",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt0",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt1",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt2",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt3",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt4",          C, C, X, X), \
-      Xmacro("SensorCtrlAonRecovOt5",          C, C, X, X), \
-      Xmacro("SramCtrlRetAonFatalIntgError",   B, B, X, X), \
-      Xmacro("SramCtrlRetAonFatalParityError", B, B, X, X), \
+      Xmacro("PwrmgrFatalFault",            C, C, X, X), \
+      Xmacro("RstmgrFatalFault",            C, C, X, X), \
+      Xmacro("ClkmgrFatalFault",            C, C, X, X), \
+      Xmacro("SysrstCtrlFatalFault",        C, C, X, X), \
+      Xmacro("AdcCtrlFatalFault",           C, C, X, X), \
+      Xmacro("PinmuxFatalFault",            C, C, X, X), \
+      Xmacro("AonTimerFatalFault",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovAs",           B, B, X, X), \
+      Xmacro("SensorCtrlRecovCg",           C, C, X, X), \
+      Xmacro("SensorCtrlRecovGd",           C, C, X, X), \
+      Xmacro("SensorCtrlRecovTsHi",         C, C, X, X), \
+      Xmacro("SensorCtrlRecovTsLo",         C, C, X, X), \
+      Xmacro("SensorCtrlRecovFla",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOtp",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt0",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt1",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt2",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt3",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt4",          C, C, X, X), \
+      Xmacro("SensorCtrlRecovOt5",          C, C, X, X), \
+      Xmacro("SramCtrlRetFatalIntgError",   B, B, X, X), \
+      Xmacro("SramCtrlRetFatalParityError", B, B, X, X), \
       Xmacro("FlashCtrlRecovErr",              D, D, X, X), \
       Xmacro("FlashCtrlRecovMpErr",            D, D, X, X), \
       Xmacro("FlashCtrlRecovEccErr",           D, D, X, X), \
@@ -155,6 +154,8 @@ constexpr uint32_t Pack32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
       Xmacro("OtbnFatal",                      A, A, X, X), \
       Xmacro("OtbnRecov",                      D, D, X, X), \
       Xmacro("RomCtrlFatal",                   A, A, X, X), \
+      Xmacro("Dummy59",                        X, X, X, X), \
+      Xmacro("Dummy60",                        X, X, X, X), \
       Xmacro("Dummy61",                        X, X, X, X), \
       Xmacro("Dummy62",                        X, X, X, X), \
       Xmacro("Dummy63",                        X, X, X, X), \
@@ -194,11 +195,9 @@ constexpr uint32_t Pack32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
       Xmacro("LocDummy15",                     X, X, X, X),
 // clang-format on
 
-// TODO: adjust this to match the OTP layout in PR#6921.
 struct OtpConfiguration {
   uint32_t rom_error_reporting;
   uint32_t rom_bootstrap_en;
-  uint32_t rom_fault_response;
   uint32_t rom_alert_class_en;
   uint32_t rom_alert_escalation;
   uint32_t rom_alert_classification[80];
@@ -219,7 +218,6 @@ struct DefaultAlertClassification {
 constexpr OtpConfiguration kOtpConfig = {
     .rom_error_reporting = (uint32_t)kShutdownErrorRedactNone,
     .rom_bootstrap_en = 1,
-    .rom_fault_response = 0,
     .rom_alert_class_en = Pack32(kAlertEnableLocked, kAlertEnableEnabled,
                                  kAlertEnableNone, kAlertEnableNone),
     .rom_alert_escalation = Pack32(kAlertEscalatePhase3, kAlertEscalatePhase3,
@@ -241,20 +239,22 @@ constexpr DefaultAlertClassification kDefaultAlertClassification[] = {
     ALERTS(FULL),
 };
 static_assert(ARRAYSIZE(kDefaultAlertClassification) <=
-                  (OTP_CTRL_PARAM_ROM_ALERT_CLASSIFICATION_SIZE / 4),
+                  (OTP_CTRL_PARAM_OWNER_SW_CFG_ROM_ALERT_CLASSIFICATION_SIZE /
+                   4),
               "The default alert classification must be less than or equal to "
               "the number of reserved OTP words");
 
-static_assert(kTopEarlgreyAlertIdLast < ARRAYSIZE(kDefaultAlertClassification),
+static_assert(kDtAlertCount <= ARRAYSIZE(kDefaultAlertClassification),
               "The number of alert sources must be smaller than the alert "
               "classification");
 
 constexpr DefaultAlertClassification kDefaultLocAlertClassification[] = {
     LOC_ALERTS(FULL)};
-static_assert(ARRAYSIZE(kDefaultLocAlertClassification) <=
-                  (OTP_CTRL_PARAM_ROM_LOCAL_ALERT_CLASSIFICATION_SIZE / 4),
-              "The default local alert classification must be less than or "
-              "equal to the number of reserved OTP words");
+static_assert(
+    ARRAYSIZE(kDefaultLocAlertClassification) <=
+        (OTP_CTRL_PARAM_OWNER_SW_CFG_ROM_LOCAL_ALERT_CLASSIFICATION_SIZE / 4),
+    "The default local alert classification must be less than or "
+    "equal to the number of reserved OTP words");
 
 constexpr alert_class_t kClasses[] = {
     kAlertClassA,
@@ -299,7 +299,7 @@ alert_escalate_t RomAlertClassEscalation(alert_class_t cls) {
   }
 }
 
-class ShutdownTest : public mask_rom_test::MaskRomTest {
+class ShutdownTest : public rom_test::RomTest {
  protected:
   void SetupOtpReads() {
     // Make OTP reads retrieve their values from `otp_config_`.
@@ -348,12 +348,26 @@ class ShutdownTest : public mask_rom_test::MaskRomTest {
         }));
   }
 
+  // Expect a call to `shutdown_finalize`.
+  void ExpectFinalize(rom_error_t error) {
+    // In the RV32 environment, finalize should never return.
+    // In the X86_64 unittest environment, verify that all of the various
+    // kill functions were called.
+    EXPECT_CALL(shutdown_, shutdown_report_error(error));
+    EXPECT_CALL(shutdown_, shutdown_software_escalate());
+    EXPECT_CALL(shutdown_, shutdown_keymgr_dpe_kill());
+    EXPECT_CALL(shutdown_, shutdown_reset());
+    EXPECT_CALL(shutdown_, shutdown_nvm_kill());
+    EXPECT_CALL(shutdown_, shutdown_hang());
+  }
+
   OtpConfiguration otp_config_ = kOtpConfig;
   // Use NiceMock because we aren't interested in the specifics of OTP reads,
   // but we want to mock out calls to otp_read32.
-  mask_rom_test::NiceMockOtp otp_;
-  MockShutdown shutdown_;
-  mask_rom_test::MockAlert alert_;
+  rom_test::NiceMockOtp otp_;
+  MockShutdownImpl shutdown_;
+  rom_test::MockAlert alert_;
+  rom_test::MockAbsMmio mmio_;
 };
 
 TEST_F(ShutdownTest, InitializeProd) {
@@ -494,32 +508,42 @@ TEST_F(ShutdownTest, InitializeRma) {
 TEST_F(ShutdownTest, RedactPolicyManufacturing) {
   // Devices in manufacturing or RMA states should not redact errors regardless
   // of the redaction level set by OTP.
-  constexpr auto kManufacturingStates = std::array<lifecycle_state_t, 10>{
-      kLcStateRaw,           kLcStateTestUnlocked0,
-      kLcStateTestUnlocked1, kLcStateTestUnlocked2,
-      kLcStateTestUnlocked3, kLcStateTestUnlocked4,
-      kLcStateTestUnlocked5, kLcStateTestUnlocked6,
-      kLcStateTestUnlocked7, kLcStateRma};
+  constexpr std::array<uint32_t, 9> kManufacturingStates = {
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED0,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED1,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED2,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED3,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED4,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED5,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED6,
+      LC_CTRL_LC_STATE_STATE_VALUE_TEST_UNLOCKED7,
+      LC_CTRL_LC_STATE_STATE_VALUE_RMA,
+  };
+  const uint32_t lc_ctrl_base = dt_lc_ctrl_primary_reg_block(kDtLcCtrl);
   for (const auto state : kManufacturingStates) {
-    EXPECT_ABS_READ32(
-        TOP_EARLGREY_LC_CTRL_BASE_ADDR + LC_CTRL_LC_STATE_REG_OFFSET,
-        static_cast<uint32_t>(state));
+    EXPECT_ABS_READ32(lc_ctrl_base + LC_CTRL_LC_STATE_REG_OFFSET,
+                      static_cast<uint32_t>(state));
     EXPECT_EQ(shutdown_redact_policy(), kShutdownErrorRedactNone);
   }
 }
 
 TEST_F(ShutdownTest, RedactPolicyProduction) {
   // Production states should read redaction level from OTP.
-  constexpr auto kProductionStates = std::array<lifecycle_state_t, 3>{
-      kLcStateProd, kLcStateProdEnd, kLcStateDev};
+  constexpr std::array<uint32_t, 3> kProductionStates = {
+      LC_CTRL_LC_STATE_STATE_VALUE_DEV,
+      LC_CTRL_LC_STATE_STATE_VALUE_PROD,
+      LC_CTRL_LC_STATE_STATE_VALUE_PROD_END,
+  };
+  const uint32_t lc_ctrl_base = dt_lc_ctrl_primary_reg_block(kDtLcCtrl);
+  const uint32_t otp_ctrl_base = dt_otp_ctrl_primary_reg_block(kDtOtpCtrl);
+
   for (const auto state : kProductionStates) {
+    EXPECT_ABS_READ32(lc_ctrl_base + LC_CTRL_LC_STATE_REG_OFFSET,
+                      static_cast<uint32_t>(state));
     EXPECT_ABS_READ32(
-        TOP_EARLGREY_LC_CTRL_BASE_ADDR + LC_CTRL_LC_STATE_REG_OFFSET,
-        static_cast<uint32_t>(state));
-    EXPECT_ABS_READ32(TOP_EARLGREY_OTP_CTRL_CORE_BASE_ADDR +
-                          OTP_CTRL_SW_CFG_WINDOW_REG_OFFSET +
-                          OTP_CTRL_PARAM_ROM_ERROR_REPORTING_OFFSET,
-                      static_cast<uint32_t>(kShutdownErrorRedactModule));
+        otp_ctrl_base + OTP_CTRL_SW_CFG_WINDOW_REG_OFFSET +
+            OTP_CTRL_PARAM_OWNER_SW_CFG_ROM_ERROR_REPORTING_OFFSET,
+        static_cast<uint32_t>(kShutdownErrorRedactModule));
     EXPECT_EQ(shutdown_redact_policy(), kShutdownErrorRedactModule);
   }
 }
@@ -527,17 +551,26 @@ TEST_F(ShutdownTest, RedactPolicyProduction) {
 TEST_F(ShutdownTest, RedactPolicyInvalid) {
   // Invalid states should result in the highest redaction level regardless of
   // the redaction level set by OTP.
-  constexpr auto kInvalidStates = std::array<lifecycle_state_t, 11>{
-      kLcStateTestLocked0, kLcStateTestLocked1, kLcStateTestLocked2,
-      kLcStateTestLocked3, kLcStateTestLocked4, kLcStateTestLocked5,
-      kLcStateTestLocked6, kLcStateScrap,       kLcStatePostTransition,
-      kLcStateEscalate,    kLcStateInvalid};
-  for (const auto state : kInvalidStates) {
-    EXPECT_ABS_READ32(
-        TOP_EARLGREY_LC_CTRL_BASE_ADDR + LC_CTRL_LC_STATE_REG_OFFSET,
-        static_cast<uint32_t>(state));
-    EXPECT_EQ(shutdown_redact_policy(), kShutdownErrorRedactAll);
-  }
+  const uint32_t lc_ctrl_base = dt_lc_ctrl_primary_reg_block(kDtLcCtrl);
+  EXPECT_ABS_READ32(lc_ctrl_base + LC_CTRL_LC_STATE_REG_OFFSET, 0);
+  EXPECT_EQ(shutdown_redact_policy(), kShutdownErrorRedactAll);
+}
+
+TEST_F(ShutdownTest, InitializeManufacturing) {
+  // OTP reads and alert setup should be skipped in the TEST_UNLOCKED lifecycle
+  // states.
+  EXPECT_EQ(shutdown_init(kLcStateTest), kErrorOk);
+}
+
+class ShutdownDeathTest : public ShutdownTest {};
+
+TEST_F(ShutdownDeathTest, InitializeInvalid) {
+  EXPECT_DEATH(
+      {
+        SetupOtpReads();
+        OT_DISCARD(shutdown_init(static_cast<lifecycle_state_t>(0)));
+      },
+      "");
 }
 
 TEST(ShutdownModule, RedactErrors) {
@@ -546,35 +579,44 @@ TEST(ShutdownModule, RedactErrors) {
   EXPECT_EQ(shutdown_redact(kErrorOk, kShutdownErrorRedactModule), 0);
   EXPECT_EQ(shutdown_redact(kErrorOk, kShutdownErrorRedactAll), 0);
 
-  EXPECT_EQ(shutdown_redact(kErrorUartBadBaudRate, kShutdownErrorRedactNone),
-            0x02554103);
-  EXPECT_EQ(shutdown_redact(kErrorUartBadBaudRate, kShutdownErrorRedactError),
-            0x00554103);
-  EXPECT_EQ(shutdown_redact(kErrorUartBadBaudRate, kShutdownErrorRedactModule),
-            0x00000003);
-  EXPECT_EQ(shutdown_redact(kErrorUartBadBaudRate, kShutdownErrorRedactAll),
-            0xFFFFFFFF);
+  rom_error_t error = static_cast<rom_error_t>(0xaabbccdd);
+  EXPECT_EQ(shutdown_redact(error, kShutdownErrorRedactNone), 0xaabbccdd);
+  EXPECT_EQ(shutdown_redact(error, kShutdownErrorRedactError), 0x00bbccdd);
+  EXPECT_EQ(shutdown_redact(error, kShutdownErrorRedactModule), 0x000000dd);
+  EXPECT_EQ(shutdown_redact(error, kShutdownErrorRedactAll), 0xffffffff);
 }
 
 TEST_F(ShutdownTest, ShutdownFinalize) {
   SetupOtpReads();
-  EXPECT_CALL(shutdown_, shutdown_report_error(kErrorUnknown));
-  EXPECT_CALL(shutdown_, shutdown_software_escalate());
-  EXPECT_CALL(shutdown_, shutdown_keymgr_kill());
-  EXPECT_CALL(shutdown_, shutdown_flash_kill());
-  EXPECT_CALL(shutdown_, shutdown_hang());
-
-  // In the RV32 environment, finalize should never return.
-  // In the X86_64 unittest environment, verify that all of the various
-  // kill functions were called.
+  ExpectFinalize(kErrorUnknown);
   shutdown_finalize(kErrorUnknown);
 }
 
-TEST_F(ShutdownTest, FlashKill) {
+TEST_F(ShutdownTest, NvmKill) {
+  // Host tests always build nvm_ctrl against the flash backend (USE_FLASH),
+  // independent of the selected top, so shutdown_nvm_kill() disables the
+  // flash controller here.
   EXPECT_ABS_WRITE32(
-      TOP_EARLGREY_FLASH_CTRL_CORE_BASE_ADDR + FLASH_CTRL_DIS_REG_OFFSET, 1);
-  unmocked_shutdown_flash_kill();
+      TOP_EARLGREY_FLASH_CTRL_CORE_BASE_ADDR + FLASH_CTRL_DIS_REG_OFFSET, 0);
+  unmocked_shutdown_nvm_kill();
 }
 
+TEST_F(ShutdownTest, ShutdownIfErrorOk) { SHUTDOWN_IF_ERROR(kErrorOk); }
+
+TEST_F(ShutdownTest, ShutdownIfErrorUnknown) {
+  EXPECT_DEATH(
+      {
+        ExpectFinalize(kErrorUnknown);
+        SHUTDOWN_IF_ERROR(kErrorUnknown);
+      },
+      "");
+}
+
+TEST_F(ShutdownTest, SoftwareEscalate) {
+  const uint32_t ibex_core_base =
+      dt_rv_core_ibex_primary_reg_block(kDtRvCoreIbex);
+  EXPECT_ABS_WRITE32(ibex_core_base + RV_CORE_IBEX_SW_FATAL_ERR_REG_OFFSET, 0);
+  unmocked_shutdown_software_escalate();
+}
 }  // namespace
 }  // namespace shutdown_unittest

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -55,7 +55,11 @@ class otbn_scoreboard extends cip_base_scoreboard #(
   bit pending_start_tl_trans = 1'b0;
 
   // The mirrored STATUS register from the ISS.
-  bit [7:0] model_status = 8'd0;
+  bit [7:0] model_status;
+
+  // The number of instructions that the model has reported since model_status last changed. This
+  // is used to check instructions reported when PAUSED (see process_model_fifo).
+  int unsigned num_insns_while_paused;
 
   // The "locked" field is used to track whether OTBN is "locked". For most operational state
   // tracking, we go through the ISS, but OTBN can become locked without actually starting an
@@ -64,12 +68,34 @@ class otbn_scoreboard extends cip_base_scoreboard #(
   // band'.
   bit locked = 1'b0;
 
+  // A counter for the number of fatal alerts that we've seen. This gets incremented by on_alert().
+  int unsigned fatal_alert_count = 0;
+  // A flag showing that we've seen a recoverable alert
+  bit          recov_alert_seen  = 1'b0;
+
+  // Flags saying that we expect alerts. These might be set (slightly) after an alert comes in and
+  // that's ok. We'll marry up the flags and the alerts themselves in the check phase. The
+  // *_alert_expected bits get cleared when we see the expected alert. The fatal_alert_allowed bit
+  // gets set at the same time as fatal_alert_expected but is not cleared: this represents the fact
+  // that fatal alerts are sent continuously.
+  bit fatal_alert_expected = 1'b0;
+  bit fatal_alert_allowed  = 1'b0;
+  bit recov_alert_expected = 1'b0;
+
+  // A counter giving how many "alert wait counters" are currently running. The scoreboard should
+  // object to ending the run phase if this is nonzero.
+  int unsigned num_alert_wait_counters = 0;
+
   `uvm_component_new
 
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
     model_fifo = new("model_fifo", this);
     trace_fifo = new("trace_fifo", this);
+
+    // Disable alert checking in cip_base_scoreboard (we've got a different system set up which
+    // handles the fact that we might not know that an alert should happen until after the fact).
+    do_alert_check = 1'b0;
   endfunction
 
   function void connect_phase(uvm_phase phase);
@@ -81,6 +107,8 @@ class otbn_scoreboard extends cip_base_scoreboard #(
     fork
       process_model_fifo();
       process_trace_fifo();
+      watch_escalate_if();
+      watch_rma_if();
     join_none
   endtask
 
@@ -91,11 +119,17 @@ class otbn_scoreboard extends cip_base_scoreboard #(
     // transaction, the reset will have caused them to be forgotten.
     exp_read_values.delete();
 
-    model_status = otbn_pkg::StatusIdle;
-    pending_start_tl_trans = 1'b0;
-
     // Clear the locked bit (this is modelling RTL state that should be cleared on reset)
     locked = 1'b0;
+
+    // Clear all alert counters and flags
+    fatal_alert_count = 0;
+    fatal_alert_expected = 1'b0;
+    fatal_alert_allowed  = 1'b0;
+    recov_alert_expected = 1'b0;
+
+    // Reset any state tracking in the coverage collector
+    if (cfg.en_cov) cov.on_reset();
   endfunction
 
   task process_tl_access(tl_seq_item item, tl_channels_e channel, string ral_name);
@@ -108,46 +142,88 @@ class otbn_scoreboard extends cip_base_scoreboard #(
 
   task process_tl_addr(tl_seq_item item);
     uvm_reg              csr;
-    uvm_reg_addr_t       csr_addr;
+    uvm_reg_addr_t       masked_addr, aligned_addr;
+    operational_state_e  state;
     otbn_exp_read_data_t exp_read_data = '{upd: 1'b0, chk: 'x, val: 'x};
 
-    csr_addr = ral.get_word_aligned_addr(item.a_addr);
-    csr = ral.default_map.get_reg_by_offset(csr_addr);
+    state = get_operational_state(status_e'(model_status));
 
-    // csr might be null and that's ok (it's probably a write to memory).
+    aligned_addr = ral.get_word_aligned_addr(item.a_addr);
+    masked_addr  = aligned_addr & ral.get_addr_mask();
+
+    // If coverage is enabled, track the write.
+    if (cfg.en_cov) cov.on_tl_write(masked_addr, item.a_data, state);
+
+    // Is this a write to memory (either DMEM or IMEM)?
+    if (item.is_write()) begin
+      uvm_mem mem = ral.default_map.get_mem_by_offset(aligned_addr);
+      if (mem != null) begin
+        uvm_reg_addr_t base = mem.get_offset(0, ral.default_map);
+        `DV_CHECK_FATAL(base <= masked_addr)
+        process_tl_mem_write(mem, masked_addr - base, item);
+      end
+    end
+
+    csr = ral.default_map.get_reg_by_offset(aligned_addr);
+
+    // csr might be null and that's ok (it just means an access to an unmapped register, which will
+    // have no effect)
     if (csr == null)
       return;
 
     if (item.is_write()) begin
-      // If this is a write, update the RAL model
-      void'(csr.predict(.value(item.a_data), .kind(UVM_PREDICT_WRITE), .be(item.a_mask)));
-
       // Track coverage for write accesses to external CSRs over TL-UL.
       if (cfg.en_cov) begin
-        cov.on_ext_csr_access(csr, otbn_env_pkg::AccessSoftwareWrite, item.a_data,
-                              cfg.controller_vif.get_operational_state());
+        cov.on_ext_csr_access(csr, otbn_env_pkg::AccessSoftwareWrite, item.a_data, state);
       end
+
+      // If this is a write, update the RAL model
+      void'(csr.predict(.value(item.a_data), .kind(UVM_PREDICT_WRITE), .be(item.a_mask)));
 
       case (csr.get_name())
         // Spot writes to the "cmd" register that tell us to start
         "cmd": begin
-          // We start the execution when we see a write of the EXECUTE command. See the comment
-          // above pending_start_tl_trans to see how this tracking works.
-          if (item.a_data == otbn_pkg::CmdExecute) begin
+          // We start any operation when we see a write of the related command and we are currently
+          // in the IDLE operational state. See the comment above pending_start_tl_trans to see how
+          // this tracking works.
+          bit cmd_operation = item.a_data[7:0] inside {otbn_pkg::CmdSecWipeImem,
+                                                       otbn_pkg::CmdSecWipeDmem,
+                                                       otbn_pkg::CmdExecute};
+          if (cmd_operation && (model_status == otbn_pkg::StatusIdle)) begin
             // Set a flag: we're expecting the model to start on the next posedge. Also, spawn off a
             // checking thread that will make sure the flag has been cleared again by the following
-            // posedge. Note that the reset() method is only called in the DV base class on the
+            // posedge (or the one after that in the case of memory secure wipe operations).
+            // Note that the reset() method is only called in the DV base class on the
             // following posedge of rst_n, so we have to check whether we're still in reset here.
             pending_start_tl_trans = 1'b1;
             fork begin
               repeat (2) @(cfg.clk_rst_vif.cb);
               `DV_CHECK_FATAL(!cfg.clk_rst_vif.rst_n || !pending_start_tl_trans,
-                              "Model ignored a write of EXECUTE to the CMD register.")
+                              "Model ignored a write to the CMD register.")
             end
             join_none;
           end
         end
-
+        "alert_test": begin
+          if (item.is_write && (item.a_data[0])) begin
+            expect_alert("fatal");
+          end
+          if (item.is_write && (item.a_data[1])) begin
+            expect_alert("recov");
+          end
+        end
+        "ctrl": begin
+          // Let model know that CTRL register has changed. This is not ideal since scoreboard
+          // ideally supposed be a passive component. Although we are still not affecting DUT in
+          // any way while doing this and an alternative way would include catching this register
+          // write in testbench level and sending a signal to otbn_core_model, which is not ideal
+          // as well.
+          if (item.is_write) begin
+            cfg.model_agent_cfg.vif.set_software_errs_fatal(item.a_data[0]);
+            cfg.model_agent_cfg.vif.set_wfi_enabled(item.a_data[1]);
+            cfg.model_agent_cfg.vif.set_urnd_ctrl_enabled(item.a_data[2]);
+          end
+        end
         default: begin
           // No other special behaviour for writes
         end
@@ -235,7 +311,7 @@ class otbn_scoreboard extends cip_base_scoreboard #(
     // Track coverage for read accesses through the bus to external CSRs.
     if (cfg.en_cov) begin
       cov.on_ext_csr_access(csr, otbn_env_pkg::AccessSoftwareRead, item.d_data,
-                            cfg.controller_vif.get_operational_state());
+                            get_operational_state(status_e'(model_status)));
     end
 
     // Look up the expected read data for item and then clear it (to get a quick error if something
@@ -252,8 +328,60 @@ class otbn_scoreboard extends cip_base_scoreboard #(
       end
       // Update the RAL model to match the value we've just read from HW
       void'(csr.predict(.value(item.d_data), .kind(UVM_PREDICT_READ)));
+    end else begin
+      // We don't predict any sort of hardware backdoor updates to this register so the mirrored
+      // value in the RAL should be correct. Is it?
+      `DV_CHECK_EQ(item.d_data, csr.get_mirrored_value(),
+                   $sformatf("value for auto-predicted register %0s", csr.get_full_name()))
     end
   endtask
+
+  // Called on each write to memory (on the A side). This is responsible for updating the model of
+  // the CRC register.
+  function void process_tl_mem_write(uvm_mem mem, bit [31:0] offset, tl_seq_item item);
+    bit            is_imem;
+    logic [14:0]   mem_idx;
+    logic [47:0]   crc_item;
+    uvm_reg_data_t old_crc;
+    bit [31:0]     new_crc;
+
+    // Ignore any partial or misaligned writes: these don't update the CRC.
+    if ((item.a_addr & 3) || (item.a_size != 2))
+      return;
+
+    // Build the 48-bit value that's supposed to be added to the CRC. This is built as the triple
+    // {imem, idx, wdata}, where imem is a 1-bit value showing whether this is IMEM, idx is the
+    // index of the 32-bit word in memory, zero-extended to 15 bits, and wdata is the 32-bit word
+    // that was written.
+    is_imem = mem.get_name() == "imem";
+    mem_idx = offset >> 2;
+    crc_item = {is_imem, mem_idx, item.a_data};
+    `uvm_info(`gfn,
+              $sformatf("Updating CRC with memory write: {%0d, 0x%0h, 0x%0h} = 0x%012h",
+                        is_imem, mem_idx, item.a_data, crc_item),
+              UVM_HIGH);
+    `DV_CHECK_FATAL(!$isunknown(crc_item))
+
+    // Grab the old modelled CRC value (which we store in the RAL as the predicted value for
+    // LOAD_CHECKSUM). This should be a 32-bit number and shouldn't have any unknown bits.
+    old_crc = ral.load_checksum.checksum.get_mirrored_value();
+    `DV_CHECK_FATAL(old_crc >> 32 == 0)
+    `DV_CHECK_FATAL(!$isunknown(old_crc))
+
+    new_crc = cfg.model_agent_cfg.vif.step_crc(crc_item, old_crc);
+
+    `uvm_info(`gfn,
+              $sformatf("CRC step: 0x%08h -> 0x%08h (or 0x%08h -> 0x%08h)",
+                        old_crc, new_crc, old_crc ^ {32{1'b1}}, new_crc ^ {32{1'b1}}),
+              UVM_HIGH);
+
+    if (cfg.en_cov) begin
+      cov.on_mem_write(mem, offset, item.a_data, get_operational_state(status_e'(model_status)));
+    end
+
+    // Predict the resulting value of LOAD_CHECKSUM
+    `DV_CHECK_FATAL(ral.load_checksum.checksum.predict(.value(new_crc), .kind(UVM_PREDICT_READ)))
+  endfunction
 
   task process_model_fifo();
     otbn_model_item item;
@@ -264,27 +392,78 @@ class otbn_scoreboard extends cip_base_scoreboard #(
 
       case (item.item_type)
         OtbnModelStatus: begin
+          bit was_executing = model_status inside {otbn_pkg::StatusBusyExecute,
+                                                   otbn_pkg::StatusBusySecWipeInt};
+          bit is_busy = otbn_pkg::is_busy_status(status_e'(item.status));
+
+          // Did the status change happen due to a reset? If so, reset the model status as well.
+          if (item.rst_n !== 1'b1) model_status = item.status;
+
           // Has the status changed from idle to busy? If so, we should have seen a write to the
-          // command register on the previous posedge. See comment above pending_start_tl_trans for
-          // the details.
-          if (model_status == otbn_pkg::StatusIdle &&
-              item.status inside {otbn_pkg::StatusBusyExecute,
-                                  otbn_pkg::StatusBusySecWipeDmem,
-                                  otbn_pkg::StatusBusySecWipeImem}) begin
-            `DV_CHECK_FATAL(pending_start_tl_trans,
+          // command register on the previous posedge or there should be an RMA request. See comment
+          // above pending_start_tl_trans for the details of how we track writes to the command
+          // register.
+          if (model_status == otbn_pkg::StatusIdle && is_busy) begin
+            `DV_CHECK_FATAL(pending_start_tl_trans || cfg.escalate_vif.req == lc_ctrl_pkg::On,
                             "Saw start transaction without corresponding write to CMD")
             pending_start_tl_trans = 1'b0;
           end
+
+          // Has the status changed to locked? This should be accompanied by a fatal alert unless
+          // this is in response to an RMA request (in which case, we shouldn't see an alert).
+          // Assuming that an RMA request won't be dropped after it takes effect, we can just check
+          // the escalation interface to see whether it is still high.
+          //
+          // We should also clear the pending_start_tl_trans flag if it is set. This would mean that
+          // we've seen a start request, but it's being ignored because the model locks instead of
+          // starting an execution.
+          if ((item.status == otbn_pkg::StatusLocked) &&
+              (cfg.escalate_vif.req != lc_ctrl_pkg::On)) begin
+            expect_alert("fatal");
+            pending_start_tl_trans = 1'b0;
+          end
+          // Has the status changed from executing to idle with a nonzero err_bits?
+          // If so, we should see a recoverable alert. Note that we are not expecting to catch
+          // recoverable alert when we do SecWipe of any kind.
+          if (was_executing && item.status == otbn_pkg::StatusIdle && item.err_bits != 0) begin
+            expect_alert("recov");
+          end
+
           model_status = item.status;
+          num_insns_while_paused = 0;
+
+          if (cfg.en_cov) begin
+            cov.on_state_change(status_e'(model_status));
+          end
         end
 
         OtbnModelInsn: begin
           // The model agent's monitor should be configured to only emit OtbnModelInsn items if
           // coverage is enabled.
           `DV_CHECK_FATAL(cfg.en_cov)
-          // We don't expect any instructions unless we're currently running something.
-          `DV_CHECK_EQ_FATAL(model_status, 1 /* BUSY_EXECUTE */,
-                             "Saw instruction when not in BUSY_EXECUTE operational state.")
+          // We don't expect any instructions unless we're currently running something. The
+          // exception is the end of a pause. A WFI instruction retires in the cycle that OTBN
+          // resumes, but the ISS's STATUS change is only visible two cycles later (STATUS is
+          // double-flopped, as in the RTL). The model monitor also reports instructions on the
+          // posedge and status changes on the negedge. So we can see the WFI and then one more
+          // instruction before the status change.
+          if (model_status == otbn_pkg::StatusPaused) begin
+            if (num_insns_while_paused == 0 && item.mnemonic != "wfi") begin
+              `uvm_error("non_wfi_when_paused",
+                         $sformatf("Saw an %0s instruction when PAUSED (but only expect 'wfi')",
+                                   item.mnemonic))
+            end
+            if (num_insns_while_paused >= 2) begin
+              `uvm_error("too_many_insns_when_paused",
+                         $sformatf({"Saw an %0s instruction when PAUSED (but only expect 'wfi' ",
+                                    "and at most one more instruction)"},
+                                   item.mnemonic))
+            end
+            num_insns_while_paused++;
+          end else begin
+            `DV_CHECK_EQ_FATAL(model_status, otbn_pkg::StatusBusyExecute,
+                               "Saw instruction when not in BUSY_EXECUTE operational state.")
+          end
 
           iss_trace_queue.push_back(item);
           pop_trace_queues();
@@ -318,5 +497,221 @@ class otbn_scoreboard extends cip_base_scoreboard #(
       cov.on_insn(iss_item, rtl_item);
     end
   endfunction
+
+  // Wait up to max_wait cycles for us to decide that we should be expecting the named alert. While
+  // this is running, num_alert_wait_counters will be positive which should mean that we object to
+  // end of the run phase.
+  protected task wait_for_expected_alert(string alert_name, int unsigned max_wait);
+    bit expected = 1'b0;
+
+    num_alert_wait_counters++;
+    for (int unsigned i = 0; i < max_wait; i++) begin
+      // Note that if we're waiting for a status change that implies a recoverable alert, we'll also
+      // accept one that implies a fatal alert. The reason is that you can trigger a recoverable
+      // alert and then, on the next cycle, a fatal alert. You'll only see one status change (from
+      // busy to locked), so the scoreboard has no way of knowing whether the recoverable alert was
+      // supposed to have happened. In practice, I suspect we don't care: if a fatal alert was
+      // raised, a recoverable alert doesn't really matter.
+      expected = ((alert_name == "recov") && recov_alert_expected) || fatal_alert_allowed;
+      if (expected || cfg.under_reset) begin
+        break;
+      end
+      @(cfg.clk_rst_vif.cb);
+    end
+    num_alert_wait_counters--;
+
+    if (cfg.under_reset) begin
+      // If we're in reset, exit immediately. No need to check anything or update any state, except
+      // that we have not seen a recoverable alert since the last reset.
+      recov_alert_seen = 1'b0;
+      return;
+    end
+
+    if (!expected) begin
+      `uvm_fatal(`gfn,
+                 $sformatf({"A %0s alert arrived %0d cycles ago and ",
+                            "we still don't think it should have done."},
+                           alert_name, max_wait))
+    end
+
+    if (alert_name == "fatal") begin
+      // If this is a fatal alert, check the counter is positive (otherwise something has gone really
+      // wrong), but leave it unchanged.
+      `DV_CHECK_FATAL((fatal_alert_count > 0) && fatal_alert_allowed)
+    end else begin
+      // Otherwise this was a recoverable alert. Check that the seen flag is set (this should have
+      // happened just before we were originally called) and then wait a cycle of the other clock
+      // before clearing it. This extra cycle is to allow the wait_for_alert() task which should be
+      // running at the same time to see the flag set.
+      `DV_CHECK_FATAL(recov_alert_seen)
+      @(cfg.m_alert_agent_cfgs[alert_name].vif.receiver_cb);
+      recov_alert_seen = 1'b0;
+    end
+  endtask
+
+  // Wait up to max_wait cycles on the alert interface for the named alert. While this is running,
+  // num_alert_wait_counters will be positive which should mean that we object to end of the run
+  // phase.
+  protected task wait_for_alert(string alert_name, int unsigned max_wait);
+    bit seen = 1'b0;
+
+    num_alert_wait_counters++;
+    for (int unsigned i = 0; i < max_wait; i++) begin
+      seen = (alert_name == "recov") ? recov_alert_seen : (fatal_alert_count > 0);
+      if (seen || cfg.under_reset) begin
+        break;
+      end
+      @(cfg.m_alert_agent_cfgs[alert_name].vif.receiver_cb);
+    end
+    num_alert_wait_counters--;
+
+    if (cfg.under_reset) begin
+      // If we're in reset, exit immediately. No need to check anything or update any state
+      return;
+    end
+
+    if (!seen) begin
+      `uvm_fatal(`gfn,
+                 $sformatf({"We saw a STATUS change %0d cycles ago that implied we'd ",
+                            "get a %0s alert but it still hasn't arrived."},
+                           max_wait, alert_name))
+    end
+
+    if (alert_name == "fatal") begin
+      // If this was a fatal alert then check the counter is positive and that the expected flag is
+      // set. Clear the "expected" flag, but not "allowed" (so that we won't see a problem when the
+      // fatal alert is re-triggered).
+      `DV_CHECK_FATAL((fatal_alert_count > 0) && fatal_alert_expected)
+      fatal_alert_expected = 1'b0;
+    end else begin
+      // Otherwise this was a recoverable alert. Check that the expected flag is set and then wait a
+      // cycle of the other clock before clearing it (to allow the wait_for_expected_alert() task
+      // that should be running at the same time to see it set).
+      `DV_CHECK_FATAL(recov_alert_expected)
+      @(cfg.clk_rst_vif.cb);
+      recov_alert_expected = 1'b0;
+    end
+  endtask
+
+  // Overridden from cip_base_scoreboard. Called when an alert happens.
+  function void on_alert(string alert_name, alert_agent_pkg::alert_seq_item item);
+
+    `uvm_info(`gfn, $sformatf("on_alert(%0s)", alert_name), UVM_HIGH)
+
+    // An alert has just come in. Increment counter / set flag showing that it has been seen.
+    if (alert_name == "fatal") begin
+      fatal_alert_count += 1;
+    end else if (alert_name == "recov") begin
+      // We're not supposed to see a second recoverable alert while we're still "waiting to expect"
+      // the previous one. If that happens then recov_alert_seen will be set.
+      `DV_CHECK_FATAL(!recov_alert_seen, "Double recoverable alert seen")
+      recov_alert_seen = 1'b1;
+    end
+    else `uvm_fatal(`gfn, $sformatf("Bad alert name: %0s", alert_name));
+
+    // Wait up to 4000 cycles for the prediction to come through (giving up on reset).  This is a
+    // long time, but that's needed because an error that comes in when we're running will cause an
+    // immediate alert but the status change will only appear after secure wipe is done.  A secure
+    // wipe includes a reseed of the URND, and the time for that depends on the EDN.  Note that
+    // the alert might be here already, in which case `wait_for_expected_alert` will take zero time.
+    fork
+      wait_for_expected_alert(alert_name, 4000);
+    join_none
+  endfunction
+
+  // Called when we see something that makes us think an alert should happen
+  protected function void expect_alert(string alert_name);
+    int unsigned max_delay;
+
+    `uvm_info(`gfn, $sformatf("expect_alert(%0s)", alert_name), UVM_HIGH)
+
+    if (alert_name == "fatal") begin
+      fatal_alert_expected = 1'b1;
+      fatal_alert_allowed  = 1'b1;
+    end else if (alert_name == "recov") begin
+      // We're not supposed to see an event that expects a second recoverable alert while we're
+      // still waiting for the previous one to arrive. If that happens then recov_alert_expected
+      // will be set.
+      `DV_CHECK_FATAL(!recov_alert_expected, "Double recoverable alert expect with no alert")
+      recov_alert_expected = 1'b1;
+    end
+    else `uvm_fatal(`gfn, $sformatf("Bad alert name: %0s", alert_name));
+
+    // Otherwise, we haven't seen the corresponding alert yet. Wait for a bit on the (slower) alert
+    // interface clock for the alert to come through, giving up on reset. The wait is calculated as
+    //
+    //    ack_delay_max +
+    //    ack_stable_max +
+    //    arbitrary delay for alert_p to go down +
+    //    2 cycles of main clock
+    //
+    // We model the 3rd and 4th term as 10 slow clock cycles in total, giving:
+    max_delay = (cfg.m_alert_agent_cfgs[alert_name].ack_delay_max +
+                 cfg.m_alert_agent_cfgs[alert_name].ack_stable_max +
+                 10);
+    fork
+      wait_for_alert(alert_name, max_delay);
+    join_none
+  endfunction
+
+  virtual function void phase_ready_to_end(uvm_phase phase);
+    if (phase.get_name() != "run") return;
+
+    // We cannot end while num_alert_wait_counters is positive (which means that wait_for_alert
+    // and/or wait_for_expected_alert are running). Wait until they are finished to make sure that
+    // we don't fail to notice a missing (or unjustified) alert.
+    if (num_alert_wait_counters != 0) begin
+      phase.raise_objection(this, "num_alert_wait_counters != 0");
+      fork
+        begin
+          wait (num_alert_wait_counters == 0);
+          phase.drop_objection(this);
+        end
+      join_none
+    end
+  endfunction
+
+  virtual function void mem_compare(string ral_name, uvm_reg_addr_t addr, tl_seq_item item);
+    // We can only compare the contents inside memories when the OTBN is not busy executing,
+    // paused or wiping the memories
+    if (model_status inside {otbn_pkg::StatusIdle, otbn_pkg::StatusPaused,
+                             otbn_pkg::StatusBusySecWipeInt}) begin
+      super.mem_compare(ral_name, addr, item);
+    // Otherwise the contents will read out as zeros so compare expected memory with zero.
+    end else begin
+      `DV_CHECK_EQ(item.d_data, '0, "Memory read out nonzero value while OTBN is not IDLE")
+    end
+  endfunction
+
+  virtual task process_mem_read(tl_seq_item item, string ral_name);
+    super.process_mem_read(item, ral_name);
+    if (model_status == 'b1 && item.d_data != 0) begin
+      `uvm_error(`gfn, "read data is non zero when memory is accessed while otbn is busy")
+    end
+  endtask
+
+  // This task watches the escalate interface and collects coverage whenever it changes
+  //
+  virtual task watch_escalate_if();
+    // The 'enable' signal is connected to the lc_escalate_en_i top-level input
+    forever begin
+      if (cfg.clk_rst_vif.rst_n) begin
+        if (cfg.en_cov) cov.escalate_en_cg.sample(cfg.escalate_vif.enable);
+      end
+      @(cfg.escalate_vif.enable or cfg.clk_rst_vif.rst_n);
+    end
+  endtask
+
+  // This task watches the rma interface and collects coverage whenever it changes
+  //
+  virtual task watch_rma_if();
+    // The 'req' signal is connected to the lc_rma_req_i top-level input
+    forever begin
+      if (cfg.clk_rst_vif.rst_n) begin
+        if (cfg.en_cov) cov.rma_req_cg.sample(cfg.escalate_vif.req);
+      end
+      @(cfg.escalate_vif.req or cfg.clk_rst_vif.rst_n);
+    end
+  endtask
 
 endclass

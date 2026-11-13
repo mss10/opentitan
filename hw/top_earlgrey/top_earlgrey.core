@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:systems:top_earlgrey:0.1"
@@ -7,20 +7,21 @@ description: "Technology-independent Earl Grey toplevel"
 filesets:
   files_rtl_generic:
     depend:
+      # Place the autogen packages first to avoid conflicts
+      - lowrisc:earlgrey_constants:top_racl_pkg
+      - lowrisc:earlgrey_ip:alert_handler_reg
+      - lowrisc:earlgrey_ip:otp_ctrl_macro_pkg
+      - lowrisc:earlgrey_ip:otp_ctrl_top_specific_pkg
+      - lowrisc:earlgrey_ip:pwrmgr_pkg
       - lowrisc:ip:uart:0.1
-      - lowrisc:opentitan:top_earlgrey_alert_handler
-      - lowrisc:ip:gpio
-      - lowrisc:ip:rv_core_ibex
       - lowrisc:ip:rv_dm
-      - lowrisc:opentitan:top_earlgrey_rv_plic
-      - lowrisc:ip:pinmux
       - lowrisc:ip:rv_timer
       - lowrisc:ip:tlul
+      - lowrisc:ip:cheriot_mem_sys
       - lowrisc:ip:spi_device
       - lowrisc:ip:spi_host
       - lowrisc:ip:i2c
-      - lowrisc:ip:pattgen
-      - lowrisc:ip:pwm
+      - lowrisc:ip:i3c
       - lowrisc:ip:aes
       - lowrisc:ip:entropy_src
       - lowrisc:ip:csrng
@@ -29,35 +30,52 @@ filesets:
       - lowrisc:ip:kmac
       - lowrisc:ip:otbn
       - lowrisc:prim:ram_1p_scr
-      - lowrisc:prim:flash
-      - lowrisc:ip:flash_ctrl
+      - lowrisc:ip:rram_ctrl
+      - lowrisc:virtual_ip:rram_macro
       - lowrisc:ip:sram_ctrl
-      - lowrisc:ip:keymgr
-      - lowrisc:constants:top_pkg
-      - lowrisc:ip:otp_ctrl
+      - lowrisc:ip:keymgr_dpe
+      - lowrisc:earlgrey_constants:top_pkg
+      - lowrisc:virtual_constants:top_earlgrey_jtag_id_pkg
+      - lowrisc:constants:top_earlgrey_ibex_pmp_reset_pkg
       - lowrisc:ip:lc_ctrl
       - lowrisc:ip:usbdev
       - lowrisc:top_earlgrey:xbar_main
       - lowrisc:top_earlgrey:xbar_peri
-      - lowrisc:ip:rstmgr
-      - lowrisc:ip:pwrmgr
+      - lowrisc:earlgrey_ip:alert_handler
+      - lowrisc:earlgrey_ip:clkmgr
+      - lowrisc:earlgrey_ip:gpio
+      - lowrisc:earlgrey_ip:otp_ctrl
+      - lowrisc:earlgrey_ip:pinmux
+      - lowrisc:earlgrey_ip:pwrmgr
+      - lowrisc:earlgrey_ip:rstmgr
+      - lowrisc:earlgrey_ip:rv_plic
+      - lowrisc:earlgrey_ip:rv_core_ibex
       - lowrisc:ip:aon_timer
       - lowrisc:ip:adc_ctrl
       - lowrisc:ip:sysrst_ctrl
       - lowrisc:ip:rom_ctrl
-      - lowrisc:systems:clkmgr
-      - lowrisc:systems:sensor_ctrl
-      - "!fileset_partner ? (lowrisc:systems:ast_pkg)"
-      - "fileset_partner ? (partner:systems:ast_pkg)"
+      - lowrisc:systems:top_earlgrey_sensor_ctrl
       - lowrisc:tlul:headers
       - lowrisc:prim:all
       - lowrisc:prim:usb_diff_rx
       - lowrisc:prim:mubi
       - lowrisc:systems:top_earlgrey_pkg
+      - lowrisc:virtual_systems:top_earlgrey_ast
     files:
-      - rtl/autogen/top_earlgrey_rnd_cnst_pkg.sv
       - rtl/autogen/top_earlgrey.sv
+      - rtl/autogen/earlgrey_pd_main.sv
+      - rtl/autogen/earlgrey_pd_aon.sv
     file_type: systemVerilogSource
+
+  files_rtl_testing:
+    depend:
+      - lowrisc:earlgrey_constants:testing_rnd_cnst_pkg
+      - lowrisc:earlgrey_constants:testing_lc_ctrl_token_pkg
+
+  files_rtl_tapeout:
+    depend:
+      - lowrisc:earlgrey_constants:tapeout_rnd_cnst_pkg
+      - lowrisc:earlgrey_constants:tapeout_lc_ctrl_token_pkg
 
   files_verilator_waiver:
     depend:
@@ -83,9 +101,22 @@ filesets:
       - lowrisc:lint:common
       - lowrisc:lint:comportable
     files:
-      - lint/top_earlgrey.vbw
+      - lint/top_earlgrey.vbl
     file_type: veribleLintWaiver
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
+
+mapping:
+  "lowrisc:virtual_constants:top_pkg": "lowrisc:earlgrey_constants:top_pkg"
+  "lowrisc:virtual_constants:top_racl_pkg": "lowrisc:earlgrey_constants:top_racl_pkg"
+  "lowrisc:systems:ast_pkg": "lowrisc:systems:top_earlgrey_ast_pkg"
+  "lowrisc:virtual_constants:lc_ctrl_token_pkg": "lowrisc:earlgrey_constants:testing_lc_ctrl_token_pkg"
+  "lowrisc:virtual_constants:rnd_cnst_pkg": "lowrisc:earlgrey_constants:testing_rnd_cnst_pkg"
+  "lowrisc:virtual_ip:rram_macro": "lowrisc:ip:rram_macro"
 
 parameters:
   SYNTHESIS:
@@ -95,15 +126,20 @@ parameters:
 targets:
   default: &default_target
     filesets:
-      - tool_verilator   ? (files_verilator_waiver)
-      - tool_ascentlint  ? (files_ascentlint_waiver)
-      - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_verilator    ? (files_verilator_waiver)
+      - tool_ascentlint   ? (files_ascentlint_waiver)
+      - tool_veriblelint  ? (files_veriblelint_waiver)
+      - tool_slang        ? (files_slang_waiver)
+      - fileset_tapeout   ? (files_rtl_tapeout)
+      - "!fileset_tapeout ? (files_rtl_testing)"
       - files_rtl_generic
     toplevel: top_earlgrey
 
   sim:
     default_tool: icarus
     filesets:
+      - fileset_tapeout   ? (files_rtl_tapeout)
+      - "!fileset_tapeout ? (files_rtl_testing)"
       - files_rtl_generic
     toplevel: top_earlgrey
 

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -138,7 +138,7 @@ module xbar_${xbar.name}_tb;
 <%
   clkname = "clk_" + host.clocks[0]
   rstname = "rst_" + host.clocks[0] + "_n"
-  num_dev = len(xbar.get_s1n_if_exist(host).ds)
+  num_dev = len(xbar.get_socket_if_exist(host).ds)
 
   addrs = list(map(xbar.get_addr, xbar.get_devices_from_host(host)))
 %>\

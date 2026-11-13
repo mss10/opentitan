@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,19 +7,34 @@ class jtag_agent_cfg extends dv_base_agent_cfg;
   // interface handle used by driver, monitor & the sequencer, via cfg handle
   virtual jtag_if vif;
 
-  `uvm_object_utils_begin(jtag_agent_cfg)
-  `uvm_object_utils_end
+  // Extra interface handle that *may* be used by the monitor instead of vif. If this is not null,
+  // the agent monitor will track signals from this interface instead of reading from vif.
+  virtual jtag_mon_if mon_vif;
 
-  `uvm_object_new
+  // Event that is triggered when the physical JTAG interface gets connected.
+  uvm_event jtag_if_connected;
 
-  // control tck
-  function void set_tck_en(bit en);
-    vif.tck_en = en;
-  endfunction
+  // Length of IR register. Update this field based on the actual width used in the design.
+  uint ir_len = JTAG_IRW;
 
-  // assert trst_n for a number of cycles
-  task do_trst_n(int cycles = $urandom_range(5, 20));
-    vif.do_trst_n(cycles);
-  endtask
+  // Option to minimize Run-Test/Idle duration
+  // Current RVDM has hardcoded dtmcs.idle = 1, which requires a single cycle of Run-Test/Idle duration.
+  // This knob can bypass default 1 cycle initial delay of 'driver.drive_jtag_req()' task.
+  // Use this knob only for the necessary tests.
+  bit     min_rti = 0;
 
+  // This JTAG driver expects to control the JTAG interface clock (TCK), which it does by setting
+  // tck_en to 0 or 1. If rtc_length is positive, it gives a number of TCK cycles to "run to clear"
+  // (where we expect to be in the RunTest/IDLE state) before disabling the clock.
+  //
+  // This allows safe interactions with things like DMI operations, where we expect CDC to convert
+  // between the JTAG clock and a system clock. This only works when TCK is running!
+  int unsigned rtc_length = 0;
+
+  `uvm_object_utils(jtag_agent_cfg)
+
+  function new (string name = "");
+    super.new(name);
+    jtag_if_connected = new();
+  endfunction : new
 endclass

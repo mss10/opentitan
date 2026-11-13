@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,35 +12,40 @@ class alert_handler_env extends cip_base_env #(
 
   `uvm_component_new
 
-  alert_esc_agent alert_host_agent[];
-  alert_esc_agent esc_device_agent[];
+  alert_agent alert_host_agent[];
+  esc_agent   esc_device_agent[];
 
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
+
     // build alert agents
     alert_host_agent                    = new[NUM_ALERTS];
     virtual_sequencer.alert_host_seqr_h = new[NUM_ALERTS];
     foreach (alert_host_agent[i]) begin
-      alert_host_agent[i] = alert_esc_agent::type_id::create(
-          $sformatf("alert_host_agent[%0d]", i), this);
-      uvm_config_db#(alert_esc_agent_cfg)::set(this,
-          $sformatf("alert_host_agent[%0d]", i), "cfg", cfg.alert_host_cfg[i]);
+      string agent_name = $sformatf("alert_host_agent[%0d]", i);
+      alert_host_agent[i] = alert_agent::type_id::create(agent_name, this);
+      uvm_config_db#(alert_agent_cfg)::set(this, agent_name, "cfg", cfg.alert_host_cfg[i]);
       cfg.alert_host_cfg[i].en_cov = cfg.en_cov;
       cfg.alert_host_cfg[i].clk_freq_mhz = int'(cfg.clk_freq_mhz);
     end
+
     // build escalator agents
     esc_device_agent                    = new[NUM_ESCS];
     virtual_sequencer.esc_device_seqr_h = new[NUM_ESCS];
     foreach (esc_device_agent[i]) begin
-      esc_device_agent[i] = alert_esc_agent::type_id::create(
-          $sformatf("esc_device_agent[%0d]", i), this);
-      uvm_config_db#(alert_esc_agent_cfg)::set(this,
-          $sformatf("esc_device_agent[%0d]", i), "cfg", cfg.esc_device_cfg[i]);
+      string agent_name = $sformatf("esc_device_agent[%0d]", i);
+      esc_device_agent[i] = esc_agent::type_id::create(agent_name, this);
+      uvm_config_db#(esc_agent_cfg)::set(this, agent_name, "cfg", cfg.esc_device_cfg[i]);
       cfg.esc_device_cfg[i].en_cov = cfg.en_cov;
     end
+
     // get vifs
     if (!uvm_config_db#(crashdump_vif)::get(this, "", "crashdump_vif", cfg.crashdump_vif)) begin
       `uvm_fatal(get_full_name(), "failed to get crashdump_vif from uvm_config_db")
+    end
+    if (!uvm_config_db#(alert_handler_vif)::get(this, "", "alert_handler_vif",
+                                                cfg.alert_handler_vif)) begin
+      `uvm_fatal(`gfn, "failed to get alert_handler_vif from uvm_config_db")
     end
   endfunction
 
@@ -48,12 +53,10 @@ class alert_handler_env extends cip_base_env #(
     super.connect_phase(phase);
     if (cfg.en_scb) begin
       foreach (alert_host_agent[i]) begin
-        alert_host_agent[i].monitor.alert_esc_port.connect(
-            scoreboard.alert_fifo[i].analysis_export);
+        alert_host_agent[i].m_alert_port.connect(scoreboard.alert_fifo[i].analysis_export);
       end
       foreach (esc_device_agent[i]) begin
-        esc_device_agent[i].monitor.alert_esc_port.connect(
-            scoreboard.esc_fifo[i].analysis_export);
+        esc_device_agent[i].m_esc_port.connect(scoreboard.esc_fifo[i].analysis_export);
       end
     end
     if (cfg.is_active) begin

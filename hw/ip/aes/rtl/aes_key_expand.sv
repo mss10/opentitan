@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,16 +9,17 @@
 module aes_key_expand import aes_pkg::*;
 #(
   parameter bit         AES192Enable = 1,
-  parameter bit         Masking      = 0,
-  parameter sbox_impl_e SBoxImpl     = SBoxImplLut,
+  parameter bit         SecMasking   = 0,
+  parameter sbox_impl_e SecSBoxImpl  = SBoxImplLut,
 
-  localparam int        NumShares    = Masking ? 2 : 1 // derived parameter
+  localparam int        NumShares    = SecMasking ? 2 : 1 // derived parameter
 ) (
   input  logic                   clk_i,
   input  logic                   rst_ni,
   input  logic                   cfg_valid_i,
   input  ciph_op_e               op_i,
   input  sp2v_e                  en_i,
+  input  logic                   prd_we_i,
   output sp2v_e                  out_req_o,
   input  sp2v_e                  out_ack_i,
   input  logic                   clear_i,
@@ -47,6 +48,7 @@ module aes_key_expand import aes_pkg::*;
   logic      [31:0] rot_word_in [NumShares];
   logic      [31:0] rot_word_out [NumShares];
   logic             use_rot_word;
+  logic             prd_we, prd_we_force, prd_we_inhibit;
   logic      [31:0] sub_word_in, sub_word_out;
   logic       [3:0] sub_word_out_req;
   logic      [31:0] sw_in_mask, sw_out_mask;
@@ -192,7 +194,7 @@ module aes_key_expand import aes_pkg::*;
   assign sub_word_in = use_rot_word ? rot_word_out[0] : rot_word_in[0];
 
   // Masking
-  if (!Masking) begin : gen_no_sw_in_mask
+  if (!SecMasking) begin : gen_no_sw_in_mask
     // The mask share is ignored anyway, it can be 0.
     assign sw_in_mask  = '0;
 
@@ -205,22 +207,70 @@ module aes_key_expand import aes_pkg::*;
     assign sw_in_mask = use_rot_word ? rot_word_out[1] : rot_word_in[1];
   end
 
+  // Make sure that whenever the data/mask inputs of the S-Boxes update, the buffered PRD is
+  // updated in sync. There are two special cases we need to handle here:
+  // - For AES-256, the initial round is short (no round key computation). But the data/mask inputs
+  //   are updated either way. Thus, we need to force a PRD update as well.
+  // - For AES-192 in FWD mode, the data/mask inputs aren't updated in Round 1, 4, 7 and 10. Thus,
+  //   we need to inhibit PRD updates triggered at the end of Round 0, 3, 6 and 9.
+  assign prd_we_force = (key_len_i == AES_256) & (rnd == 0);
+  assign prd_we_inhibit = (key_len_i == AES_192) & (op_i == CIPH_FWD) &
+      (rnd == 0 || rnd == 3 || rnd == 6 || rnd == 9);
+  assign prd_we = (prd_we_i & ~prd_we_inhibit) | prd_we_force;
+
+  // PRD buffering
+  logic [WidthPRDKey-1:0] prd_q;
+
+  if (!SecMasking) begin : gen_no_prd_buffer
+    // The masks are ignored anyway.
+    assign prd_q = prd_i;
+
+    // Tie-off unused signals.
+    logic unused_prd_we;
+    assign unused_prd_we = prd_we;
+
+  end else begin : gen_prd_buffer
+    // PRD buffer stage to:
+    // 1. Make sure the S-Boxes get always presented new data/mask inputs together with fresh PRD
+    //    for remasking.
+    // 2. Prevent glitches originating from inside the masking PRNG from propagating into the
+    //    masked S-Boxes.
+    always_ff @(posedge clk_i or negedge rst_ni) begin : prd_reg
+      if (!rst_ni) begin
+        prd_q <= '0;
+      end else if (prd_we) begin
+        prd_q <= prd_i;
+      end
+    end
+  end
+
   // SubWord - individually substitute bytes.
+  // Every DOM S-Box instance consumes 28 bits of randomness but itself produces 20 bits for use in
+  // another S-Box instance. For other S-Box implementations, only the bits corresponding to prd_q
+  // are used. Other bits are ignored and tied to 0.
+  logic [3:0][WidthPRDSBox+19:0] in_prd;
+  logic [3:0]             [19:0] out_prd;
+
   for (genvar i = 0; i < 4; i++) begin : gen_sbox
+    // Rotate the randomness produced by the S-Boxes. The LSBs are taken from the masking PRNG
+    // (prd_q) whereas the MSBs are produced by the other S-Box instances.
+    assign in_prd[i] = {out_prd[aes_rot_int(i,4)], prd_q[WidthPRDSBox*i +: WidthPRDSBox]};
+
     aes_sbox #(
-      .SBoxImpl ( SBoxImpl )
+      .SecSBoxImpl ( SecSBoxImpl )
     ) u_aes_sbox_i (
-      .clk_i     ( clk_i                                 ),
-      .rst_ni    ( rst_ni                                ),
-      .en_i      ( en == SP2V_HIGH                       ),
-      .out_req_o ( sub_word_out_req[i]                   ),
-      .out_ack_i ( out_ack == SP2V_HIGH                  ),
-      .op_i      ( CIPH_FWD                              ),
-      .data_i    ( sub_word_in[8*i +: 8]                 ),
-      .mask_i    ( sw_in_mask[8*i +: 8]                  ),
-      .prd_i     ( prd_i[WidthPRDSBox*i +: WidthPRDSBox] ),
-      .data_o    ( sub_word_out[8*i +: 8]                ),
-      .mask_o    ( sw_out_mask[8*i +: 8]                 )
+      .clk_i     ( clk_i                  ),
+      .rst_ni    ( rst_ni                 ),
+      .en_i      ( en == SP2V_HIGH        ),
+      .out_req_o ( sub_word_out_req[i]    ),
+      .out_ack_i ( out_ack == SP2V_HIGH   ),
+      .op_i      ( CIPH_FWD               ),
+      .data_i    ( sub_word_in[8*i +: 8]  ),
+      .mask_i    ( sw_in_mask[8*i +: 8]   ),
+      .prd_i     ( in_prd[i]              ),
+      .data_o    ( sub_word_out[8*i +: 8] ),
+      .mask_o    ( sw_out_mask[8*i +: 8]  ),
+      .prd_o     ( out_prd[i]             )
     );
   end
 
@@ -393,8 +443,9 @@ module aes_key_expand import aes_pkg::*;
 
   logic [Sp2VWidth-1:0] en_raw;
   aes_sel_buf_chk #(
-    .Num   ( Sp2VNum   ),
-    .Width ( Sp2VWidth )
+    .Num      ( Sp2VNum   ),
+    .Width    ( Sp2VWidth ),
+    .EnSecBuf ( 1'b1      )
   ) u_aes_key_expand_en_buf_chk (
     .clk_i  ( clk_i  ),
     .rst_ni ( rst_ni ),
@@ -406,8 +457,9 @@ module aes_key_expand import aes_pkg::*;
 
   logic [Sp2VWidth-1:0] out_ack_raw;
   aes_sel_buf_chk #(
-    .Num   ( Sp2VNum   ),
-    .Width ( Sp2VWidth )
+    .Num      ( Sp2VNum   ),
+    .Width    ( Sp2VWidth ),
+    .EnSecBuf ( 1'b1      )
   ) u_aes_key_expand_out_ack_buf_chk (
     .clk_i  ( clk_i       ),
     .rst_ni ( rst_ni      ),
@@ -424,18 +476,24 @@ module aes_key_expand import aes_pkg::*;
   // Assertions //
   ////////////////
 
+  // Create a lint error to reduce the risk of accidentally disabling the masking.
+  `ASSERT_STATIC_LINT_ERROR(AesKeyExpandSecMaskingNonDefault, SecMasking == 1)
+
   // Cipher core masking requires a masked SBox and vice versa.
   `ASSERT_INIT(AesMaskedCoreAndSBox,
-      (Masking &&
-      (SBoxImpl == SBoxImplCanrightMasked ||
-       SBoxImpl == SBoxImplCanrightMaskedNoreuse ||
-       SBoxImpl == SBoxImplDom)) ||
-      (!Masking &&
-      (SBoxImpl == SBoxImplLut ||
-       SBoxImpl == SBoxImplCanright)))
+      (SecMasking &&
+      (SecSBoxImpl == SBoxImplCanrightMasked ||
+       SecSBoxImpl == SBoxImplCanrightMaskedNoreuse ||
+       SecSBoxImpl == SBoxImplDom)) ||
+      (!SecMasking &&
+      (SecSBoxImpl == SBoxImplLut ||
+       SecSBoxImpl == SBoxImplCanright)))
 
   // Selectors must be known/valid
-  `ASSERT_KNOWN(AesCiphOpKnown, op_i)
+  `ASSERT(AesCiphOpValid, cfg_valid_i |-> op_i inside {
+      CIPH_FWD,
+      CIPH_INV
+      })
   `ASSERT(AesKeyLenValid, cfg_valid_i |-> key_len_i inside {
       AES_128,
       AES_192,

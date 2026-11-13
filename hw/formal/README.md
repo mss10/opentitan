@@ -1,6 +1,4 @@
----
-title: "OpenTitan Assertions"
----
+# OpenTitan Assertions
 
 # OpenTitan Assertions
 
@@ -19,7 +17,7 @@ Above examples are using the <code>`ASSERT</code> macro defined in [prim_assert.
 whose four arguments are assertion name, property, clock, and reset (active-high reset).
 
 Assertions are usually added by the designer in the RTL file.
-Assertions can also be added in a separate module, see for example [tlul_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/tlul/rtl/tlul_assert.sv) and its [documentation]({{< relref "hw/ip/tlul/doc/TlulProtocolChecker.md" >}}), which contains a generic protocol checker for the TileLink-UL standard.
+Assertions can also be added in a separate module, see for example [tlul_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/tlul/rtl/tlul_assert.sv) and its [documentation](../ip/tlul/doc/TlulProtocolChecker.md), which contains a generic protocol checker for the TileLink-UL standard.
 
 ## Types of Assertions
 There are two types of assertions:
@@ -37,16 +35,16 @@ end
 ```
 
 ## Useful Macros
-The file [prim_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert.sv) defines many useful shortcuts that you can use in your RTL code.
+The file [prim_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert.sv) and [prim_assert_standard_macros.svh](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert_standard_macros.svh) define many useful shortcuts that you can use in your RTL code.
 Some of them are detailed below:
 
-### `ASSERT(name, prop, clk, rst)
+### ASSERT(__name, __prop, __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
 *   This is a shortcut macro for a generic concurrent assignment.
 *   The first argument is the assertion name.
-    It is recommended to use lowerCamelCase for the assertion name.
-    The assertio name should be descriptive, which will help during debug.
+    It is recommended to follow the [naming conventions](#naming-conventions).
+    The assertion name should be descriptive, which will help during debug.
 *   The second argument is the assertion property.
-*   The last two arguments specify the clock and reset signals (active-high reset).
+*   The last two are optional arguments to specify the clock and reset signals (active-high reset) if different from default value.
 *   Note that this macro doesn't support a custom error message (such as the $error message in the previous section).
     However, the macro will print out the property name and the entire property code such as `req |-> ack`.
 
@@ -61,22 +59,32 @@ myAssertion: assert property (
       `STRINGIFY(myAssertion), `STRINGIFY(req |-> ack));
 end
 ```
-### `ASSERT_INIT(name, prop)
+### `ASSERT_INIT(__name, __prop)
 Concurrent assertion inside an initial block. It can be used for checking parameters.
 
-### `ASSERT_FINAL(name, prop)
+### `ASSERT_FINAL(__name, __prop)
 Concurrent assertion inside a final block. It can be used e.g. for making sure that a FIFO is empty at the end of each sim.
 
-### `ASSERT_NEVER(name, prop, clk, rst)
+### `ASSERT_AT_RESET(__name, __prop, __rst = `ASSERT_DEFAULT_RST)
+Assertion just before reset. Can be used to check sum-like properties that get cleared at reset.
+Note that unless your simulation ends with a reset, the property does not get checked at end of
+simulation; use `ASSERT_AT_RESET_AND_FINAL` if the property should also get checked at end of
+simulation.
+
+### `ASSERT_AT_RESET_AND_FINAL(__name, __prop, __rst = `ASSERT_DEFAULT_RST)
+Assertion just before reset and in final block. Can be used to check sum-like properties before
+every reset and at the end of simulation.
+
+### `ASSERT_NEVER(__name, __prop,  __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
 Assert that a concurrent property never happens.
 
-### `ASSERT_KNOWN(name, signal, clk, rst)
+### `ASSERT_KNOWN(__name, __signal,  __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
 Assert that `signal` has a known value after reset, where "known" refers to a value that is not X.
 
 ### More Macros and Examples
-*   For more macros see file [prim_assert.sv](prim_assert.sv).
+*   For more macros see file [prim_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert.sv) and [prim_assert_standard_macros.svh](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert_standard_macros.svh).
 *   For more examples, search the repository for ASSERT by typing `grep -r ASSERT .`
-*   Also see [tlul_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/tlul/rtl/tlul_assert.sv) and its [documentation]({{< relref "hw/ip/tlul/doc/TlulProtocolChecker.md" >}}).
+*   Also see [tlul_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/tlul/rtl/tlul_assert.sv) and its [documentation](../ip/tlul/doc/TlulProtocolChecker.md).
 
 ## Useful SVA System Functions
 Below table lists useful SVA (SystemVerilog assertion) functions that can be used for assertion properties.
@@ -192,7 +200,7 @@ There are also powerful repetition operators, see [here](https://www.systemveril
 ## Symbolic Variables
 
 When design has a set of modules or signals that share same properties, symbolic variables can be used to reduce duplicated assertions.
-For example, in the [rv_plic design](../ip/rv_plic/doc/_index.md), the array of input `intr_src_i` are signals sharing sam properties.
+For example, in the [rv_plic design](../ip_templates/rv_plic/README.md.tpl), the array of input `intr_src_i` are signals sharing the same properties.
 Each `intr_src_i[index]` will trigger the interrupt pending (`ip`) signal depending on the corresponding level indicator (`le`) is set to level triggered or edge triggered.
 Without symbolic variables, the above assertions can be implemented as below:
 ```systemverilog
@@ -219,24 +227,24 @@ To ensure the symbolic variable performs the expected behaviors, two assumptions
 Coverpoints are used for properties and corner cases that the designer wants to make sure are being exercised by the testbench (e.g. FIFO-full checks).
 The code coverage tool then reports the coverage percentage of these coverpoints together with the other cover metrics (such as line coverage and branch coverage).
 
-The macro <code>`COVER(name, prop, clk, rst)</code> of [prim_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert.sv) can be used to add coverpoints to your design, where the cover property uses the same SVA syntax, operators, and system functions as the the assert properties.
+The macro <code>`COVER(name, prop, clk, rst)</code> of [prim_assert.sv](https://github.com/lowRISC/opentitan/blob/master/hw/ip/prim/rtl/prim_assert.sv) can be used to add coverpoints to your design, where the cover property uses the same SVA syntax, operators, and system functions as the assert properties.
 
 ## Running FPV on DVSim
 
 ### Cadence JasperGold
 If you have access to JasperGold from Cadence, you can formally verify your assertions.
-Before running FPV, please make sure the target has been added to the [batch script](https://github.com/lowRISC/opentitan/blob/master/hw/top_earlgrey/formal/top_earlgrey_fpv_cfgs.hjson).
+Before running FPV, please make sure the target has been added to one of the [three batch scripts](../../doc/getting_started/setup_formal.md#formal-property-verification-fpv).
 
-For example, to run formal property verification (FPV) using JasperGold on module `gpio`, type:
+For example, to run formal property verification (FPV) using JasperGold on the prim module `prim_arbiter_fixed`, type:
 ```
-  $REPO_TOP/util/dvsim/dvsim.py $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_cfgs.hjson --select-cfgs gpio
+  dvsim $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_prim_cfgs.hjson --select-cfgs prim_arbiter_fixed_fpv
 ```
 JasperGold will then report which assertions have been proven or disproven, and whether or not there are any unreachable assertions or coverpoints.
 Adding a `--gui` option will open the JasperGold GUI.
 
-To run formal property verification for all modules, type:
+To run formal property verification for all prim modules, type:
 ```
-  $REPO_TOP/util/dvsim/dvsim.py $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_cfgs.hjson
+  dvsim $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_prim_fpv_cfgs.hjson
 ```
 
 ### Synopsys VC Formal
@@ -244,18 +252,17 @@ To run formal property verification for all modules, type:
 If you have access to VC Formal from Synopsys, you can formally verify your assertions.
 For example, to run formal property verification (FPV) using VC Formal on module `gpio`, type:
 ```
-  $REPO_TOP/util/dvsim/dvsim.py $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_cfgs.hjson --select-cfgs gpio -t vcformal
+  dvsim $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_prim_cfgs.hjson --select-cfgs prim_arbiter_fixed_fpv -t vcformal
 ```
 VC Formal will then report which assertions have been proven or disproven, and whether or not there are any unreachable assertions or coverpoints.
 Adding a `--gui` option will open the VCFormal GUI.
 
-To run formal property verification for all modules, type:
+To run formal property verification for all prim modules, type:
 ```
-  $REPO_TOP/util/dvsim/dvsim.py $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_cfgs.hjson -t vcformal
+  dvsim $REPO_TOP/hw/top_earlgrey/formal/top_earlgrey_fpv_prim_cfgs.hjson -t vcformal
 ```
 This script generates a report of all FPV runs.
-The report is printed at the end of the run, which lists the total number of assertions and the number of proven, vacuous,
-covered and failing assertions for each block. CRASH identifies modules that fail to run VC Formal.
+The report is printed at the end of the run, which lists the total number of assertions and the number of proven, vacuous, covered and failing assertions for each block. CRASH identifies modules that fail to run VC Formal.
 
 ## Running Connectivity Tests
 Connectivity tests use formal method to exhaustively verify system-level connections, which are specified in a high-level format (for example: CSV format for JasperGold).
@@ -265,9 +272,53 @@ The `dvsim` formal flow supports connectivity test. Each top-level can create it
 For example, `top_earlgrey` has `hw/top_earlgrey/formal/chip_conn_cfgs.hjson` that specifies its top_level name, fusesoc_core file, and csv file path.
 You can trigger top_earlgrey's connectivity test using `dvsim`:
 ```
-  util/dvsim/dvsim.py hw/top_earlgrey/formal/chip_conn_cfgs.hjson
+  dvsim hw/top_earlgrey/formal/chip_conn_cfgs.hjson
 ```
 Adding a `--gui` option will open the JaperGold GUI.
+
+## Running FPV on security blocks for common countermeasure primitives
+A [security countermeasure verification framework](../../doc/contributing/dv/sec_cm_dv_framework/README.md) is implemented in design and fpv tcl script to verify common countermeasure primitives in a semi-automated way.
+
+### Common security assertion macros
+OpenTitan's security IP blocks have implemented assertions to check against common fault injections.
+These assertions ensure if the security prim module returns an error, a corresponding alert should fire immediately without any gating conditions.
+There are three pre-defined assertion macros under file `hw/ip/prim/rtl/prim_assert_sec_cm.svh`:
+* ASSERT_PRIM_FSM_TRIGGER_ALERT: if design module `prim_sparse_fsm_flop` returns `state_o` value that is not one of the defined FSM states, which means the FSM state might be attacked, a fatal alert is expected to fire.
+* ASSERT_PRIM_COUNT_TRIGGER_ALERT: if design module `prim_count` sets `err_o` to 1, which means the two counters do not match, a fatal alert is expected to fire.
+* ASSERT_PRIM_DOUBLE_LFSR_TRIGGER_ALERT: if design module `prim_double_lfsr` sets `err_o` to 1, which means two LFSR states do not match, a fatal alert is expected to fire.
+Note that assertions defined with these macros will have a common prefix name `FpvSecCm`, which will help the FPV tcl file to group them in a specific task.
+
+### FPV fault injection
+The above security assertions are expected to be unreachable in normal design environment.
+They are only reachable if a fault is injected.
+To create a FPV environment that has fault injections, the `stopat` command and black-box methods are used.
+* FSM fault injection: a `stopat` is placed at `state_o` output.
+* Counter fault injection: black-box the prim_count module.
+* Double LFSR fault injection: black-box the prim_double_lfsr module.
+Then we will let formal environment to randomly drive these outputs and run security assertions to ensure these error cases will trigger alerts under any circumstances.
+
+### Set up FPV security check environment
+To set up the FPV security check environment, please follow the steps below:
+1. Add an item under `hw/top_earlgrey/formal/top_earlgrey_sec_cm_fpv_cfgs.hjson` with the naming convention "{ip_name}_sec_cm".
+2. Under the item add an entry "task" with value "FpvSecCm".
+This entry tells the tcl file to black-box security prim modules in the FPV environment, and define required macros.
+This "task" entry also tells the tcl file to disable regular assertions and only analyze macro defined security assertions with prefix `FpvSecCm`.
+3. Under the item add an entry "stopats" if design has sparse FSMs.
+This is an optional step. Because some designs contain more than one stopat path, the entry "stopats" is declared as a list of strings.
+
+Here is an example on csrng module:
+```
+{
+  name: csrng_sec_cm
+  dut: csrng
+  fusesoc_core: lowrisc:dv:csrng_sva
+  import_cfgs: ["{proj_root}/hw/formal/tools/dvsim/common_fpv_cfg.hjson"]
+  rel_path: "hw/ip/csrng/{sub_flow}/{tool}"
+  cov: false
+  task: "FpvSecCm"
+  stopats: ["*u_state_regs.state_o"]
+}
+```
 
 ## Naming Conventions
 For assertions, it is preferred to use postfix `_A` for assertions, `_M` for assumptions, `_P` for properties, and `_S` for sequences.

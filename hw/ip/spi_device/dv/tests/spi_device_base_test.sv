@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,7 +12,10 @@ class spi_device_base_test extends cip_base_test #(.ENV_T(spi_device_env),
     test_timeout_ns = 1500_000_000; // 1.5s
     super.build_phase(phase);
     // configure the spi agent to be in Host mode
-    cfg.m_spi_agent_cfg.if_mode = Host;
+    cfg.spi_host_agent_cfg.if_mode = Host;
+    // configure passthrough agent to be in Device mode
+    cfg.spi_device_agent_cfg.if_mode = Device;
+    cfg.spi_device_agent_cfg.has_req_fifo = 1'b1;
   endfunction
 
 endclass : spi_device_base_test

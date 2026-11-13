@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,75 +8,132 @@ send_msg "Designcheck 1-1" INFO "Checking design"
 set slack_ns [get_property SLACK [get_timing_paths -delay_type min_max]]
 send_msg "Designcheck 1-2" INFO "Slack is ${slack_ns} ns."
 
+# The build-time optimized flow places without timing and skips phys_opt_design, so a marginal
+# path can fail by a few tens of picoseconds. Only then, optimize the routed design, cheapest step
+# first: phys_opt_design fixes setup violations, and routing again with the Explore directive also
+# fixes hold violations. The routed checkpoint, the routed timing report and the bitstream are all
+# written after this hook, from the design in memory, so they include these optimizations.
 if [expr {$slack_ns < 0}] {
+  send_msg "Designcheck 1-4" WARNING "Slack is ${slack_ns} ns, running phys_opt_design."
+  phys_opt_design -directive AggressiveExplore
+  set slack_ns [get_property SLACK [get_timing_paths -delay_type min_max]]
+  send_msg "Designcheck 1-5" INFO "Slack after phys_opt_design is ${slack_ns} ns."
+}
+if [expr {$slack_ns < 0}] {
+  send_msg "Designcheck 1-6" WARNING "Slack is ${slack_ns} ns, routing again."
+  route_design -directive Explore
+  set slack_ns [get_property SLACK [get_timing_paths -delay_type min_max]]
+  send_msg "Designcheck 1-7" INFO "Slack after routing again is ${slack_ns} ns."
+}
+
+if [expr {$slack_ns < 0}] {
+  # The routed timing report is written after this hook, so show the failing paths here.
+  report_timing_summary -max_paths 10
   send_msg "Designcheck 1-3" ERROR "Timing failed. Slack is ${slack_ns} ns."
 }
 
 # Enable bitstream identification via USR_ACCESS register.
 set_property BITSTREAM.CONFIG.USR_ACCESS TIMESTAMP [current_design]
 
-# Dump MMI for Boot ROM.
-send_msg "Designtask 1-1" INFO "Dumping Boot ROM MMI"
-set workroot [file dirname [info script]]
-set filename "${workroot}/rom.mmi"
-set fileout [open $filename "w"]
-set brams [split [get_cells -hierarchical -filter { PRIMITIVE_TYPE =~ BMEM.bram.* && NAME =~ *u_rom_ctrl*}] " "]
-
-# Calculate the overall address space.
-set space 0
-foreach inst [lsort -dictionary $brams] {
-  set slice_begin [get_property ram_slice_begin [get_cells $inst]]
-  set slice_end [get_property ram_slice_end [get_cells $inst]]
-  if {$slice_begin eq {} || $slice_end eq {}} {
-    send_msg "Designtask 1-2" ERROR "Extraction of Boot ROM MMI information failed."
-  }
-  # The scrambled Boot ROM is actually 39 bits wide but the updatemem tool segfaults
-  # for slice sizes not divisible by 8.
-  if {[expr {($slice_end - $slice_begin + 1) < 8}]} {
-    set slice_end [expr {$slice_begin + 7}]
-  }
-  set addr_begin [get_property ram_addr_begin [get_cells $inst]]
-  set addr_end [get_property ram_addr_end [get_cells $inst]]
-  if {$addr_begin eq {} || $addr_end eq {}} {
-    send_msg "Designtask 1-3" ERROR "Extraction of Boot ROM MMI information failed."
-  }
-  # Calculate total number of bits.
-  set space [expr {$space + ($addr_end - $addr_begin + 1) * ($slice_end - $slice_begin + 1)}]
+# Generate a dummy MMI file (FIXME: temporary, to be removed).
+# Args:
+#   filename:            Path to the output file.
+#   designtask_count:    A number used for logging with `send_msg`.
+proc generate_mmi {filename designtask_count} {
+    send_msg "${designtask_count}-1" INFO "Writing dummy MMI file to ${filename}"
+    set workroot [file dirname [info script]]
+    set filepath "${workroot}/${filename}"
+    set fileout [open $filepath "w"]
+    puts $fileout "This is a temporary dummy file to placate Bazel/CI whilst migrating to the bkdr_loader flow."
+    puts $fileout "This file is not a valid MMI file, and should NOT be used as such."
+    close $fileout
 }
 
-# Generate the MMI.
-set space [expr {($space / 8) - 1}]
-puts $fileout "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-puts $fileout "<MemInfo Version=\"1\" Minor=\"0\">"
-puts $fileout "  <Processor Endianness=\"Little\" InstPath=\"dummy\">"
-puts $fileout "  <AddressSpace Name=\"rom\" Begin=\"0\" End=\"$space\">"
-puts $fileout "      <BusBlock>"
+# Dump INIT_XX strings for the given BRAMs to an output file.
+#
+# In the output file, the BRAMs and their INIT_XX strings will be sorted in
+# increasing order. This proc is a time-saver because the Vivado GUI's property
+# viewer does not sort the INIT_XX strings numerically.
+#
+# Args:
+#   filename:         Where to write
+#   brams:            A list of BRAM cells.
+#   designtask_count: A number used for logging with `send_msg`.
+proc dump_init_strings {filename brams designtask_count} {
+    # For each BRAM, dump all the INIT_XX strings.
+    send_msg "${designtask_count}-1" INFO "Dumping INIT_XX strings to ${filename}"
 
-set part [get_property PART [current_design]]
-foreach inst [lsort -dictionary $brams] {
-  set loc [get_property LOC [get_cells $inst]]
-  set loc [string trimleft $loc RAMB36_]
-  set slice_begin [get_property ram_slice_begin [get_cells $inst]]
-  set slice_end [get_property ram_slice_end [get_cells $inst]]
-  # The scrambled Boot ROM is actually 39 bits wide but the updatemem tool segfaults
-  # for slice sizes not divisible by 8.
-  if {[expr {($slice_end - $slice_begin + 1) < 8}]} {
-    set slice_end [expr {$slice_begin + 7}]
-  }
-  set addr_begin [get_property ram_addr_begin [get_cells $inst]]
-  set addr_end [get_property ram_addr_end [get_cells $inst]]
-  puts $fileout "        <BitLane MemType=\"RAMB32\" Placement=\"$loc\">"
-  puts $fileout "          <DataWidth MSB=\"$slice_end\" LSB=\"$slice_begin\"/>"
-  puts $fileout "          <AddressRange Begin=\"$addr_begin\" End=\"$addr_end\"/>"
-  puts $fileout "          <Parity ON=\"false\" NumBits=\"0\"/>"
-  puts $fileout "        </BitLane>"
+    set workroot [file dirname [info script]]
+    set filepath "${workroot}/${filename}"
+    set fileout [open $filepath "w"]
+
+    foreach inst [lsort -dictionary $brams] {
+        set bram [get_cells $inst]
+
+        set loc [get_property LOC $bram]
+        puts $fileout "LOC: $loc"
+
+        set init_count 0
+        while 1 {
+            set key [format "INIT_%.2X" $init_count]
+            if { [llength [list_property $bram $key]] eq 0 } {
+                break
+            }
+            set val [get_property $key $bram]
+            puts $fileout "$key $val"
+            incr init_count
+        }
+
+        puts $fileout ""
+    }
+    close $fileout
+    send_msg "${designtask_count}-4" INFO "INIT_XX strings dumped to ${filepath}"
 }
-puts $fileout "      </BusBlock>"
-puts $fileout "    </AddressSpace>"
-puts $fileout "  </Processor>"
-puts $fileout "<Config>"
-puts $fileout "  <Option Name=\"Part\" Val=\"$part\"/>"
-puts $fileout "</Config>"
-puts $fileout "</MemInfo>"
-close $fileout
-send_msg "Designtask 1-4" INFO "Boot ROM MMI dumped to ${workroot}/rom.mmi"
+
+set fpga_family [get_property FAMILY [get_parts [get_property PART [current_design]]]]
+
+switch ${fpga_family} {
+  kintex7 {
+    set bram_regex "BMEM.*.*"
+  }
+  kintexu {
+    set bram_regex "BLOCKRAM.*.*"
+  }
+  default {
+    set bram_regex "BMEM.*.*"
+  }
+}
+set mem_type_regex {(RAMB\d+)_(\w+)}
+
+set gen_mem_info {{brams mem_type_regex fake_word_width addr_end_multiplier schema} {
+  dict set mem_info brams $brams
+  dict set mem_info mem_type_regex $mem_type_regex
+  dict set mem_info fake_word_width $fake_word_width
+  dict set mem_info addr_end_multiplier $addr_end_multiplier
+  return [dict set mem_info schema $schema]
+}}
+
+# The scrambled Boot ROM is actually 39 bits wide, but we need to pretend that
+# it's 40 bits, or else we will be unable to encode our ROM data in a MEM file
+# that updatemem will understand.
+#
+# Suppose we did not pad the width, leaving it at 39 bits. Now, if we encode a
+# word as a 10-digit hex string, updatemem would splice an additional zero bit
+# into the bitstream because each hex digit is strictly 4 bits. If we wrote four
+# words at a time, as a 39-digit hex string (39*4 is nicely divisible by 4),
+# updatemem would fail to parse the hex string, saying something like "Data
+# segment starting at 0x00000000, has exceeded data limits." The longest hex
+# string it will accept is 16 digits, or 64 bits.
+#
+# A hack that works is to pretend the data width is actually 40 bits. Updatemem
+# seems to write that extra zero bit into the ether without complaint.
+set rom_brams [split [get_cells -hierarchical -filter " PRIMITIVE_TYPE =~ ${bram_regex} && NAME =~ *u_rom_ctrl*"] " "]
+dict set memInfo rom [apply $gen_mem_info $rom_brams $mem_type_regex 40 1 "Processor"]
+
+generate_mmi "memories.mmi" 1
+
+# For debugging purposes, dump the INIT_XX strings for ROM.
+# Only with CW340_DEBUG=1: this is very slow on a flattened netlist.
+if {[info exists ::env(CW340_DEBUG)] && [string is true -strict $::env(CW340_DEBUG)]} {
+  dump_init_strings "rom_init_strings.txt" $rom_brams 3
+}

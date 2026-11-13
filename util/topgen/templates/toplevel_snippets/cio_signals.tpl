@@ -1,0 +1,40 @@
+## Copyright lowRISC contributors (OpenTitan project).
+## Licensed under the Apache License, Version 2.0, see LICENSE for details.
+## SPDX-License-Identifier: Apache-2.0
+<%import topgen.lib as lib%>\
+<%page args="top, feature_info, cio_info, domain"/>\
+  // Signals
+% if feature_info["has_pinmux"]:
+% if lib.find_module(top["module"], "pinmux").get("domain") == domain:
+  logic [${cio_info["num_mio_inputs"] - 1}:0] mio_p2d;
+  logic [${cio_info["num_mio_outputs"] - 1}:0] mio_d2p;
+  logic [${cio_info["num_mio_outputs"] - 1}:0] mio_en_d2p;
+  logic [${cio_info["num_dio_total"] - 1}:0] dio_p2d;
+  logic [${cio_info["num_dio_total"] - 1}:0] dio_d2p;
+  logic [${cio_info["num_dio_total"] - 1}:0] dio_en_d2p;
+% for m in lib.get_all_modules(top, domain=domain):
+  % if not lib.is_inst(m):
+<% continue %>
+  % endif
+<%
+  block = name_to_block[m['type']]
+  ## A split IP can have both partitions in the same domain so we have to collect all CIOs of the
+  ## relevant partitions.
+  inouts, inputs, outputs = [], [], []
+  for p in lib.get_module_partitions(m, domain):
+    p_inouts, p_inputs, p_outputs = block.xputs_for(p)
+    inouts += p_inouts
+    inputs += p_inputs
+    outputs += p_outputs
+%>\
+  // ${m["name"]}
+  % for p_in in inputs + inouts:
+  logic ${lib.bitarray(p_in.width(m.get("param_decl")), cio_info["max_sigwidth"])} cio_${m["name"]}_${p_in.name}_p2d;
+  % endfor
+  % for p_out in outputs + inouts:
+  logic ${lib.bitarray(p_out.width(m.get("param_decl")), cio_info["max_sigwidth"])} cio_${m["name"]}_${p_out.name}_d2p;
+  logic ${lib.bitarray(p_out.width(m.get("param_decl")), cio_info["max_sigwidth"])} cio_${m["name"]}_${p_out.name}_en_d2p;
+  % endfor
+% endfor
+% endif
+% endif\

@@ -1,44 +1,55 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-# ALERT_HANDLER register template
-#
-# Parameter (given by Python tool)
-#  - n_alerts:    Number of alert sources
-#  - esc_cnt_dw:  Width of escalation counter
-#  - accu_cnt_dw: Width of accumulator
-#  - async_on:    Enables asynchronous sygnalling between specific alert RX/TX pairs
-#  - n_classes:   Number of supported classes (leave this at 4 at the moment)
-#  - n_lpg:       Number of low-power groups (LPGs)
-#  - lpg_map:     Defines a mapping from alerts to LPGs.
+# ${(module_instance_name).upper()} register template
 <%
 import math
 chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
 %>
 {
-  name: "ALERT_HANDLER",
+  name:               "${module_instance_name}",
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "32",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_${module_instance_name.lower()}"
+  version:            "2.0.0",
+  life_stage:         "L1",
+  design_stage:       "D3",
+  verification_stage: "V2S",
+  dif_stage:          "S2",
+  notes:              "Use both FPV and DV to perform block level verification.",
   clocking: [
     {clock: "clk_i", reset: "rst_ni", primary: true},
     {clock: "clk_edn_i", reset: "rst_edn_ni"}
   ]
   bus_interfaces: [
-    { protocol: "tlul", direction: "device" }
+  % if racl_support:
+    { protocol: "tlul", direction: "device", hier_path: "u_reg_wrap.u_reg", racl_support: true }
+  % else:
+    { protocol: "tlul", direction: "device", hier_path: "u_reg_wrap.u_reg" }
+  % endif
   ],
   regwidth: "32",
-  hier_path: "u_reg_wrap"
 ##############################################################################
+  # The number of escalation severities and ping count width parameters
+  # have a local and non-local varieties instantiated with the same value.
+  # This is to work around the restriction in CSR generation to only allow
+  # local parameters, or the value may become inconsistent when the
+  # parameter gets an override.
   param_list: [
     // Random netlist constants
     { name:      "RndCnstLfsrSeed",
       desc:      "Compile-time random bits for initial LFSR seed",
-      type:      "alert_pkg::lfsr_seed_t"
+      type:      "${module_instance_name}_pkg::lfsr_seed_t"
       randcount: "32",
       randtype:  "data", // randomize randcount databits
     }
     { name:      "RndCnstLfsrPerm",
       desc:      "Compile-time random permutation for LFSR output",
-      type:      "alert_pkg::lfsr_perm_t"
+      type:      "${module_instance_name}_pkg::lfsr_perm_t"
       randcount: "32",
       randtype:  "perm", // random permutation for randcount elements
     }
@@ -67,12 +78,14 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
             '''
       type: "logic [NAlerts-1:0][NLpgWidth-1:0]",
       default: '''
-% if lpg_map:
+% if lpg_map and isinstance(lpg_map, list):
                {
   % for l in list(reversed(lpg_map)):
                  ${l}${"" if loop.last else ","}
   % endfor
                }
+% elif lpg_map:
+               ${lpg_map}
 % else:
                '0
 % endif
@@ -98,12 +111,14 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
             '''
       type: "logic [NAlerts-1:0]",
       default: '''
-% if async_on:
+% if async_on and isinstance(async_on, list):
                {
   % for a in list(reversed(async_on)):
                  ${a}${"" if loop.last else ","}
   % endfor
                }
+% elif async_on:
+               ${async_on}
 % else:
                '0
 % endif
@@ -116,10 +131,21 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       default: "${n_classes}",
       local: "true"
     },
+    { name: "EscNumSeverities",
+      desc: "Number of escalation severities as regular parameter",
+      type: "int",
+      # NOTE: If this value is to be changed, pass the exposed parameter as
+      # a regular override to all IPs with prim_esc_receiver
+      default: "${n_esc_sev}",
+      expose: "true",
+      local: "false"
+    },
     { name: "N_ESC_SEV",
       desc: "Number of escalation severities",
       type: "int",
-      default: "4",
+      # NOTE: If this value is to be changed, ensure all IPs with
+      # prim_esc_receiver get updated as well.
+      default: "${n_esc_sev}",
       local: "true"
     },
     { name: "N_PHASES",
@@ -131,13 +157,24 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
     { name: "N_LOC_ALERT",
       desc: "Number of local alerts",
       type: "int",
-      default: "7",
+      default: "${n_loc_alert}",
       local: "true"
+    },
+    { name: "EscPingCountWidth",
+      desc: "Width of ping counter as regular parameter",
+      type: "int",
+      # NOTE: If this value is to be changed, pass the exposed parameter as
+      # a regular override to all IPs with prim_esc_receiver
+      default: "${ping_cnt_dw}",
+      expose: "true",
+      local: "false"
     },
     { name: "PING_CNT_DW",
       desc: "Width of ping counter",
       type: "int",
-      default: "16",
+      # NOTE: If this value is to be changed, ensure all IPs with
+      # prim_esc_receiver get updated as well.
+      default: "${ping_cnt_dw}",
       local: "true"
     },
     { name: "PHASE_DW",
@@ -207,7 +244,7 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       type:    "uni",
       name:    "crashdump",
       act:     "req",
-      package: "alert_pkg"
+      package: "${module_instance_name}_pkg"
     },
     { struct:  "edn"
       type:    "req_rsp"
@@ -230,7 +267,158 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       width:   "4", // N_ESC_SEV
       package: "prim_esc_pkg"
     },
+  % if racl_support:
+    { struct:  "racl_policy_vec",
+      type:    "uni",
+      name:    "racl_policies",
+      act:     "rcv",
+      package: "top_racl_pkg",
+      desc:    '''
+        Incoming RACL policy vector from a racl_ctrl instance.
+        The policy selection vector (parameter) selects the policy for each register.
+      '''
+    }
+    { struct:  "racl_error_log",
+      type:    "uni",
+      name:    "racl_error",
+      act:     "req",
+      width:   "1"
+      package: "top_racl_pkg",
+      desc:    '''
+        RACL error log information of this module.
+      '''
+    }
+  % endif
   ]
+
+  features: [
+    { name: "ALERT_HANDLER.ALERT.OBSERVE",
+      desc: '''
+                All incoming alerts can be observed by the alert handler.
+            '''
+    }
+    { name: "ALERT_HANDLER.ALERT.INTERRUPT",
+      desc: '''
+                All alert classes can raise an interrupt when an alert that is
+                allocated to them is raised.
+            '''
+    }
+    { name: "ALERT_HANDLER.ALERT.ESCALATE",
+      desc: '''
+               All incoming alerts can trigger the alert escalation mechanisms
+               of the classes they are allocated to
+            '''
+    }
+    {
+      name: "ALERT_HANDLER.PING_TIMER",
+      desc: '''
+                The alert handler periodically pings all alert receivers and
+                will raise an alert if the ping isn't responded to in good time
+             '''
+    }
+    { name: "ALERT_HANDLER.ESCALATION.COUNT",
+      desc: '''
+                An escalation can be triggered when the number of alerts seen in
+                a particular class exceeds a software programmable threshold
+            '''
+    }
+    { name: "ALERT_HANDLER.ESCALATION.TIMEOUT",
+      desc: '''
+                An escalation can be triggered when an interrupt from a class
+                isn't acknowledged after a software programmable timeout
+            '''
+    }
+    { name: "ALERT_HANDLER.ESCALATION.PHASES",
+      desc: '''
+               Each alert class can trigger the same 4 escalation phases. A
+               programmable timer specifies the delay between each of the
+               escalation phases. The actions taken on each of the escalation
+               signals are specific to the top-level integration.
+            '''
+    }
+    {
+      name: "ALERT_HANDLER.CRASH_DUMP",
+      desc: '''
+               A crashdump with the state of CSRs and alert handler state bits
+               is made available. When a programmable latching trigger condition
+               is met the crashdump is held constant at its value on that
+               trigger condition so it can be recorded and made available for
+               later analysis
+            '''
+    }
+  ]
+
+  countermeasures: [
+    { name: "BUS.INTEGRITY",
+      desc: "End-to-end bus integrity scheme."
+    }
+    { name: "CONFIG.SHADOW",
+      desc: "Important CSRs are shadowed."
+    }
+    { name: "PING_TIMER.CONFIG.REGWEN",
+      desc: "The ping timer configuration registers are REGWEN protected."
+    }
+    { name: "ALERT.CONFIG.REGWEN",
+      desc: "The individual alert enables are REGWEN protected."
+    }
+    { name: "ALERT_LOC.CONFIG.REGWEN",
+      desc: "The individual local alert enables are REGWEN protected."
+    }
+    { name: "CLASS.CONFIG.REGWEN",
+      desc: "The class configuration registers are REGWEN protected."
+    }
+    { name: "ALERT.INTERSIG.DIFF",
+      desc: "Differentially encoded alert channels."
+    }
+    { name: "LPG.INTERSIG.MUBI",
+      desc: "LPG signals are encoded with MUBI types."
+    }
+    { name: "ESC.INTERSIG.DIFF",
+      desc: "Differentially encoded escalation channels."
+    }
+    { name: "ALERT_RX.INTERSIG.BKGN_CHK",
+      desc: "Periodic background checks on alert channels (ping mechanism)."
+    }
+    { name: "ESC_TX.INTERSIG.BKGN_CHK",
+      desc: "Periodic background checks on escalation channels (ping mechanism)."
+    }
+    { name: "ESC_RX.INTERSIG.BKGN_CHK",
+      desc: "Escalation receivers can detect absence of periodic ping requests."
+    }
+    { name: "ESC_TIMER.FSM.SPARSE",
+      desc: "Escalation timer FSMs are sparsely encoded."
+    }
+    { name: "PING_TIMER.FSM.SPARSE",
+      desc: "Ping timer FSM is sparsely encoded."
+    }
+    { name: "ESC_TIMER.FSM.LOCAL_ESC",
+      desc: "Escalation timer FSMs move into an invalid state upon local escalation."
+    }
+    { name: "PING_TIMER.FSM.LOCAL_ESC",
+      desc: "Ping timer FSM moves into an invalid state upon local escalation."
+    }
+    { name: "ESC_TIMER.FSM.GLOBAL_ESC",
+      desc: '''
+            The escalation timer FSMs are the root of global escalation,
+            hence if any of them moves into an invalid state by virtue of
+            ESC_TIMER.FSM.LOCAL_ESC, this will trigger all escalation actions
+            and thereby global escalation as well.
+            '''
+    }
+    { name: "ACCU.CTR.REDUN",
+      desc: "Accumulator counters employ a cross-counter implementation."
+    }
+    { name: "ESC_TIMER.CTR.REDUN",
+      desc: "Escalation timer counters employ a duplicated counter implementation."
+    }
+    { name: "PING_TIMER.CTR.REDUN",
+      desc: "Ping timer counters employ a duplicated counter implementation."
+    }
+    { name: "PING_TIMER.LFSR.REDUN",
+      desc: "Ping timer LFSR is redundant."
+    }
+  ]
+
 ##############################################################################
 # interrupt registers for the classes
   interrupt_list: [
@@ -321,8 +509,8 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
                       name:   "EN",
                       desc:   '''
                               Alert configuration write enable bit.
-                              If this is cleared to 0, the corresponding !!ALERT_EN_SHADOWED0
-                              and !!ALERT_CLASS bits are not writable anymore.
+                              If this is cleared to 0, the corresponding !!ALERT_EN_SHADOWED
+                              and !!ALERT_CLASS_SHADOWED bits are not writable anymore.
 
                               Note that the alert pinging mechanism will only ping alerts that have been enabled and locked.
                               ''',
@@ -393,9 +581,6 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       fields: [
         { bits: "0", name: "A", desc: "Cause bit ", resval: 0}
       ],
-      tags: [// The value of this register is determined by triggering different kinds of alerts
-             // Cannot be auto-predicted so excluded from read check
-             "excl:CsrNonInitTests:CsrExclWriteCheck"]
       }
     },
 ##############################################################################
@@ -412,8 +597,8 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
                       name:   "EN",
                       desc:   '''
                               Alert configuration write enable bit.
-                              If this is cleared to 0, the corresponding !!LOC_ALERT_EN_SHADOWED0
-                              and !!LOC_ALERT_CLASS_SHADOWED0 bits are not writable anymore.
+                              If this is cleared to 0, the corresponding !!LOC_ALERT_EN_SHADOWED
+                              and !!LOC_ALERT_CLASS_SHADOWED bits are not writable anymore.
 
                               Note that the alert pinging mechanism will only ping alerts that have been enabled and locked.
                               ''',
@@ -497,7 +682,6 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       tags: [// Top level CSR automation test, CPU clock is disabled, so escalation response will
              // not send back to alert handler. This will set loc_alert_cause and could not predict
              // automatically.
-             // TODO: remove the exclusion after set up top-level esc_receiver_driver
              "excl:CsrNonInitTests:CsrExclCheck"],
       fields: [
         { bits: "0", name: "LA", desc: "Cause bit ", resval: 0}
@@ -606,8 +790,8 @@ chars = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
           resval: 1,
         }
       ],
-      tags: [// The value of this register is set to false only by hardware,
-             // under the condition that escalation is triggered and the corresponding lock bit is true
+      tags: [// The value of this register is set to false only by hardware, under the condition
+             // that escalation is triggered and the corresponding lock bit is true
              // Cannot not be auto-predicted so it is excluded from read check
              "excl:CsrNonInitTests:CsrExclWriteCheck"]
     },

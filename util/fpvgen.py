@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-r"""Generates boilerplate code for the FPV testbench setup.
-"""
+
+"""Generates boilerplate code for the FPV testbench setup."""
+
 import argparse
-import sys
-from io import StringIO
 from pathlib import Path
 
 from mako.template import Template
@@ -35,7 +34,7 @@ def main():
         util/fpvgen.py hw/ip/prim/rtl/prim_fifo_sync.sv
 
         By default, the output directory is assumed to be '../fpv' with respect
-        to the toplevel module, but this can be overriden using the -eo switch.
+        to the toplevel module, but this can be overridden using the -eo switch.
 
         Further if the IP is comportable, this can be indicated using the -c
         switch, which causes the generator to add a bind statement for the CSR
@@ -43,7 +42,7 @@ def main():
         add_help=True)
     parser.add_argument(
         'file',
-        type=str,
+        type=Path,
         help="""Relative path to the SystemVerilog file of the module for which
         the code shall be generated. This can be a primitive or a comportable IP
         (for which the -c switch should be set)."""
@@ -52,8 +51,8 @@ def main():
     parser.add_argument(
         '-o',
         '--outdir',
-        type=str,
-        default="",
+        type=Path,
+        default=None,
         help="""Path where to place the testbench code. This is defaults to
         '../fpv' w.r.t. to the module path. For instance, if the module path is
         'hw/ip/mymod/rtl/mymod.sv', the FPV testbench would be generated under
@@ -67,12 +66,11 @@ def main():
         help="""Indicates whether this is a comportable IP. If yes, FPV
         assertions for the TL-UL interface and CSRs are automatically bound in
         the testbench. Note however that these CSR assertions need to be
-        generated separately using the regtool automation."""
-        )
+        generated separately using the regtool automation.""")
 
     args = parser.parse_args()
 
-    mod_path = Path(args.file)
+    mod_path = args.file
     if not mod_path.is_file() or mod_path.suffix != ".sv":
         print("Error: %s is not a module or does not exist" % str(mod_path))
         return 1
@@ -100,21 +98,20 @@ def main():
         # likely the correct basename of the IP
         dut.deps += ["lowrisc:ip:" + parentpath.stem]
 
-    # define template files to iterate over
-    template_files = [(Path(__file__).parent.joinpath("fpvgen/tb.sv.tpl"),                  \
-                       outpath.joinpath("tb").joinpath(mod_path.stem + "_tb.sv")),          \
-                      (Path(__file__).parent.joinpath("fpvgen/bind_fpv.sv.tpl"),             \
-                        outpath.joinpath("tb").joinpath(mod_path.stem + "_bind_fpv.sv")),    \
-                      (Path(__file__).parent.joinpath("fpvgen/assert_fpv.sv.tpl"),           \
-                        outpath.joinpath("vip").joinpath(mod_path.stem + "_assert_fpv.sv")), \
-                      (Path(__file__).parent.joinpath("fpvgen/fusesoc.core.tpl"),            \
-                        outpath.joinpath(mod_path.stem + "_fpv.core"))]
+    fpvgen_dir = Path(__file__).parent.joinpath('fpvgen')
+    tpls = [('tb.sv.tpl', 'tb', '_tb.sv'),
+            ('bind_fpv.sv.tpl', 'tb', '_bind_fpv.sv'),
+            ('assert_fpv.sv.tpl', 'vip', '_assert_fpv.sv'),
+            ('fusesoc.core.tpl', '.', '_fpv.core')]
 
-    for (tpl_file, out_file) in template_files:
-        print("Generating %s" % str(out_file))
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        tpl = Template(tpl_file.read_text())
-        out_file.write_text(tpl.render(dut=dut))
+    for rel_tpl_path, out_subdir, out_suffix in tpls:
+        tpl_path = fpvgen_dir.joinpath(rel_tpl_path)
+        out_path = outpath.joinpath(out_subdir, mod_path.stem + out_suffix)
+
+        print(f"Generating {out_path}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tpl = Template(tpl_path.read_text())
+        out_path.write_text(tpl.render(dut=dut))
 
     return 0
 

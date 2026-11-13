@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,9 @@
 module pattgen
   import pattgen_reg_pkg::*;
 #(
-  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}}
+  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}},
+  // Number of cycles a differential skew is tolerated on the alert signal
+  parameter int unsigned AlertSkewCycles = 1
 ) (
   input clk_i,
   input rst_ni,
@@ -42,8 +44,8 @@ module pattgen
     .tl_o,
     .reg2hw,
     .hw2reg,
-    .intg_err_o(alerts[0]),
-    .devmode_i(1'b1)
+    // SEC_CM: BUS.INTEGRITY
+    .intg_err_o(alerts[0])
   );
 
   assign alert_test = {
@@ -54,6 +56,7 @@ module pattgen
   for (genvar i = 0; i < NumAlerts; i++) begin : gen_alert_tx
     prim_alert_sender #(
       .AsyncOn(AlertAsyncOn[i]),
+      .SkewCycles(AlertSkewCycles),
       .IsFatal(1'b1)
     ) u_prim_alert_sender (
       .clk_i,
@@ -94,11 +97,14 @@ module pattgen
   `ASSERT_KNOWN(Pda0TxKnownO_A, cio_pda0_tx_o)
   `ASSERT_KNOWN(Pcl1TxKnownO_A, cio_pcl1_tx_o)
   `ASSERT_KNOWN(Pda1TxKnownO_A, cio_pda1_tx_o)
-  `ASSERT_KNOWN(Pcl0TxEnKnownO_A, cio_pcl0_tx_en_o)
-  `ASSERT_KNOWN(Pda0TxEnKnownO_A, cio_pda0_tx_en_o)
-  `ASSERT_KNOWN(Pcl1TxEnKnownO_A, cio_pcl1_tx_en_o)
-  `ASSERT_KNOWN(Pda1TxEnKnownO_A, cio_pda1_tx_en_o)
   `ASSERT_KNOWN(IntrCh0DoneKnownO_A, intr_done_ch0_o)
   `ASSERT_KNOWN(IntrCh1DoneKnownO_A, intr_done_ch1_o)
 
+  `ASSERT(Pcl0TxEnIsOne_A, cio_pcl0_tx_en_o === 1'b1)
+  `ASSERT(Pda0TxEnIsOne_A, cio_pda0_tx_en_o === 1'b1)
+  `ASSERT(Pcl1TxEnIsOne_A, cio_pcl1_tx_en_o === 1'b1)
+  `ASSERT(Pda1TxEnIsOne_A, cio_pda1_tx_en_o === 1'b1)
+
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ALERT(RegWeOnehotCheck_A, u_reg, alert_tx_o[0])
 endmodule : pattgen

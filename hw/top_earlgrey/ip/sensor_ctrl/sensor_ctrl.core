@@ -1,15 +1,18 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: "lowrisc:systems:sensor_ctrl:0.1"
+name: "lowrisc:systems:top_earlgrey_sensor_ctrl:0.1"
 description: "Sensor Control"
 
 filesets:
   files_rtl:
     depend:
       - lowrisc:prim:assert
-      - lowrisc:systems:sensor_ctrl_pkg
+      - lowrisc:prim:edge_detector
+      - lowrisc:prim:mubi
+      - lowrisc:prim:pad_wrapper_pkg
+      - lowrisc:systems:top_earlgrey_sensor_ctrl_pkg
     files:
       - rtl/sensor_ctrl.sv
     file_type: systemVerilogSource
@@ -19,7 +22,6 @@ filesets:
       # common waivers
       - lowrisc:lint:common
       - lowrisc:lint:comportable
-    files:
     file_type: vlt
 
   files_ascentlint_waiver:
@@ -30,6 +32,12 @@ filesets:
     files:
       - lint/sensor_ctrl.waiver
     file_type: waiver
+
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
 
 parameters:
   SYNTHESIS:
@@ -42,6 +50,7 @@ targets:
     filesets:
       - tool_verilator  ? (files_verilator_waiver)
       - tool_ascentlint ? (files_ascentlint_waiver)
+      - tool_slang      ? (files_slang_waiver)
       - files_rtl
     toplevel: sensor_ctrl
 

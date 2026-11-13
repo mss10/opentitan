@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:otbn_pkg:0.1"
@@ -11,6 +11,7 @@ filesets:
       - lowrisc:prim:assert
       - lowrisc:ip:otp_ctrl_pkg
     files:
+      - rtl/otbn_reg_pkg.sv
       - rtl/otbn_pkg.sv
     file_type: systemVerilogSource
 

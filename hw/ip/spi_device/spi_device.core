@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:spi_device:0.1"
@@ -13,24 +13,31 @@ filesets:
       - lowrisc:prim:clock_buf
       - lowrisc:prim:clock_gating
       - lowrisc:prim:clock_inv
-      - lowrisc:prim:ram_2p_adv
+      - lowrisc:prim:mubi
+      - lowrisc:prim:ram_2p_pkg
+      - lowrisc:prim:ram_1r1w_pkg
+      - lowrisc:prim:ram_2p_async_adv
+      - lowrisc:prim:ram_1r1w_async_adv
       - lowrisc:prim:edge_detector
+      - lowrisc:prim:rst_sync
+      - lowrisc:prim:racl_error_arb
       - lowrisc:ip:lc_ctrl_pkg
       - lowrisc:prim:lc_sync
       - lowrisc:ip:spi_device_pkg
+      - lowrisc:virtual_constants:top_racl_pkg
     files:
       - rtl/spi_device_reg_top.sv
-      - rtl/spi_fwm_rxf_ctrl.sv
-      - rtl/spi_fwm_txf_ctrl.sv
-      - rtl/spi_fwmode.sv
       - rtl/spi_cmdparse.sv
+      - rtl/spid_dpram.sv
       - rtl/spid_readsram.sv
       - rtl/spid_readbuffer.sv
       - rtl/spi_readcmd.sv
       - rtl/spi_passthrough.sv
       - rtl/spid_status.sv
       - rtl/spid_jedec.sv
+      - rtl/spid_addr_4b.sv
       - rtl/spid_fifo2sram_adapter.sv
+      - rtl/spid_csb_sync.sv
       - rtl/spid_upload.sv
       - rtl/spi_tpm.sv
       - rtl/spi_s2p.sv
@@ -62,6 +69,15 @@ filesets:
       # common waivers
       - lowrisc:lint:common
       - lowrisc:lint:comportable
+    files:
+      - lint/spi_device.vbl
+    file_type: veribleLintWaiver
+
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+      - lowrisc:lint:comportable
 
 parameters:
   SYNTHESIS:
@@ -75,6 +91,7 @@ targets:
       - tool_verilator   ? (files_verilator_waiver)
       - tool_ascentlint  ? (files_ascentlint_waiver)
       - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_slang       ? (files_slang_waiver)
       - files_rtl
     toplevel: spi_device
 

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -35,11 +35,6 @@ module sim_sram #(
 
   localparam int WidthBytes = Width >> 3;
 
-  // Socket signals.
-  tlul_pkg::tl_h2d_t tl_socket_h2d[2];
-  tlul_pkg::tl_d2h_t tl_socket_d2h[2];
-  logic dev_select;
-
   // Separate interface to set the SRAM start address (done by the testbench) & monitor the SRAM
   // access.
   sim_sram_if #(
@@ -47,38 +42,9 @@ module sim_sram #(
   ) u_sim_sram_if (
     .clk_i,
     .rst_ni,
-    .tl_h2d(tl_socket_h2d[1]),
-    .tl_d2h(tl_socket_d2h[1])
+    .tl_h2d(tl_in_i),
+    .tl_d2h(tl_in_o)
   );
-
-  // Split the incoming access into two.
-  tlul_socket_1n #(
-    .N        (2),
-    .HReqPass (1'b1),
-    .HRspPass (1'b1),
-    .DReqPass ({2{1'b1}}),
-    .DRspPass ({2{1'b1}}),
-    .HReqDepth(4'h0),
-    .HRspDepth(4'h0),
-    .DReqDepth({2{4'h0}}),
-    .DRspDepth({2{4'h0}})
-  ) u_socket (
-    .clk_i,
-    .rst_ni,
-    .tl_h_i      (tl_in_i),
-    .tl_h_o      (tl_in_o),
-    .tl_d_o      (tl_socket_h2d),
-    .tl_d_i      (tl_socket_d2h),
-    .dev_select_i({1'b0, dev_select})
-  );
-
-  // Logic to select SRAM address range.
-  assign dev_select = (tl_in_i.a_address >= u_sim_sram_if.start_addr &&
-                       tl_in_i.a_address < (u_sim_sram_if.start_addr + (Depth * WidthBytes)));
-
-  // Wire output 0 of the socket to outbound TL interface.
-  assign tl_out_o = tl_socket_h2d[0];
-  assign tl_socket_d2h[0] = tl_out_i;
 
   if (InstantiateSram) begin : gen_sram_inst
 
@@ -102,18 +68,27 @@ module sim_sram #(
     ) u_tl_adapter_sim_sram (
       .clk_i,
       .rst_ni,
-      .tl_i(tl_socket_h2d[1]),
-      .tl_o(tl_socket_d2h[1]),
+      .tl_i(tl_in_i),
+      .tl_o(tl_in_o),
 
-      .req_o   (sram_req),
-      .gnt_i   (1'b1),
-      .we_o    (sram_we),
-      .addr_o  (sram_addr),
-      .wdata_o (sram_wdata),
-      .wmask_o (sram_wmask),
-      .rdata_i (sram_rdata),
-      .rvalid_i(sram_rvalid),
-      .rerror_i(2'b00)
+      .en_ifetch_i                (prim_mubi_pkg::MuBi4False),
+      .req_o                      (sram_req),
+      .req_type_o                 (),
+      .gnt_i                      (1'b1),
+      .we_o                       (sram_we),
+      .addr_o                     (sram_addr),
+      .wdata_o                    (sram_wdata),
+      .wmask_o                    (sram_wmask),
+      .intg_error_o               (),
+      .user_rsvd_o                (),
+      .rdata_i                    (sram_rdata),
+      .rvalid_i                   (sram_rvalid),
+      .rerror_i                   (2'b00),
+      .compound_txn_in_progress_o (),
+      .readback_en_i              (prim_mubi_pkg::MuBi4False),
+      .readback_error_o           (),
+      .wr_collision_i             (1'b0),
+      .write_pending_i            (1'b0)
     );
 
     prim_ram_1p #(
@@ -122,12 +97,15 @@ module sim_sram #(
       .DataBitsPerMask(WidthBytes)
     ) u_sram (
       .clk_i,
-      .req_i  (sram_req),
-      .write_i(sram_we),
-      .addr_i (sram_addr),
-      .wdata_i(sram_wdata),
-      .wmask_i(sram_wmask),
-      .rdata_o(sram_rdata)
+      .rst_ni,
+      .cfg_i (prim_ram_1p_pkg::RAM_1P_CFG_REQ_DEFAULT),
+      .cfg_o (),
+      .req_i     (sram_req),
+      .write_i   (sram_we),
+      .addr_i    (sram_addr),
+      .wdata_i   (sram_wdata),
+      .wmask_i   (sram_wmask),
+      .rdata_o   (sram_rdata)
     );
 
     // Valid data from the SRAM appears 1 cycle after the sram_req.
@@ -145,8 +123,8 @@ module sim_sram #(
     tlul_sink u_tlul_sink (
       .clk_i,
       .rst_ni,
-      .tl_i(tl_socket_h2d[1]),
-      .tl_o(tl_socket_d2h[1])
+      .tl_i(tl_in_i),
+      .tl_o(tl_in_o)
     );
 
   end : gen_no_sram

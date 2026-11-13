@@ -1,14 +1,15 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Description sysrst_ctrl PWRB autoblock module
 
 module sysrst_ctrl_autoblock
+  import sysrst_ctrl_pkg::*;
   import sysrst_ctrl_reg_pkg::*;
 (
-  input                                                   clk_aon_i,
-  input                                                   rst_aon_ni,
+  input                                                   clk_i,
+  input                                                   rst_ni,
   // (Optionally) inverted input signals on AON clock
   input                                                   aon_pwrb_int_i,
   // (Optionally) inverted input signals (not synced to AON clock)
@@ -27,17 +28,23 @@ module sysrst_ctrl_autoblock
 );
 
   logic aon_ab_cond_met;
-  sysrst_ctrl_timerfsm #(
-    .TimerWidth(TimerWidth)
-  ) u_ab_fsm (
-    .clk_i(clk_aon_i),
-    .rst_ni(rst_aon_ni),
-    .trigger_i(aon_pwrb_int_i),
-    .cfg_timer_i(aon_auto_block_debounce_ctl_i.debounce_timer.q),
-    .cfg_l2h_en_i(1'b0),
-    .cfg_h2l_en_i(aon_auto_block_debounce_ctl_i.auto_block_enable.q),
-    .timer_l2h_cond_met(),
-    .timer_h2l_cond_met(aon_ab_cond_met)
+  sysrst_ctrl_detect #(
+    .DebounceTimerWidth(TimerWidth),
+    .DetectTimerWidth(1),
+    // This detects a positive edge
+    .EventType(EdgeToLow),
+    .Sticky(0)
+  ) u_sysrst_ctrl_detect (
+    .clk_i,
+    .rst_ni,
+    .trigger_i             (aon_pwrb_int_i),
+    .cfg_debounce_timer_i  (aon_auto_block_debounce_ctl_i.debounce_timer.q),
+    // We're only using the debounce timer.
+    // The detection timer is set to 0 which corresponds to a 1 cycle detection window.
+    .cfg_detect_timer_i    ('0),
+    .cfg_enable_i          (aon_auto_block_debounce_ctl_i.auto_block_enable.q),
+    .event_detected_o      (aon_ab_cond_met),
+    .event_detected_pulse_o()
   );
 
   assign pwrb_out_hw_o = pwrb_int_i;

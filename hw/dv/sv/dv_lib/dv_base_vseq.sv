@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -65,10 +65,6 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
     num_trans.rand_mode(0);
   endtask
 
-  task body();
-    `uvm_fatal(`gtn, "Need to override this when you extend from this class!")
-  endtask : body
-
   task post_start();
     super.post_start();
     if (do_dut_shutdown) dut_shutdown();
@@ -120,27 +116,39 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
   // optional input `reset_duration_ps` if the DUT has additional resets. The task uses this input
   // to compute the minimal time required to keep all resets asserted.
   virtual task apply_resets_concurrently(int reset_duration_ps = 0);
+    int slowest_clk_period_ps = 0;
+    int reset_duration_from_clks_ps;
 
-    // Has one or more RAL models in DUT.
+    // Calculate the slowest clock that we see with a RAL model or fall back to the default
+    // clk_rst_if if there is no RAL model.
     if (cfg.clk_rst_vifs.size() > 0) begin
       foreach (cfg.clk_rst_vifs[i]) begin
-        cfg.clk_rst_vifs[i].drive_rst_pin(0);
-        reset_duration_ps = max2(reset_duration_ps, cfg.clk_rst_vifs[i].clk_period_ps);
+        slowest_clk_period_ps = max2(slowest_clk_period_ps, cfg.clk_rst_vifs[i].clk_period_ps);
       end
-      #(reset_duration_ps * $urandom_range(2, 10) * 1ps);
-      foreach (cfg.clk_rst_vifs[i]) cfg.clk_rst_vifs[i].drive_rst_pin(1);
+    end else begin
+      slowest_clk_period_ps = cfg.clk_rst_vif.clk_period_ps;
+    end
 
-    // No RAL model and only has default clk_rst_vif.
+    // Pick the reset duration by picking a random number of (slowest) clock cycles, taking at least
+    // two. Then use the maximum of that value and the reset_duration_ps argument.
+    reset_duration_from_clks_ps = $urandom_range(2, 10) * slowest_clk_period_ps;
+    reset_duration_ps = max2(reset_duration_ps, reset_duration_from_clks_ps);
+
+    // Now apply the reset by driving any reset pins to zero, waiting a while, and then driving the
+    // back to one.
+    if (cfg.clk_rst_vifs.size() > 0) begin
+      foreach (cfg.clk_rst_vifs[i]) cfg.clk_rst_vifs[i].drive_rst_pin(0);
+      #(reset_duration_ps * 1ps);
+      foreach (cfg.clk_rst_vifs[i]) cfg.clk_rst_vifs[i].drive_rst_pin(1);
     end else begin
       cfg.clk_rst_vif.drive_rst_pin(0);
-      reset_duration_ps = max2(reset_duration_ps, cfg.clk_rst_vif.clk_period_ps);
-      #(reset_duration_ps * $urandom_range(2, 10) * 1ps);
+      #(reset_duration_ps * 1ps);
       cfg.clk_rst_vif.drive_rst_pin(1);
     end
   endtask
 
   // This is called after apply_reset in this class and after apply_resets_concurrently
-  // in cip_base_vseq::run_stress_all_with_rand_reset_vseq.
+  // in cip_base_vseq::run_seq_with_rand_reset_vseq.
   virtual task post_apply_reset(string reset_kind = "HARD");
   endtask
 
@@ -166,20 +174,22 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
   // wrapper task around run_csr_vseq - the purpose is to be able to call this directly for actual
   // csr tests (as opposed to higher level stress test that could also run csr seq as a fork by
   // calling run_csr_vseq(..) task)
-  virtual task run_csr_vseq_wrapper(int num_times = 1);
+  virtual task run_csr_vseq_wrapper(int num_times = 1, dv_base_reg_block models[$] = {});
     string        csr_test_type;
 
-    // env needs to have a ral instance
-    `DV_CHECK_GE_FATAL(cfg.ral_models.size(), 1)
+    // Env needs to have a ral instance.
+    if (models.size() == 0) begin
+      `DV_CHECK_GE_FATAL(cfg.ral_models.size(), 1)
+    end
 
-    // get csr_test_type from plusarg
+    // Get csr_test_type from plusarg
     void'($value$plusargs("csr_%0s", csr_test_type));
 
     // run the csr seq
     for (int i = 1; i <= num_times; i++) begin
-      `uvm_info(`gfn, $sformatf("running csr %0s vseq iteration %0d/%0d",
+      `uvm_info(`gfn, $sformatf("Running csr %0s vseq iteration %0d/%0d.",
                                 csr_test_type, i, num_times), UVM_LOW)
-      run_csr_vseq(.csr_test_type(csr_test_type));
+      run_csr_vseq(.csr_test_type(csr_test_type), .models(models));
     end
   endtask
 
@@ -187,13 +197,29 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
   // arg csr_test_type: what csr test to run {hw_reset, rw, bit_bash, aliasing}
   // arg num_test_csrs:instead of testing the entire ral model or passing test chunk info via
   // plusarg, provide ability to set a random number of csrs to test from higher level sequence
-  virtual task run_csr_vseq(string          csr_test_type = "",
-                            int             num_test_csrs = 0,
-                            bit             do_rand_wr_and_reset = 1);
-    csr_base_seq  m_csr_seq;
+  // `models` is the list of RAL models to run the common sequences on.
+  // `ral_name` is the string name of the RAL to run the common sequences on.
+  // Both of these inputs are 'null' by default. If externally set, `models` takes precedence over
+  // `ral_name`.
+  virtual task run_csr_vseq(string csr_test_type,
+                            int    num_test_csrs = 0,
+                            bit    do_rand_wr_and_reset = 1,
+                            dv_base_reg_block models[$] = {},
+                            string ral_name = "");
+    csr_base_seq m_csr_seq;
 
-    // env needs to have a ral instance
+    // env needs to have at least one ral instance
     `DV_CHECK_GE_FATAL(cfg.ral_models.size(), 1)
+
+    // Filter out the RAL blocks under test with the supplied name, if available.
+    if (models.size() == 0) begin
+      if (ral_name != "") begin
+        `DV_CHECK_FATAL(cfg.ral_models.exists(ral_name))
+        models.push_back(cfg.ral_models[ral_name]);
+      end else begin
+        foreach (cfg.ral_models[i]) models.push_back(cfg.ral_models[i]);
+      end
+    end
 
     // check which csr test type
     case (csr_test_type)
@@ -204,6 +230,12 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
       "mem_walk": csr_base_seq::type_id::set_type_override(csr_mem_walk_seq::get_type());
       default   : `uvm_fatal(`gfn, $sformatf("specified opt is invalid: +csr_%0s", csr_test_type))
     endcase
+
+    // Print the list of available exclusions that are in effect for debug.
+    foreach (models[i]) begin
+      csr_excl_item csr_excl = csr_utils_pkg::get_excl_item(models[i]);
+      if (csr_excl != null) csr_excl.print_exclusions();
+    end
 
     // if hw_reset test, then write all CSRs first and reset the whole dut
     if (csr_test_type == "hw_reset" && do_rand_wr_and_reset) begin
@@ -219,11 +251,7 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
 
       // run write-only sequence to randomize the csr values
       m_csr_write_seq = csr_write_seq::type_id::create("m_csr_write_seq");
-      // We have to assign this array in a loop because the element types aren't equivalent, so
-      // the array types aren't assignment compatible.
-      foreach (cfg.ral_models[i]) begin
-        m_csr_write_seq.models[i] = cfg.ral_models[i];
-      end
+      m_csr_write_seq.models = models;
       m_csr_write_seq.external_checker = cfg.en_scb;
       m_csr_write_seq.en_rand_backdoor_write = 1'b1;
       m_csr_write_seq.start(null);
@@ -240,13 +268,9 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
 
     // create base csr seq and pass our ral
     m_csr_seq = csr_base_seq::type_id::create("m_csr_seq");
-    // We have to assign this array in a loop because the element types aren't equivalent, so
-    // the array types aren't assignment compatible.
-    foreach (cfg.ral_models[i])  begin
-      m_csr_seq.models[i] = cfg.ral_models[i];
-    end
+    m_csr_seq.models = models;
     m_csr_seq.external_checker = cfg.en_scb;
-    m_csr_seq.num_test_csrs = num_test_csrs;
+    m_csr_seq.max_num_test_csrs = num_test_csrs;
     m_csr_seq.start(null);
   endtask
 
@@ -255,4 +279,13 @@ class dv_base_vseq #(type RAL_T               = dv_base_reg_block,
     uvm_config_db#(bit)::set(null, path, "csr_assert_en", enable);
   endfunction
 
+  // Use the factory to create a sequence by name and return the resulting uvm_sequence.
+  //
+  // The created sequence should be an instance of the class where this function is defined.
+  // Creating the sequence through this method rather than the underlying function,
+  // dv_utils_pkg::create_seq_by_name, allows subclasses of dv_base_seq to copy information about
+  // themselves (such as sequencers or other configuration) to the new sequence.
+  virtual function uvm_sequence create_seq_by_name(string name);
+    return dv_utils_pkg::create_seq_by_name(name);
+  endfunction
 endclass

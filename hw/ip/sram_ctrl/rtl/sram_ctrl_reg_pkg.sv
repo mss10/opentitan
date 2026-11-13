@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -10,8 +10,15 @@ package sram_ctrl_reg_pkg;
   parameter int NumAlerts = 1;
 
   // Address widths within the block
-  parameter int RegsAw = 5;
-  parameter int RamAw = 1;
+  parameter int RegsAw = 6;
+
+  // Number of registers for every interface
+  parameter int NumRegsRegs = 9;
+
+  // Alert indices
+  typedef enum int {
+    AlertFatalErrorIdx = 0
+  } sram_ctrl_alert_idx_t;
 
   ///////////////////////////////////////////////
   // Typedefs for registers for regs interface //
@@ -25,22 +32,25 @@ package sram_ctrl_reg_pkg;
   typedef struct packed {
     struct packed {
       logic        q;
-    } bus_integ_error;
+    } sram_alert;
     struct packed {
       logic        q;
-    } init_error;
+    } readback_error;
     struct packed {
       logic        q;
-    } escalated;
-    struct packed {
-      logic        q;
-    } scr_key_valid;
+    } init_done;
     struct packed {
       logic        q;
     } scr_key_seed_valid;
     struct packed {
       logic        q;
-    } init_done;
+    } escalated;
+    struct packed {
+      logic        q;
+    } init_error;
+    struct packed {
+      logic        q;
+    } bus_integ_error;
   } sram_ctrl_reg2hw_status_reg_t;
 
   typedef struct packed {
@@ -51,30 +61,30 @@ package sram_ctrl_reg_pkg;
     struct packed {
       logic        q;
       logic        qe;
-    } renew_scr_key;
+    } init;
     struct packed {
       logic        q;
       logic        qe;
-    } init;
+    } renew_scr_key;
   } sram_ctrl_reg2hw_ctrl_reg_t;
+
+  typedef struct packed {
+    logic [3:0]  q;
+  } sram_ctrl_reg2hw_readback_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        d;
       logic        de;
-    } bus_integ_error;
+    } sram_alert;
     struct packed {
       logic        d;
       logic        de;
-    } init_error;
+    } readback_error;
     struct packed {
       logic        d;
       logic        de;
-    } escalated;
-    struct packed {
-      logic        d;
-      logic        de;
-    } scr_key_valid;
+    } init_done;
     struct packed {
       logic        d;
       logic        de;
@@ -82,33 +92,56 @@ package sram_ctrl_reg_pkg;
     struct packed {
       logic        d;
       logic        de;
-    } init_done;
+    } scr_key_valid;
+    struct packed {
+      logic        d;
+      logic        de;
+    } escalated;
+    struct packed {
+      logic        d;
+      logic        de;
+    } init_error;
+    struct packed {
+      logic        d;
+      logic        de;
+    } bus_integ_error;
   } sram_ctrl_hw2reg_status_reg_t;
+
+  typedef struct packed {
+    logic [3:0]  d;
+    logic        de;
+  } sram_ctrl_hw2reg_scr_key_rotated_reg_t;
 
   // Register -> HW type for regs interface
   typedef struct packed {
-    sram_ctrl_reg2hw_alert_test_reg_t alert_test; // [15:14]
-    sram_ctrl_reg2hw_status_reg_t status; // [13:8]
-    sram_ctrl_reg2hw_exec_reg_t exec; // [7:4]
-    sram_ctrl_reg2hw_ctrl_reg_t ctrl; // [3:0]
+    sram_ctrl_reg2hw_alert_test_reg_t alert_test; // [20:19]
+    sram_ctrl_reg2hw_status_reg_t status; // [18:12]
+    sram_ctrl_reg2hw_exec_reg_t exec; // [11:8]
+    sram_ctrl_reg2hw_ctrl_reg_t ctrl; // [7:4]
+    sram_ctrl_reg2hw_readback_reg_t readback; // [3:0]
   } sram_ctrl_regs_reg2hw_t;
 
   // HW -> register type for regs interface
   typedef struct packed {
-    sram_ctrl_hw2reg_status_reg_t status; // [11:0]
+    sram_ctrl_hw2reg_status_reg_t status; // [20:5]
+    sram_ctrl_hw2reg_scr_key_rotated_reg_t scr_key_rotated; // [4:0]
   } sram_ctrl_regs_hw2reg_t;
 
   // Register offsets for regs interface
-  parameter logic [RegsAw-1:0] SRAM_CTRL_ALERT_TEST_OFFSET = 5'h 0;
-  parameter logic [RegsAw-1:0] SRAM_CTRL_STATUS_OFFSET = 5'h 4;
-  parameter logic [RegsAw-1:0] SRAM_CTRL_EXEC_REGWEN_OFFSET = 5'h 8;
-  parameter logic [RegsAw-1:0] SRAM_CTRL_EXEC_OFFSET = 5'h c;
-  parameter logic [RegsAw-1:0] SRAM_CTRL_CTRL_REGWEN_OFFSET = 5'h 10;
-  parameter logic [RegsAw-1:0] SRAM_CTRL_CTRL_OFFSET = 5'h 14;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_ALERT_TEST_OFFSET = 6'h 0;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_STATUS_OFFSET = 6'h 4;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_EXEC_REGWEN_OFFSET = 6'h 8;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_EXEC_OFFSET = 6'h c;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_CTRL_REGWEN_OFFSET = 6'h 10;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_CTRL_OFFSET = 6'h 14;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_SCR_KEY_ROTATED_OFFSET = 6'h 18;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_READBACK_REGWEN_OFFSET = 6'h 1c;
+  parameter logic [RegsAw-1:0] SRAM_CTRL_READBACK_OFFSET = 6'h 20;
 
   // Reset values for hwext registers and their fields for regs interface
-  parameter logic [0:0] SRAM_CTRL_ALERT_TEST_RESVAL = 1'h 0;
+  parameter logic [31:0] SRAM_CTRL_ALERT_TEST_RESVAL = 32'h 80000000;
   parameter logic [0:0] SRAM_CTRL_ALERT_TEST_FATAL_ERROR_RESVAL = 1'h 0;
+  parameter logic [0:0] SRAM_CTRL_ALERT_TEST_REGWEN_RESVAL = 1'h 1;
 
   // Register index for regs interface
   typedef enum int {
@@ -117,18 +150,23 @@ package sram_ctrl_reg_pkg;
     SRAM_CTRL_EXEC_REGWEN,
     SRAM_CTRL_EXEC,
     SRAM_CTRL_CTRL_REGWEN,
-    SRAM_CTRL_CTRL
+    SRAM_CTRL_CTRL,
+    SRAM_CTRL_SCR_KEY_ROTATED,
+    SRAM_CTRL_READBACK_REGWEN,
+    SRAM_CTRL_READBACK
   } sram_ctrl_regs_id_e;
 
   // Register width information to check illegal writes for regs interface
-  parameter logic [3:0] SRAM_CTRL_REGS_PERMIT [6] = '{
-    4'b 0001, // index[0] SRAM_CTRL_ALERT_TEST
+  parameter logic [3:0] SRAM_CTRL_REGS_PERMIT [9] = '{
+    4'b 1111, // index[0] SRAM_CTRL_ALERT_TEST
     4'b 0001, // index[1] SRAM_CTRL_STATUS
     4'b 0001, // index[2] SRAM_CTRL_EXEC_REGWEN
     4'b 0001, // index[3] SRAM_CTRL_EXEC
     4'b 0001, // index[4] SRAM_CTRL_CTRL_REGWEN
-    4'b 0001  // index[5] SRAM_CTRL_CTRL
+    4'b 0001, // index[5] SRAM_CTRL_CTRL
+    4'b 0001, // index[6] SRAM_CTRL_SCR_KEY_ROTATED
+    4'b 0001, // index[7] SRAM_CTRL_READBACK_REGWEN
+    4'b 0001  // index[8] SRAM_CTRL_READBACK
   };
 
 endpackage
-

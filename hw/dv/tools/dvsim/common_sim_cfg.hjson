@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -10,20 +10,20 @@
   import_cfgs:      ["{proj_root}/hw/data/common_project_cfg.hjson",
                      "{dv_root}/tools/dvsim/common_modes.hjson",
                      "{dv_root}/tools/dvsim/fusesoc.hjson",
+                     "{dv_root}/tools/dvsim/bazel.hjson",
                      "{dv_root}/tools/dvsim/{tool}.hjson"]
+
+  sv_flist_gen_flags: ["--mapping=lowrisc:prim_generic:all:0.1"]
 
   // Default directory structure for the output
   build_dir:          "{scratch_path}/{build_mode}"
   run_dir_name:       "{index}.{test}"
-  run_dir:            "{scratch_path}/{run_dir_name}/out"
-  sw_build_dir:       "{scratch_path}"
+  run_dir:            "{scratch_path}/{run_dir_name}/latest"
   sw_root_dir:        "{proj_root}/sw"
 
-  // pass and fail patterns
-  build_pass_patterns: []
-  // TODO: Add back FuseSoC fail pattern after
-  // https://github.com/lowRISC/opentitan/issues/7348 is resolved.
-  build_fail_patterns: []
+  // Default file to store build_seed value
+  build_seed_file_path: "{build_dir}/build_seed.log"
+
   run_pass_patterns:   ["^TEST PASSED (UVM_)?CHECKS$"]
   run_fail_patterns:   ["^UVM_ERROR\\s[^:].*$",
                         "^UVM_FATAL\\s[^:].*$",
@@ -55,6 +55,8 @@
   // the 'overrides' directive.
   dut_instance: "{tb}.dut"
 
+  timescale: "1ns/1ps"
+
   // Top level simulation entities.
   sim_tops: ["{tb}"]
 
@@ -66,7 +68,8 @@
                "+define+UVM_REG_ADDR_WIDTH={tl_aw}",
                "+define+UVM_REG_DATA_WIDTH={tl_dw}",
                "+define+UVM_REG_BYTENABLE_WIDTH={tl_dbw}",
-               "+define+SIMULATION"]
+               "+define+SIMULATION",
+               "+define+DUT_HIER={dut_instance}"]
 
   run_opts: ["+UVM_NO_RELNOTES",
              "+UVM_VERBOSITY={expand_uvm_verbosity_{verbosity}}"]
@@ -74,8 +77,10 @@
   // Default list of things to export to shell
   exports: [
     { dv_root: "{dv_root}" },
+    { self_dir: "{self_dir}" },
     { SIMULATOR: "{tool}" },
     { GUI: "{gui}"},
+    { GUI_DEBUG: "{gui_debug}"},
     { WAVES: "{waves}" },
     { DUT_TOP: "{dut}" },
     { TB_TOP: "{tb}" },
@@ -99,7 +104,7 @@
   //     }
   //   ]
   //
-  // To use a build mode for a specific test, set the 'use_build_mode' key.
+  // To use a build mode for a specific test, set the 'build_mode' key.
   //
   build_modes: []
 
@@ -115,19 +120,17 @@
       name: smoke
       tests: []
       reseed: 1
-      // Knob used to configure an existing test / vseq to have a shorter runtime.
-      run_opts: ["+smoke_test=1"]
+      run_opts: [// Knob used to configure an existing test / vseq to have a shorter runtime.
+                 "+smoke_test=1"
+                ]
     }
-
     {
       name: all
     }
-
     {
       name: all_once
       reseed: 1
     }
-
     {
       name: nightly
       en_sim_modes: ["cov"]
@@ -137,6 +140,8 @@
   // Project defaults for VCS
   vcs_cov_cfg_file: "{{build_mode}_vcs_cov_cfg_file}"
   vcs_unr_cfg_file: "{dv_root}/tools/vcs/unr.cfg"
+  vcs_xprop_cfg_file: "{dv_root}/tools/vcs/xprop.cfg"
+  vcs_fsm_reset_cov_cfg_file: "{dv_root}/tools/vcs/fsm_reset_cov.cfg"
   vcs_cov_excl_files: []
 
   // Build-specific coverage cfg files for VCS.

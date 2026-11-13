@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "pulp-platform:riscv-dbg:0.1"
@@ -13,6 +13,7 @@ filesets:
     files:
       - pulp_riscv_dbg/debug_rom/debug_rom.sv
       - pulp_riscv_dbg/debug_rom/debug_rom_one_scratch.sv
+      - pulp_riscv_dbg/debug_rom/debug_rom_cheriot.sv
       - pulp_riscv_dbg/src/dm_pkg.sv
       - pulp_riscv_dbg/src/dm_sba.sv
       - pulp_riscv_dbg/src/dm_csrs.sv
@@ -20,6 +21,7 @@ filesets:
       - pulp_riscv_dbg/src/dmi_cdc.sv
       - pulp_riscv_dbg/src/dmi_jtag.sv
       - pulp_riscv_dbg/src/dmi_jtag_tap.sv
+      - pulp_riscv_dbg/src/dm_top.sv
     file_type: systemVerilogSource
 
   files_verilator_waiver:

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -6,7 +6,12 @@
   import_testplans: ["hw/dv/tools/dvsim/testplans/csr_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/alert_test_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/mem_testplan.hjson",
-                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson"]
+                     "hw/dv/tools/dvsim/testplans/passthru_mem_intg_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/sec_cm_fsm_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/sec_cm_count_testplan.hjson",
+                     "rom_ctrl_sec_cm_testplan.hjson"]
   testpoints: [
     {
       name: smoke
@@ -14,55 +19,64 @@
             Smoke test exercising the main features of rom_ctrl.
 
             **Stimulus**:
-            - Create a random valid ROM image and load into memory model
+            - Create a random valid ROM where expected digest doesn't match with the KMAC digest
+            image and load into memory model
             - Allow the rom check to complete
             - Perform some random memory accesses
+            - Create a random valid ROM where expected digest matches with the KMAC digest
+            - Repeat steps 2 and 3.
 
             **Checks**:
             - Check that all data supplied to kmac is correct
             - Check that the rom checking sequence gives the expected result
             - Check that the memory accesses return expected data
+            - Check that pwrmgr_data_o.good is not asserted in first iteration.
+            - Check that pwrmgr_data_o.good is asserted in second iteration.
+            - Check that tile link accesses are blocked till pwrmgr_data_o.done is asserted.
             '''
-      milestone: V1
+      stage: V1
       tests: ["rom_ctrl_smoke"]
     }
     {
-      name: multiple_reset
+      name: corrupt_sig_fatal_chk
       desc: '''
-            Test where the design is reset many times and the rom is re-checked
-
-            **Stimulus**:
-            - Periodically reset the device to restart the rom check
+            Corrupt integrity of signals like the select signal to addr mux.
 
             **Checks**:
-            - Check that the digest csrs are not corrupted
+            - Check that fatal error is flagged.
             '''
-      milestone: V2
-      tests: []
+      stage: V2S
+      tests: ["rom_ctrl_corrupt_sig_fatal_chk"]
     }
     {
-      name: mem_tl_errors
+      name: max_throughput_chk
       desc: '''
-            This test will reuse the common tl_access_tests to run TLUL error sequences on the
-            ROM TLUL interface to verify that erroneous TLUL transactions are handled correctly.
-            '''
-      milestone: V2
-      tests: []
-    }
-    {
-      name: ecc_mem_fault
-      desc: '''
-            Inject runtime errors into the rom
-
-            **Stimulus**:
-            - Insert 1, 2 and 3 bit errors into rom reads to trigger ECC checking
+            This test is intended to test the max throughput of ROM controller.
+            It takes N+1 cycles to finish N ROM read accesses.
 
             **Checks**:
-            - TODO - should this generate an alert with xmission integrity?
+            - Check if N read accesses finish in N+1 cycles.
             '''
-      milestone: V3
-      tests: []
+      stage: V2
+      tests: ["rom_ctrl_max_throughput_chk"]
     }
+    {
+      name: stress_all
+      desc: '''
+            - Combine above sequences in one test to run sequentially.
+            - Randomly add reset between each sequence'''
+      stage: V2
+      tests: ["rom_ctrl_stress_all"]
+    }
+    {
+      name: kmac_err_chk
+      desc: '''
+            - Generate error from KMAC when it responds with KMAC digest image.
+            - Check that ROM controller goes into invalid state'''
+      stage: V2
+      tests: ["rom_ctrl_kmac_err_chk"]
+    }
+
   ]
   covergroups: [
     {
@@ -79,15 +93,18 @@
     {
       name: rom_ctrl_tlul_cg
       desc: '''
-            Collect coverage on the two TLUL interfaces, specifically checking
+            -Collect coverage on the two TLUL interfaces, specifically checking
             that we see requests around the same time as the rom check completes.
+            - Collect coverage to ensure that a_valid goes high when rom check
+            is in progress. This ensures that the scenario where TL accesses are
+            blocked until the ROM check is done is covered.
             '''
     }
     {
       name: rom_ctrl_check_cg
       desc: '''
             Collect coverage on the outputs sent to the power manager to confirm
-            that we see pass and fail resutls.
+            that we see pass and fail results.
             '''
     }
   ]

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -59,8 +59,9 @@ module spid_readsram
   // the latched address field.
   input [31:0] current_address_i,
 
-  input mailbox_en_i,
-  input mailbox_hit_i, // the received address field hits the mailbox
+  input        mailbox_en_i,
+  input [31:0] mailbox_addr_i,
+
   input sfdp_hit_i,    // selected DP is DpReadSFDP
 
   // SRAM request and response
@@ -100,6 +101,9 @@ module spid_readsram
   // Signal //
   ////////////
 
+  // mailbox_hit: it compares the next_address with mailbox space.
+  logic mailbox_hit;
+
   // State Machine output
 
   // data_inc: incoming data is word size (sram_data_t).
@@ -119,7 +123,7 @@ module spid_readsram
   assign sram_l2m_o.req   = sram_req;
   assign sram_l2m_o.we    = 1'b 0;
   assign sram_l2m_o.wdata = '0;
-  assign sram_l2m_o.wstrb = 8'h0; // no write
+  assign sram_l2m_o.wstrb = SramStrbW'(0); // no write
 
   sram_addr_t sram_addr;
   assign sram_l2m_o.addr = sram_addr;
@@ -144,6 +148,18 @@ module spid_readsram
   //////////////
   // Datapath //
   //////////////
+
+  // Mailbox hit detection
+  // mailbox_hit_i only checks current_address_i.
+  // SRAM logic sends request to the next address based on the condition.
+  // Need to check the mailbox hit based on the SRAM address rather than
+  // current_address.
+  localparam logic [31:0] MailboxMask = {{30-MailboxAw{1'b1}}, {2+MailboxAw{1'b0}}};
+
+  logic [31:0] mailbox_masked_addr;
+  assign mailbox_masked_addr = (next_address & MailboxMask);
+  assign mailbox_hit         = mailbox_en_i
+                             && (mailbox_masked_addr == mailbox_addr_i);
 
   logic sram_latched; // sram request sent
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -178,7 +194,7 @@ module spid_readsram
   always_comb begin
     if (sfdp_hit_i) begin
       sram_addr = SfdpBaseAddr | sram_addr_t'(next_address[2+:SfdpAw]);
-    end else if (mailbox_en_i && mailbox_hit_i) begin
+    end else if (mailbox_hit) begin
       sram_addr = MailboxBaseAddr | sram_addr_t'(next_address[2+:MailboxAw]);
     end else begin
       sram_addr = ReadBaseAddr | sram_addr_t'(next_address[2+:ReadBufAw]);
@@ -211,7 +227,7 @@ module spid_readsram
   end
 
   always_comb begin
-    st_d = StIdle;
+    st_d = st_q;
 
     fifo_wvalid = 1'b 0;
 
@@ -223,13 +239,15 @@ module spid_readsram
 
     unique case (st_q)
       StIdle: begin
-        if (sram_read_req_i) begin // TODO: Change to STRB set
+        addr_sel = AddrInput;
+
+        if (sram_read_req_i) begin
           sram_req = 1'b 1;
-          addr_sel = AddrInput;
         end
 
         if ((sram_read_req_i || sram_latched) && strb_set) begin
-          // Only when both are valid
+          // Regardless of permitted or not, FSM moves to StPush.
+          // If not permitted, FSM will psh garbage data to the FIFO
           st_d = StPush;
         end else begin
           st_d = StIdle;
@@ -254,11 +272,13 @@ module spid_readsram
       end
 
       StActive: begin
+        // Assume the SRAM logic is faster than update of current_address_i.
+        // ICEBOX(#18352): Put assertion.
+        addr_sel = AddrContinuous; // Pointing to next_address to check mailbox hit
         if (!sram_fifo_full) begin
           st_d = StPush;
 
           sram_req = 1'b 1;
-          addr_sel = AddrContinuous;
         end else begin
           st_d = StActive;
         end
@@ -274,9 +294,10 @@ module spid_readsram
   // Instance //
   //////////////
   prim_fifo_sync #(
-    .Width ($bits(sram_data_t)),
-    .Pass  (1'b 1),
-    .Depth (1),
+    .Width       ($bits(sram_data_t)),
+    .Pass        (1'b 1),
+    .Depth       (1),
+    .NeverClears (1'b1),
     .OutputZeroIfEmpty (1'b 0)
   ) u_sram_fifo (
     .clk_i,
@@ -293,14 +314,16 @@ module spid_readsram
     .rdata_o  (sram_data),
 
     .full_o   (sram_fifo_full),
-    .depth_o  (unused_sram_depth)
+    .depth_o  (unused_sram_depth),
+    .err_o    ()
   );
 
   prim_fifo_sync #(
     .Width             ($bits(spi_byte_t)),
     .Pass              (1'b1),
     .Depth             (2),
-    .OutputZeroIfEmpty (1'b0)
+    .OutputZeroIfEmpty (1'b0),
+    .NeverClears       (1'b1)
   ) u_fifo (
     .clk_i,
     .rst_ni,
@@ -316,10 +339,11 @@ module spid_readsram
     .rdata_o  (fifo_rdata_o ),
 
     .full_o   (unused_fifo_full ),
-    .depth_o  (unused_fifo_depth)
+    .depth_o  (unused_fifo_depth),
+    .err_o    ()
   );
 
-  // TODO: Handle SRAM integrity errors
+  // ICEBOX(#18353): Handle SRAM integrity errors
   sram_err_t unused_sram_rerror;
   assign unused_sram_rerror = sram_m2l_i.rerror;
 
@@ -345,10 +369,14 @@ module spid_readsram
   // SRAM data should return in next cycle
   `ASSUME(SramDataReturnRequirement_M, sram_l2m_o.req && !sram_l2m_o.we |=> sram_m2l_i.rvalid)
 
-  // in fifo_pop, FIFO should not be empty.
-  `ASSERT(FifoNotEmpty_A, fifo_rready_i |-> unused_fifo_depth != 0)
+  // in fifo_pop, FIFO should not be empty for permitted operations.
+  `ASSERT(FifoNotEmpty_A,
+          fifo_rready_i |-> unused_fifo_depth != 0)
 
   // strb_set is asserted together with sram_req or follows the req
   `ASSUME(ReqStrbRelation_M, sram_read_req_i |-> ##[0:2] addr_latched_i)
+
+  // Address latched signal is a pulse signal
+  `ASSUME(AddrLatchedPulse_M, addr_latched_i |=> !addr_latched_i)
 
 endmodule : spid_readsram

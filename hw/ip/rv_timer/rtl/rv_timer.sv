@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -8,7 +8,12 @@
 
 module rv_timer import rv_timer_reg_pkg::*;
 #(
-  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}}
+  parameter logic [NumAlerts-1:0]           AlertAsyncOn              = {NumAlerts{1'b1}},
+  // Number of cycles a differential skew is tolerated on the alert signal
+  parameter int unsigned                    AlertSkewCycles           = 1,
+  parameter bit                             EnableRacl                = 1'b0,
+  parameter bit                             RaclErrorRsp              = EnableRacl,
+  parameter top_racl_pkg::racl_policy_sel_t RaclPolicySelVec[NumRegs] = '{NumRegs{0}}
 ) (
   input clk_i,
   input rst_ni,
@@ -19,10 +24,12 @@ module rv_timer import rv_timer_reg_pkg::*;
   input  prim_alert_pkg::alert_rx_t [NumAlerts-1:0] alert_rx_i,
   output prim_alert_pkg::alert_tx_t [NumAlerts-1:0] alert_tx_o,
 
+  // RACL interface
+  input  top_racl_pkg::racl_policy_vec_t racl_policies_i,
+  output top_racl_pkg::racl_error_log_t  racl_error_o,
+
   output logic intr_timer_expired_hart0_timer0_o
 );
-
-  import rv_timer_reg_pkg::*;
 
   rv_timer_reg2hw_t reg2hw;
   rv_timer_hw2reg_t hw2reg;
@@ -116,7 +123,11 @@ module rv_timer import rv_timer_reg_pkg::*;
 
   // Register module
   logic [NumAlerts-1:0] alert_test, alerts;
-  rv_timer_reg_top u_reg (
+  rv_timer_reg_top #(
+    .EnableRacl(EnableRacl),
+    .RaclErrorRsp(RaclErrorRsp),
+    .RaclPolicySelVec(RaclPolicySelVec)
+  ) u_reg (
     .clk_i,
     .rst_ni,
 
@@ -126,8 +137,11 @@ module rv_timer import rv_timer_reg_pkg::*;
     .reg2hw,
     .hw2reg,
 
-    .intg_err_o (alerts[0]),
-    .devmode_i  (1'b1)
+    .racl_policies_i,
+    .racl_error_o,
+
+    // SEC_CM: BUS.INTEGRITY
+    .intg_err_o (alerts[0])
   );
 
   // Alerts
@@ -139,6 +153,7 @@ module rv_timer import rv_timer_reg_pkg::*;
   for (genvar i = 0; i < NumAlerts; i++) begin : gen_alert_tx
     prim_alert_sender #(
       .AsyncOn(AlertAsyncOn[i]),
+      .SkewCycles(AlertSkewCycles),
       .IsFatal(1'b1)
     ) u_prim_alert_sender (
       .clk_i,
@@ -158,6 +173,9 @@ module rv_timer import rv_timer_reg_pkg::*;
   `ASSERT_KNOWN(TlODValidKnown, tl_o.d_valid)
   `ASSERT_KNOWN(TlOAReadyKnown, tl_o.a_ready)
   `ASSERT_KNOWN(AlertsKnown_A, alert_tx_o)
+  `ASSERT_KNOWN_IF(RaclErrorOKnown_A, racl_error_o, racl_error_o.valid)
   `ASSERT_KNOWN(IntrTimerExpiredHart0Timer0Known, intr_timer_expired_hart0_timer0_o)
 
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ALERT(RegWeOnehotCheck_A, u_reg, alert_tx_o[0])
 endmodule

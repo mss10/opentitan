@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,17 +8,16 @@
 //! the command framework for opentitantool.
 
 use anyhow::Result;
-use erased_serde::Serialize;
+use clap::{Args, Subcommand};
 use std::any::Any;
-use structopt::StructOpt;
 
-use opentitanlib::app::command::CommandDispatch;
 use opentitanlib::app::TransportWrapper;
+use opentitanlib::app::command::CommandDispatch;
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 /// The `hello world` command accepts an command option of `--cruel`.
 pub struct HelloWorld {
-    #[structopt(short, long)]
+    #[arg(short, long)]
     cruel: bool,
 }
 
@@ -33,7 +32,7 @@ impl CommandDispatch for HelloWorld {
         &self,
         _context: &dyn Any,
         _transport: &TransportWrapper,
-    ) -> Result<Option<Box<dyn Serialize>>> {
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>> {
         // Is the world cruel or not?
         let msg = if self.cruel {
             "Hello cruel World!"
@@ -46,24 +45,22 @@ impl CommandDispatch for HelloWorld {
     }
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 /// The `hello people` command takes no additional switches or arguments.
-pub struct HelloPeople {
-    // Unit structs not allowed by StructOpt
-}
+pub struct HelloPeople;
 
 impl CommandDispatch for HelloPeople {
     fn run(
         &self,
         _context: &dyn Any,
         _transport: &TransportWrapper,
-    ) -> Result<Option<Box<dyn Serialize>>> {
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>> {
         // The `hello people` command produces no result.
         Ok(None)
     }
 }
 
-#[derive(Debug, StructOpt, CommandDispatch)]
+#[derive(Debug, Subcommand, CommandDispatch)]
 /// There are two types of `hello` subcommand; this enum binds them together
 /// so they can both be under the `hello` command.  This enum also derives
 /// `CommandDispatch` which automatically builds a `run` method for this
@@ -73,7 +70,7 @@ pub enum HelloTypes {
     People(HelloPeople),
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 /// The `goodbye` command takes no options or arguments.
 pub struct GoodbyeCommand {}
 
@@ -88,18 +85,19 @@ impl CommandDispatch for GoodbyeCommand {
         &self,
         _context: &dyn Any,
         _transport: &TransportWrapper,
-    ) -> Result<Option<Box<dyn Serialize>>> {
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>> {
         Ok(Some(Box::new(GoodbyeMessage {
             message: "Goodbye!".to_owned(),
         })))
     }
 }
 
-#[derive(Debug, StructOpt, CommandDispatch)]
+#[derive(Debug, Subcommand, CommandDispatch)]
 /// The [`Greetings`] enum binds the `hello` and `goodbye` command hirarchies
 /// in this module together into a single type which can be included into
 /// the root of the command heirarchy in `main.rs`.
 pub enum Greetings {
+    #[command(subcommand)]
     Hello(HelloTypes),
     Goodbye(GoodbyeCommand),
 }

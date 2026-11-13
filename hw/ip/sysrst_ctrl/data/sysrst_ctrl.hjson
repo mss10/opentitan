@@ -1,7 +1,38 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
-{ name: "sysrst_ctrl",
+{
+  name:               "sysrst_ctrl",
+  human_name:         "System Reset Controller",
+  one_line_desc:      "Manages board-level reset sequencing, interfaces reset and power manager",
+  one_paragraph_desc: '''
+  System Reset Controller provides basic board-level reset sequencing in response to trusted inputs.
+  It is programmable to accommodate actions triggered by presses of buttons and keyboard key combinations, to control the duration of reset pulses, and to trigger reset or wake-up requests that go to Reset Manager and to Power Manager.
+  System Reset Controller is part of the always-on power and clock domain.
+  '''
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "29",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_sysrst_ctrl",
+  revisions: [
+    {
+      version:            "2.0.0",
+      life_stage:         "L1",
+      design_stage:       "D3",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+      commit_id:          "bfd9e1884021c925ff15909c298de2d824f10712",
+    }
+    { version:            "2.1.0",
+      life_stage:         "L1",
+      design_stage:       "D3",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+    }
+  ]
+
   clocking: [
     {clock: "clk_i", reset: "rst_ni", primary: true},
     {clock: "clk_aon_i", reset: "rst_aon_ni"}
@@ -10,8 +41,9 @@
     { protocol: "tlul", direction: "device" }
   ],
   interrupt_list: [
-    { name: "sysrst_ctrl",
-      desc: "common interrupt triggered by combo or keyboard actions",
+    { name: "event_detected",
+      desc: "Common interrupt triggered by combo or keyboard events.",
+      type: "status"
     }
   ],
   alert_list: [
@@ -23,12 +55,12 @@
   ],
   wakeup_list: [
     { name: "wkup_req",
-      desc: "user directed wakeup",
+      desc: "OpenTitan wake request signal to `pwrmgr` (running on AON clock).",
     }
   ],
   reset_request_list: [
-    { name: "aon_sysrst_ctrl_rst_req",
-      desc: "user directed reset"
+    { name: "rst_req",
+      desc: "OpenTitan reset request to `rstmgr` (running on AON clock)."
     },
   ],
   param_list: [
@@ -36,6 +68,12 @@
       type:    "int",
       default: "4",
       desc:    "Number of keyboard combos",
+      local:   "true",
+    }
+    { name:    "NumKeyIntr",
+      type:    "int",
+      default: "7",
+      desc:    "Number of keys that can trigger interrupts",
       local:   "true",
     }
     { name:    "TimerWidth",
@@ -53,6 +91,7 @@
   ],
   available_inout_list: [
     { name: "ec_rst_l", desc: "ec_rst_l as an inout to/from the open drain IO" }
+    { name: "flash_wp_l", desc: "flash_wp_l as an inout to/from the open drain IO" }
   ],
   available_input_list: [
     { name: "ac_present", desc: "A/C power is present" }
@@ -64,7 +103,6 @@
   ],
   available_output_list: [
     { name: "bat_disable", desc: "Battery is disconnected" }
-    { name: "flash_wp_l", desc: "flash_wp_l as an output to the open drain IO" }
     { name: "key0_out", desc: "Passthrough from key0_in, can be configured to invert" }
     { name: "key1_out", desc: "Passthrough from key1_in, can be configured to invert" }
     { name: "key2_out", desc: "Passthrough from key2_in, can be configured to invert" }
@@ -79,7 +117,7 @@
       type:    "uni",
       width:   "1"
     }
-    { name:    "aon_sysrst_ctrl_rst_req",
+    { name:    "rst_req",
       package: "",
       struct:  "logic",
       act:     "req"
@@ -87,6 +125,69 @@
       width:   "1"
     }
   ],
+  features: [
+    {
+      name: "SYSRST_CTRL.COMBO_DETECT"
+      desc: '''
+            sys_rst_ctrl block can be configured to detect input key combinations
+            with optional precondition
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.AUTO_BLOCK_KEY_OUTPUT"
+      desc: '''
+            sysrst_ctrl block can be configured to override the output value of specific passthrough signals,
+            depending on whether certain input signals are asserted or not
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.INPUT_TRIGGERED_INTERRUPT"
+      desc: '''
+            sysrst_ctrl block can be configured to assert interrupt based on a combination of input signal transitions
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.ULTRA_LOW_POWER_WAKEUP"
+      desc: '''
+            sysrst_ctrl block can be programmed to detect certain specific signal transitions on the
+            ac_present_i, pwrb_in_i and lid_open_i inputs. After this transition is held for a programmed time,
+            sysrst_ctrl block triggers z3_wakeup signal
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.PINOUT_KEY_INVERSION_CONTROL"
+      desc: '''
+            sysrst_ctrl block can be programmed to override all output signals, and change the signal polarity
+            of some of the input and output signals
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.HARDWARE_RESET_STRETCH"
+      desc: '''
+            When OpenTitan is in reset, ec_rst_l_o will be asserted (active low).
+            The power-on-reset value of PIN_ALLOWED_CTL.EC_RST_L_1 and PIN_OUT_CTL.EC_RST_L will
+            guarantee that ec_rst_l_o remains asserted after OpenTitan reset is released.
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.FLASH_WRITE_PROTECT"
+      desc: '''
+            Upon reset, the flash_wp_l_o signal will be asserted active low.
+            The software can release flash_wp_l_o explicitly by setting PIN_OUT_CTL.FLASH_WP_L to 0 when needed.
+            '''
+    }
+    {
+      name: "SYSRST_CTRL.PIN_INPUT_VALUE_ACCESS"
+      desc: '''
+            sysrst_ctrl allows the software to read the raw input pin values via the PIN_IN_VALUE register like GPIOs.
+            '''
+    }
+  ]
+  countermeasures: [
+    { name: "BUS.INTEGRITY",
+      desc: "End-to-end bus integrity scheme."
+    }
+  ]
   regwidth: "32",
   registers: [
     { name: "REGWEN",
@@ -113,7 +214,10 @@
       fields: [
         { bits: "TimerWidth-1:0",
           name: "ec_rst_pulse",
-          desc: "Configure the pulse width of ec_rst_l. 10-200ms, each step is 5us(200KHz clock)",
+          desc: '''
+            Configure the pulse width of ec_rst_l.
+            Each step is 5 us for a 200 kHz clock.
+          '''
         }
       ],
     }
@@ -127,7 +231,11 @@
       fields: [
         { bits: "TimerWidth-1:0",
           name: "ulp_ac_debounce_timer",
-          desc: "Configure the debounce timer. 10-200ms, each step is 5us(200KHz clock)",
+          desc: '''
+            Configure the debounce timer for the AC input in number of clock cycles.
+            Each step is 5 us for a 200 kHz clock.
+            The signal must exceed the debounce time by at least one clock cycle to be detected.
+          '''
         }
       ],
     }
@@ -141,7 +249,11 @@
       fields: [
         { bits: "TimerWidth-1:0",
           name: "ulp_lid_debounce_timer",
-          desc: "Configure the debounce timer. 10-200ms, each step is 5us(200KHz clock)",
+          desc: '''
+            Configure the debounce timer for the lid in number of clock cycles.
+            Each step is 5 us for a 200 kHz clock.
+            The signal must exceed the debounce time by at least one clock cycle to be detected.
+          '''
         }
       ],
     }
@@ -155,7 +267,11 @@
       fields: [
         { bits: "TimerWidth-1:0",
           name: "ulp_pwrb_debounce_timer",
-          desc: "Configure the debounce timer. 10-200ms, each step is 5us(200KHz clock)",
+          desc: '''
+            Configure the debounce timer for the power button in number of clock cycles.
+            Each step is 5 us for a 200 kHz clock.
+            The signal must exceed the debounce time by at least one clock cycle to be detected.
+          '''
         }
       ],
     }
@@ -175,9 +291,8 @@
     { name: "ULP_STATUS",
       desc: "Ultra low power status",
       swaccess: "rw1c",
-      hwaccess: "hwo",
+      hwaccess: "hrw",
       resval: "0",
-      async: "clk_aon_i",
       tags: [ // the value of these regs is determined by the
               // value on the pins, hence it cannot be predicted.
               "excl:CsrNonInitTests:CsrExclCheck"],
@@ -322,7 +437,7 @@
         }
         { bits:   "7",
           name:   "flash_wp_l_0",
-          desc:   "1: not allowed; 1: allowed",
+          desc:   "0: not allowed; 1: allowed",
           resval: "1",
         }
         { bits:   "8",
@@ -410,7 +525,7 @@
         }
         { bits:   "7",
           name:   "flash_wp_l",
-          desc:   "1: disable override; 1: enable override",
+          desc:   "0: disable override; 1: enable override",
           resval: "1",
         }
       ]
@@ -478,44 +593,49 @@
               "excl:CsrAllTests:CsrExclCheck"],
       fields: [
         { bits:   "0",
-          name:   "ac_present",
-          desc:   "raw ac_present value; before the invert logic",
-          resval: "0",
-        }
-        { bits:   "1",
-          name:   "ec_rst_l",
-          desc:   "raw ec_rst_l value; before the invert logic",
-          resval: "0",
-        }
-        { bits:   "2",
           name:   "pwrb_in",
           desc:   "raw pwrb_in value; before the invert logic",
           resval: "0",
         }
-        { bits:   "3",
+        { bits:   "1",
           name:   "key0_in",
           desc:   "raw key0_in value; before the invert logic",
           resval: "0",
         }
-        { bits:   "4",
+        { bits:   "2",
           name:   "key1_in",
           desc:   "raw key1_in value; before the invert logic",
           resval: "0",
         }
-        { bits:   "5",
+        { bits:   "3",
           name:   "key2_in",
           desc:   "raw key2_in value; before the invert logic",
           resval: "0",
         }
-        { bits:   "6",
+        { bits:   "4",
           name:   "lid_open",
           desc:   "raw lid_open value; before the invert logic",
+          resval: "0",
+        }
+        { bits:   "5",
+          name:   "ac_present",
+          desc:   "raw ac_present value; before the invert logic",
+          resval: "0",
+        }
+        { bits:   "6",
+          name:   "ec_rst_l",
+          desc:   "raw ec_rst_l value; before the invert logic",
+          resval: "0",
+        }
+        { bits:   "7",
+          name:   "flash_wp_l",
+          desc:   "raw flash_wp_l value; before the invert logic",
           resval: "0",
         }
       ]
     }
     { name: "KEY_INTR_CTL",
-      desc: "Define the keys or inputs that can trigger the interrupt ",
+      desc: "Define the keys or inputs that can trigger the interrupt",
       swaccess: "rw",
       hwaccess: "hro",
       regwen: "REGWEN",
@@ -552,33 +672,43 @@
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "8",
+        { bits:   "6",
+          name:   "flash_wp_l_H2L",
+          desc:   "0: disable, 1: enable",
+          resval: "0",
+        }
+        { bits:   "7",
           name:   "pwrb_in_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "9",
+        { bits:   "8",
           name:   "key0_in_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "10",
+        { bits:   "9",
           name:   "key1_in_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "11",
+        { bits:   "10",
           name:   "key2_in_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "12",
+        { bits:   "11",
           name:   "ac_present_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
-        { bits:   "13",
+        { bits:   "12",
           name:   "ec_rst_l_L2H",
+          desc:   "0: disable, 1: enable",
+          resval: "0",
+        }
+        { bits:   "13",
+          name:   "flash_wp_l_L2H",
           desc:   "0: disable, 1: enable",
           resval: "0",
         }
@@ -589,12 +719,16 @@
       swaccess: "rw",
       hwaccess: "hro",
       regwen: "REGWEN",
-      resval: "0",
+      resval: "2000",
       async: "clk_aon_i",
       fields: [
         { bits: "TimerWidth-1:0",
           name: "debounce_timer",
-          desc: "Define the timer value so that the key or input is not oscillating for 0-200ms, each step is 5us(200KHz clock)",
+          desc: '''
+            Define the timer value so that the key or input is not oscillating in clock cycles.
+            Each step is 5 us for a 200 kHz clock.
+            The signal must exceed the debounce time by at least one clock cycle to be detected.
+          '''
         }
       ],
     }
@@ -603,13 +737,16 @@
       swaccess: "rw",
       hwaccess: "hro",
       regwen: "REGWEN",
-      resval: "0",
       async: "clk_aon_i",
       fields: [
         { bits:   "TimerWidth-1:0",
           name:   "debounce_timer",
-          desc:   "Define the timer value so that pwrb_in is not oscillating for 0-200ms, each step is 5us(200KHz clock)",
-          resval: "0",
+          desc: '''
+            Define the timer value so that the pwrb_in is not oscillating in clock cycles.
+            Each step is 5 us for a 200 kHz clock.
+            The signal must exceed the debounce time by at least one clock cycle to be detected.
+          ''',
+          resval: "2000",
         }
         { bits:   "16",
           name:   "auto_block_enable",
@@ -619,7 +756,7 @@
       ],
     }
     { name: "AUTO_BLOCK_OUT_CTL",
-      desc: "confiure the key outputs to auto-override and their value",
+      desc: "configure the key outputs to auto-override and their value",
       swaccess: "rw",
       hwaccess: "hro",
       regwen: "REGWEN",
@@ -659,6 +796,77 @@
       ]
     }
     { multireg: {
+        name: "COM_PRE_SEL_CTL",
+        desc: '''
+              To define the keys that define the pre-condition of the combo
+              [0]: key0_in_sel
+              [1]: key1_in_sel
+              [2]: key2_in_sel
+              [3]: pwrb_in_sel
+              [4]: ac_present_sel
+              HW will start matching the combo as defined by !!COM_SEL_CTL if this precondition is fulfilled.
+
+              If no keys are configured for the pre-condition, the pre-condition always evaluates to true.
+
+              The debounce timing is defined via !!KEY_INTR_DEBOUNCE_CTL whereas the pre-condition pressed timing is defined via !!COM_PRE_DET_CTL.
+              ''',
+        count: "NumCombo",
+        cname: "sysrst_ctrl",
+        swaccess: "rw",
+        hwaccess: "hro",
+        regwen:   "REGWEN",
+        resval:   "0",
+        async: "clk_aon_i",
+        fields: [
+          { bits:   "0",
+            name:   "key0_in_sel",
+            desc:   "0: disable, 1: enable",
+            resval: "0",
+          }
+          { bits:   "1",
+            name:   "key1_in_sel",
+            desc:   "0: disable, 1: enable",
+            resval: "0",
+          }
+          { bits:   "2",
+            name:   "key2_in_sel",
+            desc:   "0: disable, 1: enable",
+            resval: "0",
+          }
+          { bits:   "3",
+            name:   "pwrb_in_sel",
+            desc:   "0: disable, 1: enable",
+            resval: "0",
+          }
+          { bits:   "4",
+            name:   "ac_present_sel",
+            desc:   "0: disable, 1: enable",
+            resval: "0",
+          }
+        ],
+      }
+    }
+    { multireg: {
+        name: "COM_PRE_DET_CTL",
+        desc: '''To define the duration that the combo pre-condition should be pressed
+              0-60s, each step is 5us(200KHz clock)
+              ''',
+        count: "NumCombo",
+        cname: "sysrst_ctrl",
+        swaccess: "rw",
+        hwaccess: "hro",
+        regwen:   "REGWEN",
+        resval:   "0",
+        async: "clk_aon_i",
+        fields: [
+          { bits: "DetTimerWidth-1:0",
+            name: "precondition_timer",
+            desc: "0-60s, each step is 5us(200KHz clock)",
+          }
+        ],
+      }
+    }
+    { multireg: {
         name: "COM_SEL_CTL",
         desc: '''
               To define the keys that trigger the combo
@@ -667,7 +875,13 @@
               [2]: key2_in_sel
               [3]: pwrb_in_sel
               [4]: ac_present_sel
-              HW will detect H2L transition in the combo use case
+              HW will detect H2L transition in the combo use case.
+
+              Optionally, a pre-condition can be configured for the combo detection via !!COM_PRE_SEL_CTL.
+
+              If no keys are configured for the combo, the combo detection is disabled.
+
+              The debounce timing is defined via !!KEY_INTR_DEBOUNCE_CTL whereas the key-pressed timing is defined via !!COM_DET_CTL.
               ''',
         count: "NumCombo",
         cname: "sysrst_ctrl",
@@ -709,7 +923,7 @@
         name: "COM_DET_CTL",
         desc: '''To define the duration that the combo should be pressed
               0-60s, each step is 5us(200KHz clock)
-                    ''',
+              ''',
         count: "NumCombo",
         cname: "sysrst_ctrl",
         swaccess: "rw",
@@ -766,11 +980,13 @@
       }
     }
     { name: "COMBO_INTR_STATUS",
-      desc: "combo interrupt source",
+      desc: '''
+            Combo interrupt source. These registers will only be set if the
+            interrupt action is configured in the corresponding !!COM_OUT_CTL register.
+            ''',
       swaccess: "rw1c",
-      hwaccess: "hwo",
+      hwaccess: "hrw",
       resval: "0",
-      async: "clk_aon_i",
       tags: [ // the value of these regs is determined by the
               // value on the pins, hence it cannot be predicted.
               "excl:CsrNonInitTests:CsrExclCheck"],
@@ -800,11 +1016,10 @@
     { name: "KEY_INTR_STATUS",
       desc: "key interrupt source",
       swaccess: "rw1c",
-      hwaccess: "hwo",
+      hwaccess: "hrw",
       resval: "0",
-      async: "clk_aon_i",
-      tags: [ // the value of these regs is determined by the
-              // value on the pins, hence it cannot be predicted.
+      tags: [ // the value of these regs is determined by the value on the pins
+              // or other CSRs, hence it cannot be predicted.
               "excl:CsrNonInitTests:CsrExclCheck"],
       fields: [
         { bits:   "0",
@@ -838,32 +1053,42 @@
           resval: "0",
         }
         { bits:   "6",
-          name:   "pwrb_L2H",
+          name:   "flash_wp_l_H2L",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }
         { bits:   "7",
-          name:   "key0_in_L2H",
+          name:   "pwrb_L2H",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }
         { bits:   "8",
-          name:   "key1_in_L2H",
+          name:   "key0_in_L2H",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }
         { bits:   "9",
-          name:   "key2_in_L2H",
+          name:   "key1_in_L2H",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }
         { bits:   "10",
-          name:   "ac_present_L2H",
+          name:   "key2_in_L2H",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }
         { bits:   "11",
+          name:   "ac_present_L2H",
+          desc:   "0: case not detected;1: case detected",
+          resval: "0",
+        }
+        { bits:   "12",
           name:   "ec_rst_l_L2H",
+          desc:   "0: case not detected;1: case detected",
+          resval: "0",
+        }
+        { bits:   "13",
+          name:   "flash_wp_l_L2H",
           desc:   "0: case not detected;1: case detected",
           resval: "0",
         }

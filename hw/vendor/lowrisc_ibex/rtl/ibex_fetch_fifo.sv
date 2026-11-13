@@ -16,27 +16,29 @@ module ibex_fetch_fifo #(
   parameter int unsigned NUM_REQS = 2,
   parameter bit          ResetAll = 1'b0
 ) (
-    input  logic                clk_i,
-    input  logic                rst_ni,
+  input  logic                clk_i,
+  input  logic                rst_ni,
 
-    // control signals
-    input  logic                clear_i,   // clears the contents of the FIFO
-    output logic [NUM_REQS-1:0] busy_o,
+  // control signals
+  input  logic                clear_i,   // clears the contents of the FIFO
+  output logic [NUM_REQS-1:0] busy_o,
 
-    // input port
-    input  logic                in_valid_i,
-    input  logic [31:0]         in_addr_i,
-    input  logic [31:0]         in_rdata_i,
-    input  logic                in_err_i,
+  // input port
+  input  logic                in_valid_i,
+  input  logic [31:0]         in_addr_i,
+  input  logic [31:0]         in_rdata_i,
+  input  logic                in_err_i,
 
-    // output port
-    output logic                out_valid_o,
-    input  logic                out_ready_i,
-    output logic [31:0]         out_addr_o,
-    output logic [31:0]         out_addr_next_o,
-    output logic [31:0]         out_rdata_o,
-    output logic                out_err_o,
-    output logic                out_err_plus2_o
+  // force unaligned compressed based on CHERIoT bounds check
+  input  logic                cheriot_force_uc_i,
+
+  // output port
+  output logic                out_valid_o,
+  input  logic                out_ready_i,
+  output logic [31:0]         out_addr_o,
+  output logic [31:0]         out_rdata_o,
+  output logic                out_err_o,
+  output logic                out_err_plus2_o
 );
 
   localparam int unsigned DEPTH = NUM_REQS+1;
@@ -104,8 +106,27 @@ module ibex_fetch_fifo #(
                                         (valid_q[0] & in_valid_i);
 
   // If there is an error, rdata is unknown
-  assign unaligned_is_compressed = (rdata[17:16] != 2'b11) & ~err;
+`ifdef DII_SIM
+  logic [31:0] instr_rdata_dii;
+  logic [31:0] instr_pc;
+  logic        instr_ack;
+
+  // for DII we directly force out_rdata_o (re-aligned instruction)
+  // to keep the unaligned/aligned_is_compressed signals in sync
+  //   32-bit instruction; instr_rdata_dii[31:0] = instr
+  //   16-bit instruction: instr_rdata_dii[15:0] = compressed instruction
+  //                       instr_rdata_dii[31:0] = don't care
+
+  assign unaligned_is_compressed = out_addr_o[1] & cheriot_force_uc_i
+                                 | ((instr_rdata_dii[1:0] != 2'b11) & ~err);
+  assign aligned_is_compressed   = ~out_addr_o[1] & (instr_rdata_dii[1:0] != 2'b11) & ~err;
+
+  assign instr_ack = out_ready_i & out_valid_o;
+  assign instr_pc  = out_addr_o;
+`else
+  assign unaligned_is_compressed = cheriot_force_uc_i | ((rdata[17:16] != 2'b11) & ~err);
   assign aligned_is_compressed   = (rdata[ 1: 0] != 2'b11) & ~err;
+`endif
 
   ////////////////////////////////////////
   // Instruction aligner (if unaligned) //
@@ -114,7 +135,12 @@ module ibex_fetch_fifo #(
   always_comb begin
     if (out_addr_o[1]) begin
       // unaligned case
+
+`ifdef DII_SIM
+     out_rdata_o      = instr_rdata_dii;
+`else
       out_rdata_o     = rdata_unaligned;
+`endif
       out_err_o       = err_unaligned;
       out_err_plus2_o = err_plus2;
 
@@ -125,7 +151,11 @@ module ibex_fetch_fifo #(
       end
     end else begin
       // aligned case
+`ifdef DII_SIM
+     out_rdata_o      = instr_rdata_dii;
+`else
       out_rdata_o     = rdata;
+`endif
       out_err_o       = err;
       out_err_plus2_o = 1'b0;
       out_valid_o     = valid;
@@ -166,10 +196,7 @@ module ibex_fetch_fifo #(
     end
   end
 
-  // Output both PC of current instruction and instruction following. PC of instruction following is
-  // required for the branch predictor. It's used to fetch the instruction following a branch that
-  // was not-taken but (mis)predicted taken.
-  assign out_addr_next_o = {instr_addr_next, 1'b0};
+  // Output PC of current instruction
   assign out_addr_o      = {instr_addr_q, 1'b0};
 
   // The LSB of the address is unused, since all addresses are halfword aligned

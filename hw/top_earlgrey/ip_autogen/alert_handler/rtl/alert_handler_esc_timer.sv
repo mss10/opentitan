@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,7 +6,7 @@
 // phases. There are two mechanisms that can trigger the escalation protocol:
 //
 // 1) via accum_trigger_i, which will be asserted once the accumulator value
-//    exceeds a programmable amount of alert occurences.
+//    exceeds a programmable amount of alert occurrences.
 //
 // 2) via an interrupt timeout, if this is enabled. If this functionality is
 //    enabled, the internal escalation counter is reused to check whether the
@@ -18,7 +18,7 @@
 
 `include "prim_assert.sv"
 
-module alert_handler_esc_timer import alert_pkg::*; (
+module alert_handler_esc_timer import alert_handler_pkg::*; (
   input                        clk_i,
   input                        rst_ni,
   input                        en_i,              // enables timeout/escalation
@@ -46,56 +46,43 @@ module alert_handler_esc_timer import alert_pkg::*; (
   // Tandem Counter //
   ////////////////////
 
-  logic cnt_en, cnt_clr, cnt_ge;
-  logic [1:0][EscCntDw-1:0] cnt_q;
-
   // We employ two redundant counters to guard against FI attacks.
   // If any of the two is glitched and the two counter states do not agree,
   // the FSM below is moved into a terminal error state and escalation actions
   // are permanently asserted.
-  for (genvar k = 0; k < 2; k++) begin : gen_double_cnt
+  logic cnt_en, cnt_clr, cnt_error;
 
-    logic cnt_en_buf, cnt_clr_buf;
-
-    // These size_only buffers are instantiated in order to prevent
-    // optimization / merging of the two counters.
-    prim_buf u_prim_buf_clr (
-      .in_i(cnt_clr),
-      .out_o(cnt_clr_buf)
-    );
-
-    prim_buf u_prim_buf_en (
-      .in_i(cnt_en),
-      .out_o(cnt_en_buf)
-    );
-
-    // escalation counter, used for all phases and the timeout
-    logic [EscCntDw-1:0] cnt_d;
-    assign cnt_d = (cnt_clr_buf && cnt_en_buf) ? EscCntDw'(1'b1) :
-                   (cnt_clr_buf)               ? '0              :
-                   (cnt_en_buf)                ? cnt_q[k] + 1'b1 : cnt_q[k];
-
-    prim_flop #(
-      .Width(EscCntDw)
-    ) u_prim_flop (
-      .clk_i,
-      .rst_ni,
-      .d_i(cnt_d),
-      .q_o(cnt_q[k])
-    );
-  end
+  // SEC_CM: ESC_TIMER.CTR.REDUN
+  prim_count #(
+    .Width(EscCntDw),
+    // The alert handler behaves differently than other comportable IP. I.e., instead of sending out
+    // an alert signal, this condition is handled internally in the alert handler.
+    .EnableAlertTriggerSVA(0),
+    // Pass a parameter to disable coverage for some assertions that are unreachable because
+    // decr_en_i is tied to zero.
+    .PossibleActions(prim_count_pkg::Clr |
+                     prim_count_pkg::Set |
+                     prim_count_pkg::Incr)
+  ) u_prim_count (
+    .clk_i,
+    .rst_ni,
+    .clr_i(cnt_clr && !cnt_en),
+    .set_i(cnt_clr && cnt_en),
+    .set_cnt_i(EscCntDw'(1)),
+    .incr_en_i(cnt_en),
+    .decr_en_i(1'b0),
+    .step_i(EscCntDw'(1)),
+    .commit_i(1'b1),
+    .cnt_o(esc_cnt_o),
+    .cnt_after_commit_o(),
+    .err_o(cnt_error)
+  );
 
   // threshold test, the thresholds are muxed further below
   // depending on the current state
+  logic cnt_ge;
   logic [EscCntDw-1:0] thresh;
-  assign cnt_ge    = (cnt_q[0] >= thresh);
-
-  // current counter output
-  assign esc_cnt_o   = cnt_q[0];
-
-  // consistency check
-  logic cnt_check_fail;
-  assign cnt_check_fail = cnt_q[0] != cnt_q[1];
+  assign cnt_ge = (esc_cnt_o >= thresh);
 
   //////////////
   // Main FSM //
@@ -103,6 +90,7 @@ module alert_handler_esc_timer import alert_pkg::*; (
 
   logic [N_PHASES-1:0] phase_oh;
 
+  // SEC_CM: ESC_TIMER.FSM.SPARSE
   // Encoding generated with:
   // $ ./util/design/sparse-fsm-encode.py -d 5 -m 8 -n 10 \
   //      -s 784905746 --language=sv
@@ -114,28 +102,28 @@ module alert_handler_esc_timer import alert_pkg::*; (
   //  2: --
   //  3: --
   //  4: --
-  //  5: |||||||||||||||||||| (42.86%)
-  //  6: |||||||||||||||||||| (42.86%)
-  //  7: |||||| (14.29%)
+  //  5: |||||||||||||||||||| (46.43%)
+  //  6: |||||||||||||||||||| (46.43%)
+  //  7: ||| (7.14%)
   //  8: --
   //  9: --
   // 10: --
   //
   // Minimum Hamming distance: 5
   // Maximum Hamming distance: 7
-  // Minimum Hamming weight: 2
-  // Maximum Hamming weight: 7
+  // Minimum Hamming weight: 3
+  // Maximum Hamming weight: 9
   //
   localparam int StateWidth = 10;
   typedef enum logic [StateWidth-1:0] {
-    IdleSt     = 10'b1101000111,
-    TimeoutSt  = 10'b0010011110,
-    Phase0St   = 10'b1111011001,
-    Phase1St   = 10'b0001110100,
-    Phase2St   = 10'b1110110010,
-    Phase3St   = 10'b0010000001,
-    TerminalSt = 10'b0101101010,
-    FsmErrorSt = 10'b1000101101
+    IdleSt     = 10'b1011011010,
+    TimeoutSt  = 10'b0000100110,
+    Phase0St   = 10'b1110000101,
+    Phase1St   = 10'b0101010100,
+    Phase2St   = 10'b0000011001,
+    Phase3St   = 10'b1001100001,
+    TerminalSt = 10'b1101111111,
+    FsmErrorSt = 10'b0111101000
   } state_e;
 
   logic fsm_error;
@@ -280,17 +268,21 @@ module alert_handler_esc_timer import alert_pkg::*; (
         esc_state_o = FsmError;
         fsm_error = 1'b1;
       end
+      // SEC_CM: ESC_TIMER.FSM.LOCAL_ESC
       // catch glitches.
       default: begin
         state_d = FsmErrorSt;
         esc_state_o = FsmError;
+        fsm_error = 1'b1;
       end
     endcase
 
+    // SEC_CM: ESC_TIMER.FSM.LOCAL_ESC
     // if any of the duplicate counter pairs has an inconsistent state
     // we move into the terminal FSM error state.
-    if (accu_fail_i || cnt_check_fail) begin
+    if (accu_fail_i || cnt_error) begin
       state_d = FsmErrorSt;
+      fsm_error = 1'b1;
     end
   end
 
@@ -299,6 +291,7 @@ module alert_handler_esc_timer import alert_pkg::*; (
     // generate configuration mask for escalation enable signals
     assign esc_map_oh[k] = N_ESC_SEV'(esc_en_i[k]) << esc_map_i[k];
     // mask reduce current phase state vector
+    // SEC_CM: ESC_TIMER.FSM.GLOBAL_ESC
     assign esc_sig_req_o[k] = |(esc_map_oh[k] & phase_oh) | fsm_error;
   end
 
@@ -306,19 +299,10 @@ module alert_handler_esc_timer import alert_pkg::*; (
   // FSM Registers //
   ///////////////////
 
-  // This primitive is used to place a size-only constraint on the
-  // flops in order to prevent FSM state encoding optimizations.
-  logic [StateWidth-1:0] state_raw_q;
-  assign state_q = state_e'(state_raw_q);
-  prim_flop #(
-    .Width(StateWidth),
-    .ResetValue(StateWidth'(IdleSt))
-  ) u_state_regs (
-    .clk_i,
-    .rst_ni,
-    .d_i ( state_d     ),
-    .q_o ( state_raw_q )
-  );
+  // The alert handler behaves differently than other comportable IP. I.e., instead of sending out
+  // an alert signal, this condition is handled internally in the alert handler. The
+  // EnableAlertTriggerSVA parameter is therefore set to 0.
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, state_e, IdleSt, clk_i, rst_ni, 0)
 
   ////////////////
   // Assertions //
@@ -369,7 +353,7 @@ module alert_handler_esc_timer import alert_pkg::*; (
       !accu_fail_i &&
       state_q == TimeoutSt &&
       timeout_en_i &&
-      cnt_q[0] < timeout_cyc_i &&
+      esc_cnt_o < timeout_cyc_i &&
       !accu_trig_i
       |=>
       state_q == TimeoutSt)
@@ -385,7 +369,7 @@ module alert_handler_esc_timer import alert_pkg::*; (
       !accu_fail_i &&
       state_q == TimeoutSt &&
       timeout_en_i &&
-      cnt_q[0] == timeout_cyc_i
+      esc_cnt_o == timeout_cyc_i
       |=>
       state_q == Phase0St)
   // Check whether escalation phases are correctly switched
@@ -393,28 +377,28 @@ module alert_handler_esc_timer import alert_pkg::*; (
       !accu_fail_i &&
       state_q == Phase0St &&
       !clr_i &&
-      cnt_q[0] >= phase_cyc_i[0]
+      esc_cnt_o >= phase_cyc_i[0]
       |=>
       state_q == Phase1St)
   `ASSERT(CheckPhase1_A,
       !accu_fail_i &&
       state_q == Phase1St &&
       !clr_i &&
-      cnt_q[0] >= phase_cyc_i[1]
+      esc_cnt_o >= phase_cyc_i[1]
       |=>
       state_q == Phase2St)
   `ASSERT(CheckPhase2_A,
       !accu_fail_i &&
       state_q == Phase2St &&
       !clr_i &&
-      cnt_q[0] >= phase_cyc_i[2]
+      esc_cnt_o >= phase_cyc_i[2]
       |=>
       state_q == Phase3St)
   `ASSERT(CheckPhase3_A,
       !accu_fail_i &&
       state_q == Phase3St &&
       !clr_i &&
-      cnt_q[0] >= phase_cyc_i[3]
+      esc_cnt_o >= phase_cyc_i[3]
       |=>
       state_q == TerminalSt)
   `ASSERT(AccuFailToFsmError_A,
@@ -429,5 +413,20 @@ module alert_handler_esc_timer import alert_pkg::*; (
       state_q == FsmErrorSt
       |->
       esc_sig_req_o == '1)
+
+`ifdef INC_ASSERT
+  // Check that our internal FSM matches the state index that we're exposing with esc_state_o. The
+  // StateEncodings parameter does the mapping to match. (Practically speaking, this is just adding
+  // "St" to each name so e.g. Idle gets mapped to IdleSt).
+  parameter logic [StateWidth-1:0] StateEncodings [8] = '{IdleSt,
+                                                          TimeoutSt,
+                                                          FsmErrorSt,
+                                                          TerminalSt,
+                                                          Phase0St,
+                                                          Phase1St,
+                                                          Phase2St,
+                                                          Phase3St};
+  `ASSERT(EscStateOut_A, state_q == StateEncodings[esc_state_o])
+`endif
 
 endmodule : alert_handler_esc_timer

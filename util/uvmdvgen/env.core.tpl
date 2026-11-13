@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "${vendor}:dv:${name}_env:0.1"
@@ -46,5 +46,5 @@ targets:
       - files_dv
 % if has_ral:
     generate:
-      - ral
+      - "!chip_level ? (ral)"
 % endif

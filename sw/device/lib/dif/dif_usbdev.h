@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,8 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/usbdev/doc/">USB Device</a> Device Interface Functions
+ * @brief <a href="/book/hw/ip/usbdev/">USB Device</a> Device Interface
+ * Functions
  */
 
 #include <stddef.h>
@@ -31,6 +32,25 @@ extern "C" {
 // Internal constant that should not be used by clients. Defined here because
 // it is used in the definition of `dif_usbdev_buffer_pool` below.
 #define USBDEV_NUM_BUFFERS 32
+
+// Constants used for the `dif_usbdev_endpoint_id` direction field.
+#define USBDEV_ENDPOINT_DIR_IN 1
+#define USBDEV_ENDPOINT_DIR_OUT 0
+
+typedef struct dif_usbdev_endpoint_id {
+  /**
+   * Endpoint number.
+   */
+  unsigned int number : 4;
+  /**
+   * Reserved. Should be zero.
+   */
+  unsigned int reserved : 3;
+  /**
+   * Endpoint direction. 1 = IN endpoint, 0 = OUT endpoint
+   */
+  unsigned int direction : 1;
+} dif_usbdev_endpoint_id_t;
 
 /**
  * Free buffer pool.
@@ -100,35 +120,24 @@ typedef struct dif_usbdev_buffer {
 } dif_usbdev_buffer_t;
 
 /**
- * Set of allowed configurations for USB power sense override.
- */
-typedef enum dif_usbdev_power_sense_override {
-  kDifUsbdevPowerSenseOverrideDisabled,
-  kDifUsbdevPowerSenseOverridePresent,
-  kDifUsbdevPowerSenseOverrideNotPresent
-} dif_usbdev_power_sense_override_t;
-
-/**
  * Configuration for initializing a USB device.
  */
 typedef struct dif_usbdev_config {
   /**
-   * Use the differential rx signal instead of the single-ended signals.
+   * Activate the single-ended D signal for detecting K and J symbols, for use
+   * with a differential receiver.
    */
-  dif_toggle_t differential_rx;
+  dif_toggle_t have_differential_receiver;
   /**
-   * Use the differential tx signal instead of the single-ended signals.
+   * Use the TX interface with D and SE0 signals instead of Dp/Dn, for use with
+   * certain transceivers.
    */
-  dif_toggle_t differential_tx;
+  dif_toggle_t use_tx_d_se0;
   /*
    * Recognize a single SE0 bit as end of packet instead of requiring
    * two bits.
    */
   dif_toggle_t single_bit_eop;
-  /**
-   * Override USB power sense.
-   */
-  dif_usbdev_power_sense_override_t power_sense_override;
   /**
    * Flip the D+/D- pins.
    */
@@ -171,14 +180,17 @@ dif_result_t dif_usbdev_configure(const dif_usbdev_t *usbdev,
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
-dif_result_t dif_usbdev_fill_available_fifo(
+dif_result_t dif_usbdev_fill_available_fifos(
     const dif_usbdev_t *usbdev, dif_usbdev_buffer_pool_t *buffer_pool);
 
 /**
  * Enable or disable reception of SETUP packets for an endpoint.
  *
+ * This controls whether the pair of IN and OUT endpoints with the specified
+ * endpoint number are control endpoints.
+ *
  * @param usbdev A USB device.
- * @param endpoint An endpoint.
+ * @param endpoint An endpoint number.
  * @param new_state New SETUP packet reception state.
  * @return The result of the operation.
  */
@@ -188,10 +200,21 @@ dif_result_t dif_usbdev_endpoint_setup_enable(const dif_usbdev_t *usbdev,
                                               dif_toggle_t new_state);
 
 /**
- * Enable or disable reception of OUT packets for an endpoint.
+ * Enable or disable reception of OUT packets for an active endpoint.
+ *
+ * When disabling reception of OUT packets, what the endpoint will do depends
+ * on other factors. If the endpoint is currently configured as a control
+ * endpoint (receives SETUP packets) or it is configured as an isochronous
+ * endpoint, disabling reception of OUT packets will cause them to be ignored.
+ *
+ * If the endpoint is neither a control nor isochronous endpoint, then its
+ * behavior depends on whether it is configured to respond with STALL. If the
+ * STALL response is not active, then disabling reception will cause usbdev to
+ * NAK the packet. Otherwise, the STALL response takes priority, regardless of
+ * the setting here.
  *
  * @param usbdev A USB device.
- * @param endpoint An endpoint.
+ * @param endpoint An OUT endpoint number.
  * @param new_state New OUT packet reception state.
  * @return The result of the operation.
  */
@@ -201,29 +224,48 @@ dif_result_t dif_usbdev_endpoint_out_enable(const dif_usbdev_t *usbdev,
                                             dif_toggle_t new_state);
 
 /**
+ * Enable or disable clearing the out_enable bit after completion of an OUT
+ * transaction to an endpoint.
+ *
+ * If set_nak_out is enabled, an OUT endpoint will disable reception of OUT
+ * packets after each successful OUT transaction to that endpoint, requiring a
+ * call to `dif_usbdev_endpoint_out_enable()` to enable reception again.
+ *
+ * @param usbdev A USB device.
+ * @param endpoint An OUT endpoint number.
+ * @param new_state New set_nak_on_out state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_endpoint_set_nak_out_enable(const dif_usbdev_t *usbdev,
+                                                    uint8_t endpoint,
+                                                    dif_toggle_t new_state);
+
+/**
  * Enable or disable STALL for an endpoint.
  *
  * @param usbdev A USB device.
- * @param endpoint An endpoint.
+ * @param endpoint An endpoint ID.
  * @param new_state New STALL state.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_endpoint_stall_enable(const dif_usbdev_t *usbdev,
-                                              uint8_t endpoint,
+                                              dif_usbdev_endpoint_id_t endpoint,
                                               dif_toggle_t new_state);
 
 /**
  * Get STALL state of an endpoint.
  *
  * @param usbdev A USB device.
- * @param endpoint An endpoint.
+ * @param endpoint An endpoint ID.
  * @param[out] state Current STALL state.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_endpoint_stall_get(const dif_usbdev_t *usbdev,
-                                           uint8_t endpoint, bool *state);
+                                           dif_usbdev_endpoint_id_t endpoint,
+                                           bool *state);
 
 /**
  * Enable or disable isochronous mode for an endpoint.
@@ -239,14 +281,31 @@ dif_result_t dif_usbdev_endpoint_stall_get(const dif_usbdev_t *usbdev,
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_endpoint_iso_enable(const dif_usbdev_t *usbdev,
-                                            uint8_t endpoint,
+                                            dif_usbdev_endpoint_id_t endpoint,
                                             dif_toggle_t new_state);
+
+/**
+ * Enable or disable an endpoint.
+ *
+ * An enabled endpoint responds to packets from the host. A disabled endpoint
+ * ignores them.
+ *
+ * @param usbdev A USB device.
+ * @param endpoint An endpoint.
+ * @param new_state New endpoint state.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_endpoint_enable(const dif_usbdev_t *usbdev,
+                                        dif_usbdev_endpoint_id_t endpoint,
+                                        dif_toggle_t new_state);
 
 /**
  * Enable the USB interface of a USB device.
  *
  * Calling this function causes the USB device to assert the full-speed pull-up
- * signal to indicate its presence to the host.
+ * signal to indicate its presence to the host. Ensure the default endpoint is
+ * set up before enabling the interface.
  *
  * @param usbdev A USB device.
  * @param new_state New interface state.
@@ -418,8 +477,9 @@ dif_result_t dif_usbdev_buffer_request(const dif_usbdev_t *usbdev,
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_buffer_write(const dif_usbdev_t *usbdev,
-                                     dif_usbdev_buffer_t *buffer, uint8_t *src,
-                                     size_t src_len, size_t *bytes_written);
+                                     dif_usbdev_buffer_t *buffer,
+                                     const uint8_t *src, size_t src_len,
+                                     size_t *bytes_written);
 
 /**
  * Mark a packet ready for transmission from an endpoint.
@@ -445,7 +505,7 @@ dif_result_t dif_usbdev_buffer_write(const dif_usbdev_t *usbdev,
  * `dif_usbdev_get_tx_status`, `dif_usbdev_buffer_return`.
  *
  * @param usbdev A USB device.
- * @param endpoint An endpoint.
+ * @param endpoint An OUT endpoint number.
  * @param buffer A buffer provided by `dif_usbdev_buffer_request`.
  * @return The result of the operation.
  */
@@ -454,11 +514,48 @@ dif_result_t dif_usbdev_send(const dif_usbdev_t *usbdev, uint8_t endpoint,
                              dif_usbdev_buffer_t *buffer);
 
 /**
+ * Get which IN endpoints have sent packets.
+ *
+ * This function provides which endpoints have buffers that have successfully
+ * completed transmission to the host. It may be used to guide calls to
+ * `dif_usbdev_clear_tx_status` to return the used buffer to the pool and clear
+ * the state for the next transaction.
+ *
+ * @param usbdev A USB device.
+ * @param[out] sent A bitmap of which endpoints have sent packets.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_get_tx_sent(const dif_usbdev_t *usbdev, uint16_t *sent);
+
+/**
+ * Clear the TX state of the provided endpoint and restore its associated buffer
+ * to the pool.
+ *
+ * Note that this function should only be called when an endpoint has been
+ * provided a buffer. Without it, the buffer pool will become corrupted, as this
+ * function does not check the status.
+ *
+ * In addition, if the endpoint has not yet completed or canceled the
+ * transaction, the user must not call this function while the device is in an
+ * active state. Otherwise, the user risks corrupting an ongoing transaction.
+ *
+ * @param usbdev A USB device.
+ * @param buffer_pool A USB device buffer pool.
+ * @param endpoint An IN endpoint number.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_clear_tx_status(const dif_usbdev_t *usbdev,
+                                        dif_usbdev_buffer_pool_t *buffer_pool,
+                                        uint8_t endpoint);
+
+/**
  * Status of an outgoing packet.
  */
 typedef enum dif_usbdev_tx_status {
   /**
-   *  There is no packet for the given endpoint.
+   *  There is no packet for the given OUT endpoint.
    */
   kDifUsbdevTxStatusNoPacket,
   /**
@@ -484,19 +581,16 @@ typedef enum dif_usbdev_tx_status {
  * transmitted. In these cases, clients should handle the SETUP packet or the
  * link reset first and then optionally send the same packet again.
  *
- * This function returns the buffer that holds the packet payload to the free
- * buffer pool once the packet is either successfully transmitted or canceled
- * due to an incoming SETUP packet or a link reset.
+ * This function does not modify any device state. `dif_usbdev_clear_tx_status`
+ * can be used to clear the status and return the buffer to the pool.
  *
  * @param usbdev A USB device.
- * @param buffer_pool A USB device buffer pool.
- * @param endpoint An endpoint.
+ * @param endpoint An IN endpoint number.
  * @param[out] status Status of the packet.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_get_tx_status(const dif_usbdev_t *usbdev,
-                                      dif_usbdev_buffer_pool_t *buffer_pool,
                                       uint8_t endpoint,
                                       dif_usbdev_tx_status_t *status);
 
@@ -519,6 +613,67 @@ dif_result_t dif_usbdev_address_set(const dif_usbdev_t *usbdev, uint8_t addr);
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_address_get(const dif_usbdev_t *usbdev, uint8_t *addr);
+
+/**
+ * Read the data toggle bits of the OUT endpoints.
+ *
+ * @param usbdev A USB device.
+ * @param[out]toggles Current state of OUT data toggle bits.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_data_toggle_out_read(const dif_usbdev_t *usbdev,
+                                             uint16_t *toggles);
+
+/**
+ * Read the data toggle bits of the IN endpoints.
+ *
+ * @param usbdev A USB device.
+ * @param[out]toggles Current state of IN data toggle bits.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_data_toggle_in_read(const dif_usbdev_t *usbdev,
+                                            uint16_t *toggles);
+
+/**
+ * Write to the data toggle bits of a subset of the OUT endpoints.
+ * Set 1 in `mask` to change the data toggle bit of an OUT endpoint to the value
+ * of the corresponding bit in `state`.
+ *
+ * @param usbdev A USB device.
+ * @param mask Mask of OUT endpoint data toggles to be changed.
+ * @param state New states of that OUT endpoint data toggles being changed.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_data_toggle_out_write(const dif_usbdev_t *usbdev,
+                                              uint16_t mask, uint16_t state);
+
+/**
+ * Write to the data toggle bits of a subset of the IN endpoints.
+ * Set 1 in `mask` to change the data toggle bit of an IN endpoint to the value
+ * of the corresponding bit in `state`.
+ *
+ * @param usbdev A USB device.
+ * @param mask Mask of IN endpoint data toggles to be changed.
+ * @param state New states of that IN endpoint data toggles being changed.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_data_toggle_in_write(const dif_usbdev_t *usbdev,
+                                             uint16_t mask, uint16_t state);
+
+/**
+ * Clear the data toggle bits for the selected endpoint.
+ *
+ * @param usbdev A USB device.
+ * @param endpoint An endpoint number.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_clear_data_toggle(const dif_usbdev_t *usbdev,
+                                          uint8_t endpoint);
 
 /**
  * Get USB frame index.
@@ -552,9 +707,11 @@ dif_result_t dif_usbdev_status_get_host_lost(const dif_usbdev_t *usbdev,
 typedef enum dif_usbdev_link_state {
   kDifUsbdevLinkStateDisconnected,
   kDifUsbdevLinkStatePowered,
-  kDifUsbdevLinkStatePoweredSuspend,
+  kDifUsbdevLinkStatePoweredSuspended,
   kDifUsbdevLinkStateActive,
-  kDifUsbdevLinkStateSuspend,
+  kDifUsbdevLinkStateSuspended,
+  kDifUsbdevLinkStateActiveNoSof,
+  kDifUsbdevLinkStateResuming,
 } dif_usbdev_link_state_t;
 
 /**
@@ -581,29 +738,33 @@ dif_result_t dif_usbdev_status_get_sense(const dif_usbdev_t *usbdev,
                                          bool *sense);
 
 /**
- * Get the depth of the AV FIFO.
+ * Get the depths of the AV OUT and AV SETUP FIFOs.
  *
- * See also: `dif_usbdev_fill_available_fifo`.
+ * See also: `dif_usbdev_fill_available_fifos`.
  *
  * @param usbdev A USB device.
- * @param[out] depth Depth of the AV FIFO.
+ * @param[out] setup_depth Depth of the AV SETUP FIFO.
+ * @param[out] out_depth Depth of the AV OUT FIFO.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
-dif_result_t dif_usbdev_status_get_available_fifo_depth(
-    const dif_usbdev_t *usbdev, uint8_t *depth);
+dif_result_t dif_usbdev_status_get_available_fifo_depths(
+    const dif_usbdev_t *usbdev, uint8_t *setup_depth, uint8_t *out_depth);
 /**
- * Check if AV FIFO is full.
+ * Check if AV OUT and AV SETUP FIFOs are full.
  *
- * See also: `dif_usbdev_fill_available_fifo`.
+ * See also: `dif_usbdev_fill_available_fifos`.
  *
  * @param usbdev A USB device.
- * @param[out] is_full State of the AV FIFO. `true` if full, false otherwise.
+ * @param[out] setup_is_full State of the AV SETUP FIFO. `true` if full, false
+ * otherwise.
+ * @param[out] out_is_full State of the AV OUT FIFO. `true` if full, false
+ * otherwise.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_status_get_available_fifo_full(
-    const dif_usbdev_t *usbdev, bool *is_full);
+    const dif_usbdev_t *usbdev, bool *setup_is_full, bool *out_is_full);
 /**
  * Get the depth of the RX FIFO.
  *
@@ -630,6 +791,170 @@ dif_result_t dif_usbdev_status_get_rx_fifo_depth(const dif_usbdev_t *usbdev,
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_usbdev_status_get_rx_fifo_empty(const dif_usbdev_t *usbdev,
                                                  bool *is_empty);
+
+/**
+ * Control whether oscillator test mode is enabled.
+ *
+ * In oscillator test mode, usbdev transmits a continuous 0101 pattern for
+ * evaluating the reference clock's quality.
+ *
+ * @param usbdev A USB device.
+ * @param enable Whether the test mode should be enabled.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_set_osc_test_mode(const dif_usbdev_t *usbdev,
+                                          dif_toggle_t enable);
+
+/**
+ * Control whether the AON wake module is active.
+ *
+ * @param usbdev A USB device.
+ * @param enable Whether the AON wake module is enabled.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_set_wake_enable(const dif_usbdev_t *usbdev,
+                                        dif_toggle_t enable);
+
+typedef struct dif_usbdev_wake_status {
+  /** Whether the AON wake module is active. */
+  bool active;
+  /** Whether the USB disconnected while the AON wake module was active. */
+  bool disconnected;
+  /** Whether the USB was reset while the AON wake module was active. */
+  bool bus_reset;
+  /** Whether the USB became non-Idle whilst the AON wake module was active. */
+  bool bus_not_idle;
+} dif_usbdev_wake_status_t;
+
+/**
+ * Get the status of the AON wake module.
+ *
+ * Note that the conditions triggering exit from suspended state must be read
+ * before disabling the AON wake module. Once the AON wake module is
+ * deactivated, that status information is lost.
+ *
+ * Also note that the ordinary resume condition does not report to the usbdev
+ * module. Instead, it should be obtained from the module monitoring wakeup
+ * sources.
+ *
+ * @param usbdev A USB device.
+ * @param[out] status The status of the module.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_get_wake_status(const dif_usbdev_t *usbdev,
+                                        dif_usbdev_wake_status_t *status);
+
+/**
+ * Force the link state machine to resume to an active state.
+ *
+ * This is used when waking from a low-power suspended state to resume to an
+ * active state. It moves the usbdev out of the Powered state (from the USB
+ * device state machine in the spec) without receiving a bus reset. Without help
+ * from software, the usbdev module cannot determine on its own when a bus reset
+ * is required.
+ *
+ * @param usbdev A USB device.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_resume_link_to_active(const dif_usbdev_t *usbdev);
+
+typedef struct dif_usbdev_phy_pins_sense {
+  /** USB D+ input. */
+  bool rx_dp : 1;
+  /** USB D- input. */
+  bool rx_dn : 1;
+  /** USB data input from an external differential receiver, if available. */
+  bool rx_d : 1;
+  /** USB transmit D+ output. */
+  bool tx_dp : 1;
+  /** USB transmit D- output. */
+  bool tx_dn : 1;
+  /** USB transmit data value output. */
+  bool tx_d : 1;
+  /** USB single-ended zero output. */
+  bool tx_se0 : 1;
+  /** USB output enable for D+ / D-. */
+  bool output_enable : 1;
+  /** USB VBUS sense pin. */
+  bool vbus_sense : 1;
+} dif_usbdev_phy_pins_sense_t;
+
+/**
+ * Get the current state of the USB PHY pins.
+ *
+ * @param usbdev A USB device.
+ * @param[out] status The current state of the pins.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_get_phy_pins_status(
+    const dif_usbdev_t *usbdev, dif_usbdev_phy_pins_sense_t *status);
+
+typedef struct dif_usbdev_phy_pins_drive {
+  /** USB D+ output, for use with dn. */
+  bool dp : 1;
+  /** USB D- output. for use with dp. */
+  bool dn : 1;
+  /** USB data output, encoding K and J when se0 is 0. */
+  bool data : 1;
+  /** USB single-ended zero output. */
+  bool se0 : 1;
+  /** USB output enable for D+ / D-. */
+  bool output_enable : 1;
+  /** Enable control pin for the differential receiver. */
+  bool diff_receiver_enable : 1;
+  /** Controls whether to pull up the D+ pin. */
+  bool dp_pullup_en : 1;
+  /** Controls whether to pull up the D- pin. */
+  bool dn_pullup_en : 1;
+} dif_usbdev_phy_pins_drive_t;
+
+/**
+ * Control whether to override the USB PHY and drive pins as GPIOs.
+ *
+ * @param usbdev A USB device.
+ * @param override_enable Enable / disable the GPIO-like overrides.
+ * @param overrides The values to set the pins to.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_set_phy_pins_state(
+    const dif_usbdev_t *usbdev, dif_toggle_t override_enable,
+    dif_usbdev_phy_pins_drive_t overrides);
+
+/**
+ * Raw data transfer directly to the packet buffer memory. This is a faster
+ * implementation of the generic `mmio_memcpy_to_mmio32` that is specialized for
+ * the USB device and gives a significant performance improvement.
+ *
+ * @param usbdev A USB device.
+ * @param id Buffer number.
+ * @param src Source data.
+ * @param src_len Number of bytes to transfer.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_buffer_raw_write(const dif_usbdev_t *usbdev, uint8_t id,
+                                         const uint8_t *src, size_t src_len);
+
+/**
+ * Raw data transfer directly from the packet buffer memory. This is a faster
+ * implementation of the generic `mmio_memcpy_from_mmio32` that is specialized
+ * for the USB device and gives a significant performance improvemenet.
+ *
+ * @param usbdev A USB device.
+ * @param id Buffer number.
+ * @param dst Destination buffer.
+ * @param dst_len Number of bytes to transfer.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_usbdev_buffer_raw_read(const dif_usbdev_t *usbdev, uint8_t id,
+                                        uint8_t *dst, size_t dst_len);
 
 #ifdef __cplusplus
 }  // extern "C"

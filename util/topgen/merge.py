@@ -1,26 +1,37 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging as log
-import random
 import re
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
+from itertools import chain
 from math import ceil, log2
-from typing import Dict, List, Union, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
-from topgen import c, lib
-from .clocks import Clocks
-from .resets import Resets
+from basegen.typing import ConfigT
+from raclgen.lib import parse_racl_config, parse_racl_mapping
+from reggen.alert import Alert
+from reggen.clocking import ClockingItem
 from reggen.ip_block import IpBlock
-from reggen.params import LocalParam, Parameter, RandParameter, MemSizeParameter
+from reggen.lib import PART_PRIMARY, PART_SECONDARY
+from reggen.params import (LocalParam, MemSizeParameter, Parameter,
+                           RandParameter)
+from reggen.validate import check_bool
+from topgen import lib
+from topgen.secure_prng import SecurePrngFactory
+from topgen.typing import IpBlocksT
+
+from .clocks import Clocks, Group, ModuleClockRef, UnmanagedClocks
+from .resets import Resets, UnmanagedResets
 
 
 def _get_random_data_hex_literal(width):
     """ Fetch 'width' random bits and return them as hex literal"""
     width = int(width)
-    literal_str = hex(random.getrandbits(width))
+    prng = SecurePrngFactory.get("topgen")
+    literal_str = hex(prng.getrandbits(width))
     return literal_str
 
 
@@ -30,7 +41,8 @@ def _get_random_perm_hex_literal(numel):
     num_elements = int(numel)
     width = int(ceil(log2(num_elements)))
     idx = [x for x in range(num_elements)]
-    random.shuffle(idx)
+    prng = SecurePrngFactory.get("topgen")
+    prng.shuffle(idx)
     literal_str = ""
     for k in idx:
         literal_str += format(k, '0' + str(width) + 'b')
@@ -39,18 +51,14 @@ def _get_random_perm_hex_literal(numel):
     return literal_str
 
 
-def elaborate_instances(top, name_to_block: Dict[str, IpBlock]):
+def elaborate_instances(top, name_to_block: IpBlocksT):
     '''Add additional fields to the elements of top['module']
 
     These elements represent instantiations of IP blocks. This function adds
     extra fields to them to carry across information from the IpBlock objects
     that represent the blocks being instantiated. See elaborate_instance for
     more details of what gets added.
-
     '''
-    # Initialize RNG for compile-time netlist constants.
-    random.seed(int(top['rnd_cnst_seed']))
-
     for instance in top['module']:
         block = name_to_block[instance['type']]
         elaborate_instance(instance, block)
@@ -69,18 +77,35 @@ def elaborate_instance(instance, block: IpBlock):
 
     Removed fields:
         - base_addr (this is reflected in base_addrs)
-
     """
-
     # create an empty dict if nothing is there
     if "param_decl" not in instance:
         instance["param_decl"] = {}
 
+    # Let topgen/validate know if it is a split IP.
+    # TODO: should we always forward this?
+    if block.is_split_ip:
+        instance["is_split_ip"] = True
+
     mod_name = instance["name"]
-    cc_mod_name = c.Name.from_snake_case(mod_name).as_camel_case()
+    cc_mod_name = lib.Name.from_snake_case(mod_name).as_camel_case()
 
     # Check to see if all declared parameters exist
     param_decl_accounting = [decl for decl in instance["param_decl"].keys()]
+
+    # Merge IP and top description of the memories.
+    if "memory" not in instance:
+        instance["memory"] = {}
+    for (mem, desc) in instance["memory"].items():
+        if mem not in block.memories:
+            raise ValueError(f"Module instance {mod_name} describes a memory named {mem} "
+                             f"but IP {block.name} only has the following memories: "
+                             f"{list(block.memories.keys())}")
+        # FIXME: here we should merge stuff together
+    # Check that all memories were described.
+    for mem in block.memories.keys():
+        if mem not in instance["memory"]:
+            raise ValueError(f"Module instance {mod_name} does not describe memory {mem}")
 
     # param_list
     new_params = []
@@ -93,18 +118,13 @@ def elaborate_instance(instance, block: IpBlock):
 
         param_expose = param.expose if isinstance(param, Parameter) else False
 
-        # assign an empty entry if this is not present
-        if "memory" not in instance:
-            instance["memory"] = {}
-
         # Check for security-relevant parameters that are not exposed,
         # adding a top-level name.
         if param.name.lower().startswith("sec") and not param_expose:
-            log.warning("{} has security-critical parameter {} "
-                        "not exposed to top".format(
-                            mod_name, param.name))
+            log.warning(f"{mod_name} has security-critical parameter "
+                        f"{param.name} not exposed to top")
 
-        # Move special prefixes to the beginnining of the parameter name.
+        # Move special prefixes to the beginning of the parameter name.
         param_prefixes = ["Sec", "RndCnst", "MemSize"]
         name_top = cc_mod_name + param.name
         for prefix in param_prefixes:
@@ -125,15 +145,28 @@ def elaborate_instance(instance, block: IpBlock):
 
         # Generate random bits or permutation, if needed
         if isinstance(param, RandParameter):
-            if param.randtype == 'data':
+            if param.randtype == "data":
                 new_default = _get_random_data_hex_literal(param.randcount)
                 # Effective width of the random vector
                 randwidth = param.randcount
-            else:
-                assert param.randtype == 'perm'
+            elif param.randtype == "perm":
                 new_default = _get_random_perm_hex_literal(param.randcount)
                 # Effective width of the random vector
                 randwidth = param.randcount * ceil(log2(param.randcount))
+            else:
+                assert param.randtype == "extdata"
+                # Default value is provided externally at a later point or has already been filled
+                # in. If this is already the case, we don't need to fill in a blank value to be
+                # filled in later.
+                fill_default = None
+                for p in instance.get("param_list", []):
+                    if p["name"] == param.name and p["default"] is not None:
+                        fill_default = p["default"]
+                        break
+                randwidth = param.randcount
+                new_default = None
+                if fill_default:
+                    new_default = fill_default
 
             new_param['default'] = new_default
             new_param['randwidth'] = randwidth
@@ -146,8 +179,7 @@ def elaborate_instance(instance, block: IpBlock):
                 new_param['default'] = new_default
             else:
                 log.error("Missing memory configuration for "
-                          "memory {} in instance {}"
-                          .format(key, instance["name"]))
+                          f"memory {key} in instance {instance['name']}")
 
         # if this exposed parameter is listed in the `param_decl` dict,
         # override its default value.
@@ -160,8 +192,8 @@ def elaborate_instance(instance, block: IpBlock):
 
     instance["param_list"] = new_params
 
-    # for each module declaration, check to see that the parameter actually exists
-    # and can be set
+    # for each module declaration, check to see that the parameter actually
+    # exists and can be set
     for decl in param_decl_accounting:
         log.error("{} is not a valid parameter of {} that can be "
                   "set from top level".format(decl, block.name))
@@ -170,23 +202,42 @@ def elaborate_instance(instance, block: IpBlock):
     # to convert and copy them here.
     instance["inter_signal_list"] = [s.as_dict() for s in block.inter_signals]
 
+    # If we have width-parametrized intersignal, we need to update the intersignal param name
+    # the the instance mangled param name
+    for s in instance["inter_signal_list"]:
+        if isinstance(s['width'], Parameter):
+            for p in instance["param_list"]:
+                if p['name'] == s['width'].name:
+                    # When mangling the name, we first need to deep copy the
+                    # param. Parameters in signals have a reference to a
+                    # parameter. If we have multiple instances of the same IP,
+                    # then their signals would reference the same single
+                    # parameter. If we would mangle that directly, we all
+                    # signals of all IPs would reference to that single mangled
+                    # parameter. Since parameters are instance dependent, that
+                    # would fail. Therefore, copy the parameter first to have
+                    # a unique parameter for that particular signal and
+                    # instance, which is safe to mangle.
+                    s['width'] = deepcopy(s['width'])
+                    s['width'].name_top = p['name_top']
+
     # An instance must either have a 'base_addr' address or a 'base_addrs'
     # address, but can't have both.
     base_addrs = instance.get('base_addrs')
     if base_addrs is None:
         if 'base_addr' not in instance:
-            log.error('Instance {!r} has neither a base_addr '
-                      'nor a base_addrs field.'
-                      .format(instance['name']))
+            raise ValueError('Instance {!r} has neither a base_addr '
+                             'nor a base_addrs field.'.format(
+                                 instance['name']))
         else:
             # If the instance has a base_addr field, make sure that the block
             # has just one device interface.
             if len(block.reg_blocks) != 1:
-                log.error('Instance {!r} has a base_addr field but it '
-                          'instantiates the block {!r}, which has {} '
-                          'device interfaces.'
-                          .format(instance['name'],
-                                  block.name, len(block.reg_blocks)))
+                raise ValueError('Instance {!r} has a base_addr field but it '
+                                 'instantiates the block {!r}, which has {} '
+                                 'device interfaces.'.format(
+                                     instance['name'], block.name,
+                                     len(block.reg_blocks)))
             else:
                 if_name = next(iter(block.reg_blocks))
                 base_addrs = {if_name: instance['base_addr']}
@@ -199,31 +250,55 @@ def elaborate_instance(instance, block: IpBlock):
         instance['base_addrs'] = base_addrs
     else:
         if 'base_addr' in instance:
-            log.error('Instance {!r} has both a base_addr '
-                      'and a base_addrs field.'
-                      .format(instance['name']))
+            log.error(f'Instance {instance["name"]} has both a base_addr '
+                      'and a base_addrs field.')
 
-        # Since the instance already has a base_addrs field, make sure that
-        # it's got the same set of keys as the name of the interfaces in the
-        # block.
+        # The base_addrs field for the instance might not have an entry for
+        # every one of the block's interfaces: some of those interfaces might
+        # be disabled through a parameter and thus we don't want to wire them
+        # up.
+        #
+        # But we do expect that every interface that *is* given a base address
+        # has an associated reg_block or memory in the block.
         inst_if_names = set(base_addrs.keys())
-        block_if_names = set(block.reg_blocks.keys())
-        if block_if_names != inst_if_names:
-            log.error('Instance {!r} has a base_addrs field with keys {} '
-                      'but the block it instantiates ({!r}) has device '
-                      'interfaces {}.'
-                      .format(instance['name'], inst_if_names,
-                              block.name, block_if_names))
+        block_if_names = set(block.reg_blocks.keys()) | set(block.memories.keys())
+
+        if inst_if_names - block_if_names:
+            log.error(f"Instance {instance['name']} has a base_addrs field "
+                      f"that defines base addresses for interfaces not named "
+                      f"in the block itself. Extra items: "
+                      f"{list(inst_if_names - block_if_names)}")
 
     if 'base_addr' in instance:
         del instance['base_addr']
 
+    # Default value if no value provided and otherwise convert string to bool
+    if 'generate_dif' not in instance:
+        instance['generate_dif'] = True
+    else:
+        converted_value, err = check_bool(instance['generate_dif'],
+                                          'generate_dif')
+        if err:
+            raise ValueError('generate_dif contains invalid value '
+                             f'{instance["generate_dif"]}')
+        instance['generate_dif'] = converted_value
+
+    # An instance can either have a 'racl_mapping' or 'racl_mappings' but
+    # can't have both.
+    # 'racl_mapping' is used when the device has a single register interface and
+    # 'racl_mappings' when there are more. Translate to always use unified
+    # racl_mappings entry.
+    racl_mapping = instance.get('racl_mapping')
+    if racl_mapping is not None:
+        if instance.get('racl_mappings') is not None:
+            raise ValueError(
+                "Cannot specify both 'racl_mapping' and 'racl_mappings'")
+        del instance['racl_mapping']
+        instance['racl_mappings'] = {None: racl_mapping}
+
 
 # TODO: Replace this part to be configurable from Hjson or template
-predefined_modules = {
-    "corei": "rv_core_ibex",
-    "cored": "rv_core_ibex"
-}
+predefined_modules = {"corei": "rv_core_ibex", "cored": "rv_core_ibex"}
 
 
 def is_xbar(top, name):
@@ -256,17 +331,18 @@ def xbar_addhost(top, xbar, host):
             ("clock", xbar['clock']),
             ("reset", xbar['reset']),
             ("type", "host"),
+            ("addr_space", xbar['addr_space']),
             ("inst_type", ""),
             ("stub", False),
             # The default matches RTL default
-            # pipeline_byp is don't care if pipeline is false
-            ("pipeline", "true"),
-            ("pipeline_byp", "true")
+            ("pipeline", True),
+            ("req_fifo_pass", True),
+            ("rsp_fifo_pass", True)
         ])
         xbar["nodes"].append(obj)
         return
 
-    xbar_bool, xbar_h = is_xbar(top, host)
+    xbar_bool, _xbar_h = is_xbar(top, host)
     if xbar_bool:
         log.info("host {} is a crossbar. Nothing to deal with.".format(host))
 
@@ -281,26 +357,27 @@ def xbar_addhost(top, xbar, host):
     obj[0]["stub"] = False
     obj[0]["inst_type"] = predefined_modules[
         host] if host in predefined_modules else ""
-    obj[0]["pipeline"] = obj[0]["pipeline"] if "pipeline" in obj[0] else "true"
-    obj[0]["pipeline_byp"] = obj[0]["pipeline_byp"] if obj[0][
-        "pipeline"] == "true" and "pipeline_byp" in obj[0] else "true"
+    obj[0]["pipeline"] = obj[0]["pipeline"] if "pipeline" in obj[0] else True
+    obj[0]["req_fifo_pass"] = obj[0]["req_fifo_pass"] if obj[0][
+        "pipeline"] and "req_fifo_pass" in obj[0] else True
+    obj[0]["rsp_fifo_pass"] = obj[0]["rsp_fifo_pass"] if obj[0][
+        "pipeline"] and "rsp_fifo_pass" in obj[0] else True
 
 
 def process_pipeline_var(node):
-    """Add device nodes pipeline / pipeline_byp information
+    """Add device nodes pipeline information
 
     - Supply a default of true / true if not defined by xbar
     """
-    node["pipeline"] = node["pipeline"] if "pipeline" in node else "true"
-    node["pipeline_byp"] = node[
-        "pipeline_byp"] if "pipeline_byp" in node else "true"
+    node["pipeline"] = node["pipeline"] if "pipeline" in node else True
+    node["req_fifo_pass"] = node[
+        "req_fifo_pass"] if "req_fifo_pass" in node else True
+    node["req_fifo_pass"] = node[
+        "req_fifo_pass"] if "req_fifo_pass" in node else True
 
 
-def xbar_adddevice(top: Dict[str, object],
-                   name_to_block: Dict[str, IpBlock],
-                   xbar: Dict[str, object],
-                   other_xbars: List[str],
-                   device: str) -> None:
+def xbar_adddevice(top: ConfigT, name_to_block: IpBlocksT, xbar: ConfigT,
+                   other_xbars: List[str], device: str) -> None:
     """Add or amend an entry in xbar['nodes'] to represent the device interface
 
     - clock: comes from module if exist, use xbar default otherwise
@@ -319,7 +396,7 @@ def xbar_adddevice(top: Dict[str, object],
     # Try to find a block or memory instance with name device_base. Object
     # names should be unique, so there should never be more than one hit.
     instances = [
-        node for node in top["module"] + top["memory"]
+        node for node in top["module"]
         if node['name'] == device_base
     ]
     assert len(instances) <= 1
@@ -327,22 +404,20 @@ def xbar_adddevice(top: Dict[str, object],
 
     # Try to find a node in the crossbar called device. Node names should be
     # unique, so there should never be more than one hit.
-    nodes = [
-        node for node in xbar['nodes']
-        if node['name'] == device
-    ]
+    nodes = [node for node in xbar['nodes'] if node['name'] == device]
     assert len(nodes) <= 1
     node = nodes[0] if nodes else None
 
-    log.info("Handling xbar device {} (matches instance? {}; matches node? {})"
-             .format(device, inst is not None, node is not None))
+    log.info(
+        "Handling xbar device {} (matches instance? {}; matches node? {})".
+        format(device, inst is not None, node is not None))
 
     # case 1: another xbar --> check in xbar list
     if node is None and device in other_xbars:
         log.error(
             "Another crossbar %s needs to be specified in the 'nodes' list" %
             device)
-        return
+        raise RuntimeError(f"Cannot add device {device} to crossbar")
 
     # If there is no module or memory with the right name, this might still be
     # ok: we might be connecting to another crossbar or to a predefined module.
@@ -363,27 +438,44 @@ def xbar_adddevice(top: Dict[str, object],
         if device in predefined_modules:
             log.error("device %s shouldn't be host type" % device)
 
-            return
+            raise RuntimeError(f"Cannot add device {device} to crossbar")
 
         # case 3: not defined
         # Crossbar check
         log.error("Device %s doesn't exist in 'module', 'memory', predefined, "
                   "or as a node object" % device)
-        return
+        raise RuntimeError(f"Cannot add device {device} to crossbar")
 
     # If we get here, inst points an instance of some block or memory. It
     # shouldn't point at a crossbar (because that would imply a naming clash)
     assert device_base not in other_xbars
-    base_addr, size_byte = lib.get_base_and_size(name_to_block,
-                                                 inst, device_ifname)
-    addr_range = {"base_addr": hex(base_addr), "size_byte": hex(size_byte)}
+
+    block = name_to_block.get(inst['type'])
+    if block is None:
+        raise RuntimeError(f"No block defined for instance "
+                           f"type {inst['type']} (with name "
+                           f"{inst['name']})")
+
+    bases_size = lib.get_base_and_size(block, inst, device_ifname)
+    if bases_size is None:
+        # If get_base_and_size returned None, that means the instance doesn't
+        # actually connect with this interface and thus doesn't connect to this
+        # crossbar. Nothing more to do.
+        return
+
+    base_addrs, size_byte = bases_size
+    addr_range = {
+        "base_addrs":
+        {asid: hex(base_addr)
+         for (asid, base_addr) in base_addrs.items()},
+        "size_byte": hex(size_byte),
+    }
 
     stub = not lib.is_inst(inst)
 
     if node is None:
-        log.error('Cannot connect to {!r} because '
-                  'the crossbar defines no node for {!r}.'
-                  .format(device, device_base))
+        log.error(f'Cannot connect to {repr(device)} because the crossbar '
+                  f'defines no node for {repr(device_base)}.')
         return
 
     node["inst_type"] = inst["type"]
@@ -393,9 +485,7 @@ def xbar_adddevice(top: Dict[str, object],
     process_pipeline_var(node)
 
 
-def amend_xbar(top: Dict[str, object],
-               name_to_block: Dict[str, IpBlock],
-               xbar: Dict[str, object]):
+def amend_xbar(top: ConfigT, name_to_block: IpBlocksT, xbar: ConfigT):
     """Amend crossbar informations to the top list
 
     Amended fields
@@ -406,7 +496,7 @@ def amend_xbar(top: Dict[str, object],
     - size: from top["module"]
     """
     xbar_list = [x["name"] for x in top["xbar"]]
-    if not xbar["name"] in xbar_list:
+    if xbar["name"] not in xbar_list:
         log.info(
             "Xbar %s doesn't belong to the top %s. Check if the xbar doesn't need"
             % (xbar["name"], top["name"]))
@@ -421,6 +511,12 @@ def amend_xbar(top: Dict[str, object],
     else:
         topxbar["nodes"] = []
 
+    addr_spaces = {
+        x["addr_space"]
+        for x in topxbar["nodes"] if "addr_space" in x
+    }
+    topxbar["addr_spaces"] = sorted(addr_spaces)
+
     # xbar primary clock and reset
     topxbar["clock"] = xbar["clock_primary"]
     topxbar["reset"] = xbar["reset_primary"]
@@ -434,9 +530,7 @@ def amend_xbar(top: Dict[str, object],
         # add device if doesn't exist
         device_nodes.update(devices)
 
-    other_xbars = [x["name"]
-                   for x in top["xbar"]
-                   if x["name"] != xbar["name"]]
+    other_xbars = [x["name"] for x in top["xbar"] if x["name"] != xbar["name"]]
 
     log.info(device_nodes)
     for device in device_nodes:
@@ -477,11 +571,29 @@ def xbar_cross(xbar, xbars):
     # device_xbar is the crossbar has a device port with name as node["name"].
     # host_xbar is the crossbar has a host port with name as node["name"].
     for node in xbar_nodes:
-        xbar_addr = xbar_cross_node(node["name"], xbar, xbars, visited=[])
-        node["addr_range"] = xbar_addr
+        (asid, xbar_addr) = xbar_cross_node(node["name"],
+                                            xbar,
+                                            xbars,
+                                            visited=[])
+        node["addr_space"] = asid
+        # Filter addresses by ASID
+        addr_range = []
+        for addr in xbar_addr:
+            if asid in addr["base_addrs"]:
+                addr_range.append({
+                    "base_addrs": {
+                        asid: addr["base_addrs"][asid]
+                    },
+                    "size_byte": addr["size_byte"],
+                })
+        node["addr_range"] = addr_range
 
 
-def xbar_cross_node(node_name, device_xbar, xbars, visited=[]):
+def xbar_cross_node(node_name: str,
+                    device_xbar: ConfigT,
+                    xbars: List[ConfigT],
+                    visited=[],
+                    asid=None):
     # 1. Get the connected xbar
     host_xbars = [x for x in xbars if x["name"] == node_name]
     assert len(host_xbars) == 1
@@ -489,6 +601,17 @@ def xbar_cross_node(node_name, device_xbar, xbars, visited=[]):
 
     log.info("Processing node {} in Xbar {}.".format(node_name,
                                                      device_xbar["name"]))
+    host_xbar_nodes = [
+        x for x in host_xbar["nodes"] if x["name"] == device_xbar["name"]
+    ]
+    assert len(host_xbar_nodes) == 1
+    host_xbar_node = host_xbar_nodes[0]
+    host_xbar_asid = host_xbar_node["addr_space"]
+
+    if asid is None:
+        asid = host_xbar_asid
+    assert asid == host_xbar_asid
+
     result = []  # [(base_addr, size), .. ]
     # Sweep the devices using connections and gather the address.
     # If the device is another xbar, call recursive
@@ -496,32 +619,24 @@ def xbar_cross_node(node_name, device_xbar, xbars, visited=[]):
     devices = host_xbar["connections"][device_xbar["name"]]
 
     for node in host_xbar["nodes"]:
-        if not node["name"] in devices:
+        if node["name"] not in devices:
             continue
         if "xbar" in node and node["xbar"] is True:
             if "addr_range" not in node:
                 # Deeper dive into another crossbar
-                xbar_addr = xbar_cross_node(node["name"], host_xbar, xbars,
-                                            visited)
+                (_asid, xbar_addr) = xbar_cross_node(node["name"], host_xbar,
+                                                     xbars, visited, asid)
                 node["addr_range"] = xbar_addr
 
         result.extend(deepcopy(node["addr_range"]))
 
     visited.pop()
 
-    return result
+    return (asid, result)
 
 
-# find the first instance name of a given type
-def _find_module_name(modules, module_type):
-    for m in modules:
-        if m['type'] == module_type:
-            return m['name']
-
-    return None
-
-
-def _get_clock_group_name(clk: Union[str, OrderedDict], default_ep_grp) -> Tuple[str, str]:
+def _get_clock_group_name(clk: Union[str, OrderedDict],
+                          default_ep_grp: str) -> Tuple[str, str]:
     """Return the clock group of a particular clock connection
 
     Checks whether there is a specific clock group associated with this
@@ -541,56 +656,131 @@ def _get_clock_group_name(clk: Union[str, OrderedDict], default_ep_grp) -> Tuple
     return group_name, src_name
 
 
-def extract_clocks(top: OrderedDict):
-    '''Add clock exports to top and connections to endpoints
+def is_unmanaged_clock(top: ConfigT, clock: str):
+    return clock in top['unmanaged_clocks']._asdict()
 
-    This function sets up all the clock-related machinery that is needed to
-    generate the (templated) clkmgr code. This runs before we load up IP blocks
-    with reggen, so can only see top-level configuration.
 
-    By default each end point (peripheral, memory etc) is in the same clock group.
-    However, it is possible to define the group attribute per clock if required.
+def is_unmanaged_reset(top: ConfigT, reset: str):
+    return reset in top['unmanaged_resets']
 
+
+def _pre_validate_split_ip(end_point: ConfigT) -> bool:
+    '''Check if an endpoint is a split IP and validate its configuration.
+
+    If any secondary key exists the secondary information must be consistent.
+    Returns True if the end point seems to be a split IP, False otherwise.
+    Raises an error if the configuration is invalid.
+    '''
+    # Extract whether secondary keys are defined.
+    domain_2nd_exists = lib.secondary_key('domain') in end_point
+    # Detect which partitioned keys are present and which carry secondary
+    # information. A key is partitioned if it is a dict with a PART_PRIMARY key,
+    # and carries secondary information if it also has a PART_SECONDARY key.
+    partitioned_keys = []
+    keys_with_2nd_info = []
+    for key in lib.PARTITIONED_KEYS:
+        val = end_point.get(key)
+        if isinstance(val, dict) and PART_PRIMARY in val:
+            partitioned_keys.append(key)
+            if val.get(PART_SECONDARY):
+                keys_with_2nd_info.append(key)
+
+    if not domain_2nd_exists and not partitioned_keys:
+        # It seems this is not a split IP. We will check against the IP
+        # definition when validating the elaborated configuration.
+        return False
+
+    # If at least one partitioned key is defined, the IP is assumed to be
+    # split. Thus, a secondary domain must be defined.
+    if not domain_2nd_exists:
+        raise ValueError(f"Endpoint {end_point['name']} defines "
+                         "secondary clocking information but no "
+                         "secondary domain is specified.")
+
+    # We know a secondary domain is defined. Thus all partitioned keys must be
+    # defined as well and have a primary key.
+    for key in lib.PARTITIONED_KEYS:
+        if key not in partitioned_keys:
+            raise ValueError(f"Endpoint {end_point['name']} defines a "
+                             f"secondary domain, but {key} is not specified "
+                             "per partition.")
+
+    # A split IP's secondary partition must be clocked and thus must have all
+    # keys.
+    for key in lib.PARTITIONED_KEYS:
+        if key not in keys_with_2nd_info:
+            raise ValueError(f"Endpoint {end_point['name']} has a secondary "
+                             "partition but no secondary information is "
+                             f"specified for {key}.")
+
+    # This is a valid split IP configuration.
+    return True
+
+
+def normalize_partition_connections(topcfg: ConfigT) -> None:
+    '''Validates and flattens a split IP's dicts into primary / secondary keys.
+
+    Split IPs must define dicts for keys in PARTITIONED_KEYS. These dicts are
+    split into 'key' and 'key_secondary' for the primary and secondary
+    partitions, respectively.
+    '''
+    for end_point in topcfg['module'] + topcfg['xbar']:
+        is_split_ip = _pre_validate_split_ip(end_point)
+
+        if not is_split_ip:
+            continue
+        # Flatten the partitioned keys if the end point is a split IP.
+        # Anything else is already normalized, absent, or a value shared by
+        # both partitions.
+        for key in lib.PARTITIONED_KEYS:
+            val = end_point.get(key)
+            if isinstance(val, dict) and PART_PRIMARY in val:
+                end_point[key] = val[PART_PRIMARY]
+                if PART_SECONDARY in val:
+                    end_point[lib.secondary_key(key)] = val[PART_SECONDARY]
+
+
+def _elaborate_clock_srcs(top: ConfigT,
+                          ep_name: str,
+                          clock_srcs: ConfigT,
+                          ep_grp: str,
+                          ep_domain: str,
+                          export_if: List[str],
+                          exported_clks: ConfigT) -> ConfigT:
+    '''Build the clock connections for one partition of an endpoint.
+
+    Adds the endpoint's clocks to their groups, records exported clocks in
+    `exported_clks`, and returns the {port: net} clock_connections dict.
     '''
     clocks = top['clocks']
-    assert isinstance(clocks, Clocks)
+    clock_connections = OrderedDict()
 
-    exported_clks = OrderedDict()
+    # prefixes for all clocks of this endpoint partition
+    prefixes = lib.get_clock_prefixes(top, ep_domain)
 
-    for ep in top['module'] + top['memory'] + top['xbar']:
-        clock_connections = OrderedDict()
+    for port, clk in clock_srcs.items():
+        group_name, src_name = _get_clock_group_name(clk, ep_grp)
 
-        # Ensure each module has a default case
-        export_if = ep.get('clock_reset_export', [])
-
-        # The clock group attribute in an end point sets the defaut
-        # group for every clock in that end point.
-        #
-        # However, the end point can also override specific clocks to
-        # different groups inside clock_srcs.  This is generally not
-        # recommended as it is better to stay consistent.  However
-        # if needed, the method is available.
-        ep['clock_group'] = 'secure' if 'clock_group' not in ep else ep[
-            'clock_group']
-        ep_grp = ep['clock_group']
-
-        # end point names and clocks
-        ep_name = ep['name']
-
-        for port, clk in ep['clock_srcs'].items():
-
-            group_name, src_name = _get_clock_group_name(clk, ep_grp)
-
+        if is_unmanaged_clock(top, src_name):
+            # Unmanaged clocks have a simpler connection without clock groups
+            clock_connections[port] = top['unmanaged_clocks']._asdict(
+            )[src_name].signal_name
+        else:
+            if group_name not in clocks.groups:
+                raise ValueError(
+                    f"Endpoint {ep_name} references clock group {group_name} "
+                    f"for port {port}, but that group is not defined in the "
+                    "top-level clocks configuration.")
             group = clocks.groups[group_name]
 
             name = ''
-            hier_name = clocks.hier_paths[group.src]
+            hier_name = prefixes[group.src]
 
             if group.src == 'ext':
                 name = "{}_i".format(src_name)
 
             elif group.unique:
-                # new unqiue clock name
+                # new unique clock name
                 name = "{}_{}".format(src_name, ep_name)
 
             else:
@@ -603,8 +793,18 @@ def extract_clocks(top: OrderedDict):
             clk_sig = clocks.add_clock_to_group(group, clk_name, src_name)
             clk_sig.add_endpoint(ep_name, port)
 
-            # add clock connections
-            clock_connections[port] = hier_name + clk_name
+            src_clk = clocks.all_srcs.get(src_name)
+            if group.src == 'ext' and src_clk is not None and src_clk.module is not None:
+                # This clock is generated by an IP inside the top rather than supplied from outside
+                # the top. The producing module's IpBlock isn't available yet at this point in the
+                # pipeline. We defer resolution to a later pass, once `elab_intermodule` has run.
+                clock_connections[port] = ModuleClockRef(src_clk.module,
+                                                         src_clk.signal,
+                                                         src_clk.partition,
+                                                         ep_domain)
+            else:
+                # add clock connections
+                clock_connections[port] = hier_name + clk_name
 
             # clocks for this module are exported
             for intf in export_if:
@@ -621,22 +821,89 @@ def extract_clocks(top: OrderedDict):
                 # append clocks
                 exported_clks[intf][ep_name].append(name)
 
-        # Add to endpoint structure
-        ep['clock_connections'] = clock_connections
+    return clock_connections
+
+
+def extract_clocks(top: ConfigT):
+    '''Add clock exports to top and connections to endpoints
+
+    This function sets up all the clock-related machinery that is needed to
+    generate the clkmgr code. This runs before we load up IP blocks with
+    reggen, so can only see top-level configuration.
+
+    By default each end point (peripheral, memory etc) is in the same clock
+    group. However, it is possible to define the group attribute per clock
+    if required.
+    '''
+    if not isinstance(top['clocks'], Clocks):
+        top['clocks'] = Clocks(top['clocks'])
+    if not isinstance(top['unmanaged_clocks'], UnmanagedClocks):
+        top['unmanaged_clocks'] = UnmanagedClocks(top['unmanaged_clocks'])
+
+    exported_clks = OrderedDict()
+    default_domain = top['power']['default']
+
+    for ep in top['module'] + top['xbar']:
+        # Ensure each module has a default case
+        export_if = ep.get('clock_reset_export', [])
+
+        # The clock group attribute in an end point sets the default
+        # group for every clock in that end point.
+        #
+        # However, the end point can also override specific clocks to
+        # different groups inside clock_srcs.  This is generally not
+        # recommended as it is better to stay consistent.  However
+        # if needed, the method is available.
+        #
+        # Write value to dict in case it was unset before
+        ep['clock_group'] = ep.get('clock_group', 'secure')
+
+        # end point names and clocks
+        ep_name = ep['name']
+
+        ep['clock_connections'] = _elaborate_clock_srcs(
+            top, ep_name, ep['clock_srcs'], ep['clock_group'],
+            ep.get('domain', default_domain), export_if, exported_clks)
+
+        # A split instance's secondary partition is elaborated on its own, in
+        # its own clock group and power domain. Its clocking is validated
+        # upfront by _pre_validate_split_ip / check_power_domains, so the
+        # secondary keys are guaranteed to be present here.
+        if lib.secondary_key('clock_srcs') in ep:
+            ep[lib.secondary_key('clock_connections')] = _elaborate_clock_srcs(
+                top, ep_name, ep[lib.secondary_key('clock_srcs')],
+                ep[lib.secondary_key('clock_group')],
+                ep[lib.secondary_key('domain')],
+                export_if, exported_clks)
 
     # add entry to top level json
     top['exported_clks'] = exported_clks
 
 
-def connect_clocks(top, name_to_block: Dict[str, IpBlock]):
+def _partition_qualify(ref: str, partition: str, is_split: bool) -> str:
+    """Qualify an auto-generated inter-module reference with its partition.
+
+    Wakeups, reset requests and idle hints are connected to pwrmgr/clkmgr by an
+    auto-generated `<module>.<signal>` reference. A split IP's inter-module
+    names are only unique per partition, so its references must carry the
+    partition.
+    """
+    return f"{ref}.{partition}" if is_split else ref
+
+
+def connect_clocks(top: ConfigT, name_to_block: IpBlocksT):
     clocks = top['clocks']
     assert isinstance(clocks, Clocks)
 
     # add entry to inter_module automatically
-    clkmgr_name = _find_module_name(top['module'], 'clkmgr')
+    clkmgr = lib.find_module(top["module"], "clkmgr")
+    # If there is no clkmgr, nothing to do here
+    if not clkmgr:
+        return
+
     external = top['inter_module']['external']
     for intf in top['exported_clks']:
-        external[f'{clkmgr_name}.clocks_{intf}'] = f"clks_{intf}"
+        external[f'{clkmgr["name"]}.clocks_{intf}'] = f"clks_{intf}"
 
     typed_clocks = clocks.typed_clocks()
 
@@ -660,11 +927,7 @@ def connect_clocks(top, name_to_block: Dict[str, IpBlock]):
         # find the corresponding IpBlock. To do this, we have to do a (linear)
         # search through top['module'] to find the instance that matches the
         # endpoint, then use that instance's type as a key in name_to_block.
-        ep_inst = None
-        for inst in top['module']:
-            if inst['name'] == ep_name:
-                ep_inst = inst
-                break
+        ep_inst = lib.find_module(top["module"], ep_name)
         if ep_inst is None:
             raise ValueError(f'No module instance with name {ep_name}: only '
                              f'modules can have hint clocks. Is this a '
@@ -675,9 +938,12 @@ def connect_clocks(top, name_to_block: Dict[str, IpBlock]):
         # Walk through the clocking items for the block to find the one that
         # defines each of the ports.
         idle_signal = None
+        idle_partition = None
         for ep_name, ep_port in sig.endpoints:
             ep_idle = None
-            for item in ip_block.clocking.items:
+            # For split IPs a hint clock may belong to the secondary partition,
+            # so search the clocking items of all partitions.
+            for item in ip_block.clocking.items_for(None):
                 if item.clock != ep_port:
                     continue
                 if item.idle is None:
@@ -694,6 +960,7 @@ def connect_clocks(top, name_to_block: Dict[str, IpBlock]):
                                      f'this clocking item has an idle signal '
                                      f'called {item.idle}.')
                 ep_idle = item.idle
+                idle_partition = item.partition
                 break
             if ep_idle is None:
                 raise ValueError(f'Cannot connect the {sig.name} clock to '
@@ -711,40 +978,59 @@ def connect_clocks(top, name_to_block: Dict[str, IpBlock]):
                              f'"_o" suffix.')
         idle_signal = idle_signal[:-2]
 
-        clkmgr_idle.append(ep_name + '.' + idle_signal)
+        clkmgr_idle.append(_partition_qualify(
+            ep_name + '.' + idle_signal, idle_partition, ip_block.is_split_ip))
 
-    top['inter_module']['connect']['{}.idle'.format(clkmgr_name)] = clkmgr_idle
+    top['inter_module']['connect']['{}.idle'.format(clkmgr["name"])] = clkmgr_idle
 
 
-def amend_resets(top, name_to_block):
+def amend_resets(top: ConfigT,
+                 name_to_block: IpBlocksT,
+                 allow_missing_blocks=False):
     """Generate exported reset structure and automatically connect to
-       intermodule.
+    intermodule.
 
-       Also iterate through and determine need for shadowed reset and
-       domains.
+    Also iterate through and determine need for shadowed reset and
+    domains.
     """
-
-    top_resets = Resets(top['resets'], top['clocks'])
-    rstmgr_name = _find_module_name(top['module'], 'rstmgr')
+    unmanaged_resets = top.get('unmanaged_resets')
+    if not unmanaged_resets:
+        top['unmanaged_resets'] = UnmanagedResets([])
+    elif not isinstance(unmanaged_resets, UnmanagedResets):
+        top['unmanaged_resets'] = UnmanagedResets(unmanaged_resets)
+    top_resets = (top['resets'] if isinstance(top['resets'], Resets) else
+                  Resets(top['resets'], top['clocks']))
+    rstmgr = lib.find_module(top['module'], 'rstmgr')
 
     # Generate exported reset list
     exported_rsts = OrderedDict()
     for module in top["module"]:
-
-        block = name_to_block[module['type']]
+        block = name_to_block.get(module['type'])
+        if block is None and allow_missing_blocks:
+            continue
         block_clock = block.get_primary_clock()
         primary_reset = module['reset_connections'][block_clock.reset]
 
         # shadowed determination
         if block.has_shadowed_reg():
-            top_resets.mark_reset_shadowed(primary_reset['name'])
+            # External unmanaged resets are don't have a shadowed reset.
+            # Both the primary and and the shadowed reset are served from
+            # the same reset signal. It is assumed that the external reset
+            # is stable and free from glitches. Here, don't mark the reset
+            # as shadowed to avoid generating a second reset signal.
+            if not is_unmanaged_reset(top, primary_reset['name']):
+                top_resets.mark_reset_shadowed(primary_reset['name'])
 
-        # domain determination
-        for d in module["domain"]:
-            for r in block.clocking.items:
+        log.info("in module {}".format(module["name"]))
+        # Register the reset domains of every partition.
+        for partition, reset_connections in lib.get_conns_for(
+                module, 'reset_connections'):
+            for r in block.clocking.items_for(partition):
                 if r.reset:
-                    reset = module['reset_connections'][r.reset]
-                    top_resets.add_reset_domain(reset['name'], d)
+                    reset = reset_connections[r.reset]
+                    if is_unmanaged_reset(top, reset['name']):
+                        continue
+                    top_resets.add_reset_domain(reset['name'], reset['domain'])
 
         # This code is here to ensure if amend_clocks/resets switched order
         # everything would still work
@@ -757,102 +1043,295 @@ def amend_resets(top, name_to_block):
                 exported_rsts[intf] = OrderedDict()
 
             # grab directly from reset_connections definition
-            rsts = [rst for rst in module['reset_connections'].values()]
+            rsts = [rst
+                    for _, conns in lib.get_conns_for(module,
+                                                      'reset_connections')
+                    for rst in conns.values()]
             exported_rsts[intf][module['name']] = rsts
+
+    # ensure xbar resets are also covered.
+    # unless otherwise stated, xbars always fall into the default power domain.
+    for xbar in top["xbar"]:
+        for reset in xbar['reset_connections'].values():
+            if is_unmanaged_reset(top, reset['name']):
+                continue
+            top_resets.add_reset_domain(reset['name'], top['power']['default'])
 
     # add entry to top level json
     top['exported_rsts'] = exported_rsts
 
     # add entry to inter_module automatically
-    for intf in top['exported_rsts']:
-        top['inter_module']['external']['{}.resets_{}'.format(
-            rstmgr_name, intf)] = "rsts_{}".format(intf)
+    if not rstmgr and allow_missing_blocks:
+        pass
+    else:
+        for intf in top['exported_rsts']:
+            top['inter_module']['external'][f'{rstmgr["name"]}.resets_{intf}'] = (
+                "rsts_{}".format(intf))
 
     # reset class objects
     top["resets"] = top_resets
 
 
-def create_alert_lpgs(top, name_to_block: Dict[str, IpBlock]):
+def get_alerts_with_unique_lpg_idx(incoming_alerts: List[Dict]):
+    unique_lpgs = set()
+    result = []
+
+    for alert in incoming_alerts:
+        if alert['lpg_idx'] not in unique_lpgs:
+            unique_lpgs.add(alert['lpg_idx'])
+            result.append(alert)
+    return result
+
+
+def _make_lpg_entry(top: ConfigT,
+                    clock_groups: Dict[str, Group],
+                    module: ConfigT,
+                    block_clock: ClockingItem,
+                    clock_connections: ConfigT,
+                    reset_connections: ConfigT) -> ConfigT:
+    '''Build the LPG descriptor for one partition of a module.
+
+    The alert senders of a (partition of a) block are attached to that
+    partition's primary clock and reset.
+    For the purposes of alert handler LPGs, we need to know:
+      1) the clock group of the primary clock
+      2) the primary reset name
+      3) the domain of the primary reset
+
+    The LPG identifier is the concatenation of those three, prefixed with the
+    module name if the clock group is a unique one.
+    '''
+    primary_reset = reset_connections[block_clock.reset]
+    # 1) figure out the clock group assignment of the primary clock
+    # Get the full clock name and split the hierarchy path, getting the
+    # last element
+    clk = clock_connections[block_clock.clock]
+    if isinstance(clk, ModuleClockRef):
+        # Note, only raw clocks (clocks driving the clkmgr) can be of type
+        # ModuleClockRef. All other clocks are resolved at this time.
+        raise ValueError(
+            f"Module {module['name']!r}s primary clock {block_clock.clock!r} "
+            f"is sourced by the raw clock '{clk.module}.{clk.signal}'. This "
+            "is not supported for alerts. Alerts can only be driven by clocks "
+            "managed by the clkmgr as they require the proper clock gating."
+            "Set this module's primary clock to a clkmgr-managed clock group "
+            "instead.")
+    # Unmanaged clocks are not part of the LPGs. Unmanaged clocks have the
+    # input signal identifier ('_i') directly in the signal name. Determine
+    # if that clock name is an unmanaged clock.
+    unmanaged_clock = False
+    for clock in top['unmanaged_clocks']._asdict().values():
+        if clock.signal_name == clk:
+            unmanaged_clock = True
+            break
+
+    # 2-3) get reset info
+    reset_name = primary_reset['name']
+    reset_domain = primary_reset['domain']
+
+    if unmanaged_clock:
+        lpg_name = '_'.join([clk, reset_name, reset_domain])
+        clock_group = None
+    else:
+        # Discover what clock group we are related to.
+        clock_group = clock_groups[clk.split(".")[-1]]
+        if clock_group.src == 'ext':
+            raise ValueError(
+                f"Module {module['name']!r}s primary clock {block_clock.clock!r} "
+                f"is sourced by the external clock '{clk}'. This is not "
+                "supported for alerts. Alerts can only be driven by clocks "
+                "managed by the clkmgr as they require the proper clock gating. "
+                "Set this module's primary clock to a clkmgr-managed clock group "
+                "instead.")
+        # using this info, we can create an LPG identifier and uniquify it via
+        # a dict.
+        lpg_name = '_'.join([clock_group.name, reset_name, reset_domain])
+
+        # if clock group is "unique", add some uniquification to the tag
+        if clock_group.unique and clock_group.sw_cg != "no":
+            lpg_name = f"{module['name']}_{lpg_name}"
+
+    # since the alert handler can tolerate timing delays on LPG indication
+    # signals, we can just use the clock / reset signals of the first block
+    # that belongs to a new unique LPG.
+    return {
+        'name': lpg_name,
+        'clock_group': None if unmanaged_clock else clock_group,
+        'clock_connection': clk,
+        'unmanaged_clock': unmanaged_clock,
+        'unmanaged_reset': is_unmanaged_reset(top, reset_name),
+        'reset_connection': primary_reset,
+    }
+
+
+def create_alert_lpgs(top: ConfigT, name_to_block: IpBlocksT):
     '''Loop over modules and determine number of unique LPGs'''
-    num_lpg = 0
     lpg_dict = {}
+    outgoing_lpg_dict = defaultdict(dict)
     top['alert_lpgs'] = []
+    top['outgoing_alert_lpgs'] = defaultdict(list)
+
+    # ensure the object is already generated before we attempt to use it
+    assert isinstance(top['clocks'], Clocks)
+    clock_groups = top['clocks'].make_clock_to_group()
+
     for module in top["module"]:
-        # the alert senders are attached to the primary clock of this block,
-        # so let's start by getting that primary clock port of an IP (we need
-        # that to look up the clock connection at the top-level).
         block = name_to_block[module['type']]
-        block_clock = block.get_primary_clock()
-        primary_reset = module['reset_connections'][block_clock.reset]
+        alert_group = module.get('outgoing_alert')
 
-        # for the purposes of alert handler LPGs, we need to know:
-        #   1) the clock group of the primary clock
-        #   2) the primary reset name
-        #   3) the domain of the primary reset
-        #
-        # 1) need to figure out whether the primary clock has a
-        #    specific clock group assignment or not
-        clk = module['clock_srcs'][block_clock.clock]
-        clock_group, _ = _get_clock_group_name(clk, module['clock_group'])
+        # Compute an LPG per partition: each has its own primary clock and
+        # reset, in a potentially different clock group and reset domain. Each
+        # alert then joins the LPG of its owning partition. A non-split block
+        # has a single 'primary' partition, so this is one LPG as before.
+        lpg_names = {}
+        for partition, clock_connections in lib.get_conns_for(
+                module, 'clock_connections'):
+            reset_connections = module.get(
+                lib.partition_key('reset_connections', partition))
+            if (reset_connections is None or
+                    not block.clocking.has_partition(partition)):
+                continue
 
-        # 2-3) get reset info
-        reset_name = primary_reset['name']
-        reset_domain = primary_reset['domain']
+            lpg_entry = _make_lpg_entry(top, clock_groups, module,
+                                        block.get_primary_clock(partition),
+                                        clock_connections, reset_connections)
+            lpg_name = lpg_entry['name']
+            lpg_names[partition] = lpg_name
 
-        # using this info, we can create an LPG identifier
-        # and uniquify it via a dict.
-        lpg_name = '_'.join([clock_group, reset_name, reset_domain])
-        if lpg_name not in lpg_dict:
-            lpg_dict.update({lpg_name: num_lpg})
-            # since the alert handler can tolerate timing delays on LPG
-            # indication signals, we can just use the clock / reset signals
-            # of the first block that belongs to a new unique LPG.
-            clock = module['clock_connections'][block_clock.clock]
-            top['alert_lpgs'].append({
-                'name': lpg_name,
-                'clock_group': clock_group,
-                'clock_connection': clock,
-                'reset_connection': primary_reset
-            })
-            num_lpg += 1
+            if alert_group is not None:
+                if lpg_name not in outgoing_lpg_dict[alert_group]:
+                    outgoing_lpg_dict[alert_group][lpg_name] = len(
+                        outgoing_lpg_dict[alert_group])
+                    top['outgoing_alert_lpgs'][alert_group].append(lpg_entry)
+            elif lpg_name not in lpg_dict:
+                lpg_dict[lpg_name] = len(lpg_dict)
+                top['alert_lpgs'].append(lpg_entry)
 
-        # annotate all alerts of this module to use this LPG
+        # annotate all alerts of this module to use the LPG of their partition
         for alert in top['alert']:
             if alert['module_name'] == module['name']:
-                alert.update({
-                    'lpg_name': lpg_name,
-                    'lpg_idx': lpg_dict[lpg_name]
-                })
+                partition = alert.get('partition', PART_PRIMARY)
+                lpg_name = lpg_names.get(partition,
+                                         lpg_names.get(PART_PRIMARY))
+                alert['lpg_name'] = lpg_name
+                alert['lpg_idx'] = lpg_dict[lpg_name]
+        for _, alerts in top['outgoing_alert'].items():
+            for alert in alerts:
+                if alert['module_name'] == module['name']:
+                    partition = alert.get('partition', PART_PRIMARY)
+                    lpg_name = lpg_names.get(partition,
+                                             lpg_names.get(PART_PRIMARY))
+                    alert['lpg_name'] = lpg_name
+                    alert['lpg_idx'] = outgoing_lpg_dict[
+                        module['outgoing_alert']][lpg_name]
+
+    # Create chiplevel signal definitions for outgoing LPG indication signals
+    sigdefs = []
+    for alert_group, lpgs in top['outgoing_alert_lpgs'].items():
+        if not lpgs:
+            continue
+        for prefix in ("outgoing_lpg_cg_en", "outgoing_lpg_rst_en"):
+            sigdefs.append(
+                OrderedDict([('package', 'prim_mubi_pkg'),
+                             ('struct', 'mubi4'),
+                             ('domain', 'chip'),
+                             ('signame', f"{prefix}_{alert_group}"),
+                             ('width', len(lpgs)),
+                             ('type', 'uni'),
+                             ('special', 'alert'),
+                             ('end_idx', -1),
+                             ('act', 'req'),
+                             ('suffix', ''),
+                             ('default', 'prim_mubi_pkg::MuBi4True')]))
+
+    # Add to inter-pd definitions, avoid duplicates
+    topdefs = top.setdefault("inter_pd",
+                             defaultdict()).setdefault("definitions", [])
+    for sd in sigdefs:
+        if sd["signame"] not in [td["signame"] for td in topdefs]:
+            topdefs.append(sd)
 
 
-def ensure_interrupt_modules(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
-    '''Populate top['interrupt_module'] if necessary
+def get_interrupt_modules(top: ConfigT,
+                          name_to_block: IpBlocksT,
+                          allow_missing_blocks=False) -> List[str]:
+    """Return an existing top["interrupt_module"] or generate one.
 
-    Do this by adding each module in top['modules'] that defines at least one
-    interrupt.
+    If the config has an "interrupt_module" it is taken as the true list
+    of modules that will connect their interrupts to rv_plic. This allows
+    some configs where some modules have their interrupts handled in
+    more custom ways.
 
-    '''
-    if 'interrupt_module' in top:
-        return
+    When "interrupt_module" is not in the config the list is generated with
+    all modules that have some interrupts and no "outgoing_interrupt".
+    """
+    if "interrupt_module" in top:
+        return top["interrupt_module"]
 
     modules = []
-    for module in top['module']:
-        block = name_to_block[module['type']]
+    for module in top["module"]:
+        block = name_to_block.get(module["type"])
+        if block is None and allow_missing_blocks:
+            continue
         if block.interrupts:
-            modules.append(module['name'])
+            if "outgoing_interrupt" not in module:
+                modules.append(module["name"])
 
-    top['interrupt_module'] = modules
+    return modules
 
 
-def amend_interrupt(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
-    """Check interrupt_module if exists, or just use all modules
+def commit_interrupt_modules(top: ConfigT, name_to_block: IpBlocksT):
+    """Ensure top['interrupt_module'] is populated in the final config."""
+    top['interrupt_module'] = get_interrupt_modules(top, name_to_block)
+
+
+def get_outgoing_interrupt_modules(top: ConfigT,
+                                   name_to_block: IpBlocksT,
+                                   allow_missing_blocks=False) -> List[str]:
+    """Return an existing top["outgoing_interrupt_module"] or generate one.
+
+    If the config has an "outgoing_interrupt_module" entry it is taken as the
+    true list of modules that will send their interrupts out of this top. This
+    allows some interrupts to be handled in some other top.
+
+    When "outgoing_interrupt_module" is not in the config the list is generated
+    with all modules that have some outgoing interrupt.
     """
-    ensure_interrupt_modules(top, name_to_block)
+    if "outgoing_interrupt_module" in top:
+        return top["outgoing_interrupt_module"]
+
+    modules = defaultdict(list)
+    for module in top["module"]:
+        block = name_to_block.get(module["type"])
+        if block is None and allow_missing_blocks:
+            continue
+        if block.interrupts:
+            if "outgoing_interrupt" in module:
+                modules[module["outgoing_interrupt"]].append(module["name"])
+
+    return modules
+
+
+def commit_outgoing_interrupt_modules(top: ConfigT, name_to_block: IpBlocksT):
+    """Ensure top["outgoing_interrupt_module"] is populated in the final config."""
+    top["outgoing_interrupt_module"] = get_outgoing_interrupt_modules(top, name_to_block)
+
+
+def amend_interrupt(top: ConfigT,
+                    name_to_block: IpBlocksT,
+                    allow_missing_blocks=False):
+    modules = get_interrupt_modules(top, name_to_block, allow_missing_blocks)
+    outgoing_modules = get_outgoing_interrupt_modules(top, name_to_block,
+                                                      allow_missing_blocks)
 
     if "interrupt" not in top or top["interrupt"] == "":
         top["interrupt"] = []
 
-    for m in top["interrupt_module"]:
+    default_plic = top.get("default_plic", None)
+    interrupts = []
+    outgoing_interrupts = defaultdict(list)
+    plic_info = {}
+    for m in modules + list(chain(*outgoing_modules.values())):
         ips = list(filter(lambda module: module["name"] == m, top["module"]))
         if len(ips) == 0:
             log.warning(
@@ -865,48 +1344,422 @@ def amend_interrupt(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
         log.info("Adding interrupts from module %s" % ip["name"])
         for signal in block.interrupts:
             sig_dict = signal.as_nwt_dict('interrupt')
-            qual = lib.add_module_prefix_to_signal(sig_dict,
-                                                   module=m.lower())
-            top["interrupt"].append(qual)
+            qual = lib.add_module_prefix_to_signal(sig_dict, module=m.lower())
+            sig_name = sig_dict["name"]
+            qual["desc"] = f"{m} {sig_name} interrupt"
+            qual["intr_type"] = signal.intr_type
+            qual["default_val"] = signal.default_val
+            qual["incoming"] = False
+            # Add power domain info. For split IPs the interrupt is emitted
+            # from the power domain of its owning partition.
+            module_dict = lib.get_module_by_name(top, m)
+            qual["domain"] = lib.get_domain_of_partition(
+                module_dict, signal.partition, top["power"]["default"])
+            plic = ip.get("plic", default_plic)
+            if plic is not None:
+                qual["plic"] = plic
+            if "outgoing_interrupt" in ip:
+                outgoing_interrupts[ip["outgoing_interrupt"]].append(qual)
+                qual["outgoing"] = True
+            else:
+                interrupts.append(qual)
+                qual["outgoing"] = False
+
+    for irqs in top['incoming_interrupt'].values():
+        for irq in irqs:
+            # Qualify name with module name
+            qual_irq = deepcopy(irq)
+            qual_irq["name"] = f"{irq['module_name']}_{irq['name']}"
+            qual_irq["desc"] = (f"{irq['module_name']} {irq['name']} "
+                                "incoming interrupt")
+            qual_irq["incoming"] = True
+            qual_irq["width"] = 1
+            # Incoming interrupts are assigned to the default PLIC
+            qual_irq["plic"] = default_plic  # May still be None
+            qual_irq["outgoing"] = False
+            interrupts.append(qual_irq)
+
+    # Determine PLIC info
+    plics = lib.find_modules(top["module"], "rv_plic", use_base_template_type=True)
+    for plic in plics:
+        domain = plic.get("domain", top["power"]["default"])
+        # Interrupt source 0 is tied to 0 to conform to the RISC-V PLIC spec.
+        # The total number of interrupts is the sum of the widths of each entry
+        # in the list over all power domains, plus 1.
+        p_info = {"domain": domain, "count_tot": 1, "count_pd": {}}
+        for pd in top["power"]["domains"]:
+            p_info["count_pd"][pd] = 0
+
+        # Add schaffold to dict
+        plic_info[plic["name"]] = p_info
+
+    # Populate counts
+    for irq in interrupts:
+        if irq["outgoing"]:
+            continue
+        plic_info[irq["plic"]]["count_tot"] += irq.get("width", 1)
+        plic_info[irq["plic"]]["count_pd"][irq["domain"]] += irq.get("width", 1)
+
+    top["interrupt"] = interrupts
+    top["outgoing_interrupt"] = outgoing_interrupts
+    top["plic_info"] = plic_info
+
+    # Create chiplevel signal definitions
+    sigdefs = []
+    for plic, info in plic_info.items():
+        plic_str = plic + "_" if len(plic_info) > 1 else ""
+        for pd in top["power"]["domains"]:
+            if pd != info["domain"] and info["count_pd"][pd] > 0:
+                sig_name = f"intr_vector{plic_str}_pd_{pd.lower()}"
+                sigdefs.append(
+                    OrderedDict([('package', ''),
+                                 ('struct', 'logic'),
+                                 ('domain', 'chip'),
+                                 ('signame', sig_name),
+                                 ('width', info["count_pd"][pd]),
+                                 ('type', 'uni'),
+                                 ('special', 'interrupt'),
+                                 ('end_idx', -1),
+                                 ('act', 'req'),
+                                 ('suffix', ''),
+                                 ('default', "'0")]))
+
+    # Add to inter-pd definitions
+    topdefs = top.setdefault("inter_pd", defaultdict()).setdefault("definitions", [])
+    for sd in sigdefs:
+        if sd["signame"] not in [td["signame"] for td in topdefs]:
+            topdefs.append(sd)
 
 
-def ensure_alert_modules(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
-    '''Populate top['alert_module'] if necessary
+def get_alert_modules(top: ConfigT,
+                      name_to_block: IpBlocksT,
+                      allow_missing_blocks=False) -> List[str]:
+    '''Return an existing top['alert_module'] or generate one.
 
-    Do this by adding each module in top['modules'] that defines at least one
-    alert.
+    If the config has an 'alert_module' entry it is taken as the true list
+    of modules that will send their alerts to alert_handler. This allows
+    some configs where modules not in the list have their alerts handled
+    in more custom ways.
 
+    When 'alert_module' is not in the config the list is generated with
+    all modules that have some alert and no 'outgoing_alert' but is not
+    committed in the config. It will be done as a final step once the
+    top config is fully generated.
     '''
     if 'alert_module' in top:
-        return
+        return top['alert_module']
 
     modules = []
     for module in top['module']:
-        block = name_to_block[module['type']]
+        block = name_to_block.get(module['type'])
+        if block is None and allow_missing_blocks:
+            continue
         if block.alerts:
-            modules.append(module['name'])
+            if 'outgoing_alert' not in module:
+                modules.append(module['name'])
 
-    top['alert_module'] = modules
+    return modules
 
 
-def amend_alert(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
-    """Check interrupt_module if exists, or just use all modules
+def alert_handler_signals(handler):
+    suffix = handler.replace("alert_handler", "")
+    return (f"alert{suffix}_tx", f"alert{suffix}_rx")
+
+
+def _make_alert_connection(module: ConfigT, alerts_group: List[Alert],
+                           m_domain: str, handler: Optional[str],
+                           a_domain: str, alert_handler_info: ConfigT,
+                           alert_idx: Dict[str, int],
+                           outgoing_alert_idx: Dict[str, int]) -> ConfigT:
+    '''Build the alert connection for one group of a module's alerts.
+
+    `alerts_group` is sliced out of `m_domain` as one contiguous bus and
+    counted into its handler, so the alert indices in `alert_idx` /
+    `outgoing_alert_idx` and the per-domain counts in `alert_handler_info`
+    advance by the size of the group.
+    '''
+    outgoing = "outgoing_alert" in module
+    alert_comments = []
+    # Generate slices
+    w = len(alerts_group)
+    if outgoing:
+        outgoing_group = module["outgoing_alert"]
+        lo_async = outgoing_alert_idx[outgoing_group]
+        lo = alert_handler_info[outgoing_group]["count_pd"][m_domain]
+        if w > 1:
+            slice = f"{lo + w - 1}:{lo}"
+            slice_async = f"{lo_async + w - 1}:{lo_async}"
+        else:
+            slice = lo
+            slice_async = lo_async
+        async_expr = f"AsyncOnOutgoingAlert{outgoing_group.capitalize()}[{slice_async}]"
+        alert_tx_expr = f"outgoing_alert_{outgoing_group}_tx_o[{slice}]"
+        alert_rx_expr = f"outgoing_alert_{outgoing_group}_rx_i[{slice}]"
+
+        # Increase counts
+        alert_handler_info[outgoing_group]["count_tot"] += w
+        alert_handler_info[outgoing_group]["count_pd"][m_domain] += w
+    else:
+        len_tot = alert_idx[handler]
+        len_pd = alert_handler_info[handler]["count_pd"][m_domain]
+        if m_domain != a_domain:
+            for i in range(w):
+                conn_info = {"src_pd": m_domain, "idx": len_pd + i}
+                alert_handler_info[handler]["connect_pd"][len_tot + i] = conn_info
+
+        alert_tx, alert_rx = alert_handler_signals(handler)
+        lo_async = alert_idx[handler]
+        # Suffixes and indices for alerts to handlers in other domains
+        if m_domain != a_domain:
+            alert_tx += "_o"
+            alert_rx += "_i"
+            lo = alert_handler_info[handler]["count_pd"][m_domain]
+        else:
+            lo = alert_idx[handler]
+
+        if w > 1:
+            slice = f"{lo + w - 1}:{lo}"
+            slice_async = f"{lo_async + w - 1}:{lo_async}"
+        else:
+            slice = lo
+            slice_async = lo_async
+        async_expr = f"{handler}_reg_pkg::AsyncOn[{slice_async}]"
+        alert_tx_expr = f"{alert_tx}[{slice}]"
+        alert_rx_expr = f"{alert_rx}[{slice}]"
+
+        # Increase counts
+        alert_handler_info[handler]["count_tot"] += w
+        alert_handler_info[handler]["count_pd"][m_domain] += w
+
+    # Generate comments, and increment the applicable alert indices
+    for a in alerts_group:
+        if outgoing:
+            alert_comments.append(f"External alert group \"{module['outgoing_alert']}\" "
+                                  f"[{outgoing_alert_idx[module['outgoing_alert']]}]: "
+                                  f"{a.name}")
+            outgoing_alert_idx[module["outgoing_alert"]] += 1
+        else:
+            alert_comments.append(f"{handler}[{alert_idx[handler]}]: {a.name}")
+            alert_idx[handler] += 1
+
+    return {
+        "tx_expr": alert_tx_expr,
+        "rx_expr": alert_rx_expr,
+        "async_expr": async_expr,
+        "comments": alert_comments,
+    }
+
+
+def commit_alert_connections(top: ConfigT,
+                             name_to_block: IpBlocksT,
+                             allow_missing_blocks=False):
+    """Populate alert-related connection information in top
+
+    This function populates top['alert_connections'] and top['alert_handler_info'],
+    and adds the required chip-level signals to connect alert handlers with alert
+    sources in different power domains.
     """
-    ensure_alert_modules(top, name_to_block)
+    if "alert_connections" in top:
+        return top["alert_connections"]
+
+    default_handler = top.get("default_alert_handler", None)
+    connections = defaultdict(list)
+
+    alert_handler_info = defaultdict()
+
+    # Construct info dicts for internal alert handlers
+    alert_handlers = lib.find_modules(top["module"], "alert_handler")
+    for ah in alert_handlers:
+        domain = ah.get("domain", top["power"]["default"])
+        ah_info = {"domain": domain, "count_tot": 0, "count_pd": {}, "connect_pd": {}}
+        for pd in top["power"]["domains"]:
+            ah_info["count_pd"][pd] = 0
+
+        # Add scaffold to dict
+        alert_handler_info[ah["name"]] = ah_info
+
+    # Construct info dicts for external alert handlers
+    alert_handlers = top["outgoing_alert"]
+    for ah in alert_handlers:
+        ah_info = {"domain": "external", "count_tot": 0, "count_pd": {}}
+        for pd in top["power"]["domains"]:
+            ah_info["count_pd"][pd] = 0
+
+        # Add scaffold to dict
+        alert_handler_info[ah] = ah_info
+
+    # Construct the connection information here. For split IPs a module's
+    # alerts are grouped by partition and each partition connects from its own power
+    # domain. The primary partition has the key "module_<name>", the secondary has
+    # "module_<name>_secondary".
+    alert_idx = defaultdict(int)
+    outgoing_alert_idx = defaultdict(int)
+    for module in top["module"]:
+        outgoing = "outgoing_alert" in module
+        block = name_to_block.get(module["type"])
+        if block is None and allow_missing_blocks:
+            continue
+        if not block.alerts:
+            continue
+
+        handler = module.get("alert_handler", default_handler)
+        if handler is not None:
+            a_domain = alert_handler_info[handler]["domain"]
+        else:
+            a_domain = top["power"]["default"]
+
+        # Checking whether there is a handler is done in validation
+        if not outgoing and not handler:
+            continue
+
+        # Each partition of a split IP is a module of its own with its own
+        # alert bus, so its alerts are sliced and counted into the handler
+        # separately, from that partition's power domain. block.partitions is
+        # ordered primary-first, which keeps the alert indices stable.
+        for partition in block.partitions:
+            alerts_group = block.alerts_for(partition)
+            if not alerts_group:
+                continue
+            pd = lib.get_domain_of_partition(module, partition, top["power"]["default"])
+            conn_key = lib.alert_conn_key(module["name"], partition)
+            connections[conn_key] = _make_alert_connection(
+                module, alerts_group, pd, handler, a_domain,
+                alert_handler_info, alert_idx, outgoing_alert_idx)
+
+    # Process incoming alerts
+    for alert_group, alerts in top.get("incoming_alert", {}).items():
+        handler = default_handler
+        if not handler:
+            continue
+
+        w = len(alerts)
+        alert_tx, alert_rx = alert_handler_signals(handler)
+        lo = alert_idx[handler]
+        slice = f"{lo + w - 1}:{lo}"
+        alert_tx_expr = f"{alert_tx}[{slice}]"
+        alert_rx_expr = f"{alert_rx}[{slice}]"
+
+        alert_comments = []
+        for a in alerts:
+            alert_comments.append(f"{handler}[{alert_idx[handler]}]: {a['name']}")
+            alert_idx[handler] += 1
+
+        alert_info = {
+            "tx_expr": alert_tx_expr,
+            "rx_expr": alert_rx_expr,
+            "async_expr": None,
+            "comments": alert_comments
+        }
+        connections["incoming_" + alert_group] = alert_info
+
+    # Create chiplevel signal definitions
+    sigdefs = []
+    proto = OrderedDict([('package', 'prim_alert_pkg'),
+                        ('struct', ''),
+                        ('domain', 'chip'),
+                        ('signame', ''),
+                        ('width', -1),
+                        ('type', 'uni'),
+                        ('special', 'alert'),
+                        ('end_idx', -1),
+                        ('act', 'req'),
+                        ('suffix', ''),
+                        ('default', "'0")])
+
+    for name, info in alert_handler_info.items():
+        signals = alert_handler_signals(name)
+        for pd in top["power"]["domains"]:
+            width = info["count_pd"][pd]
+            if pd != info["domain"] and width > 0:
+                sig_names = (signals[0] + f"_pd_{pd.lower()}",
+                             signals[1] + f"_pd_{pd.lower()}")
+                sig_tx = proto.copy()
+                sig_rx = proto.copy()
+                sig_tx["struct"] = 'alert_tx'
+                sig_rx["struct"] = 'alert_rx'
+                sig_tx["signame"] = sig_names[0]
+                sig_rx["signame"] = sig_names[1]
+                sig_tx["width"] = width
+                sig_rx["width"] = width
+
+                sigdefs.append(sig_tx)
+                sigdefs.append(sig_rx)
+
+    # Add to inter-pd dict, create if nonexistent, avoid duplicates
+    topdefs = top.setdefault("inter_pd", defaultdict()).setdefault("definitions", [])
+    for sd in sigdefs:
+        if sd["signame"] not in [td["signame"] for td in topdefs]:
+            topdefs.append(sd)
+
+    top['alert_connections'] = connections
+    top['alert_handler_info'] = alert_handler_info
+
+
+def commit_alert_modules(top: ConfigT, name_to_block: IpBlocksT):
+    """Make sure top['alert_module'] is populated in the final config."""
+    top['alert_module'] = get_alert_modules(top, name_to_block)
+
+
+def get_outgoing_alert_modules(top: ConfigT,
+                               name_to_block: IpBlocksT,
+                               allow_missing_blocks=False) -> List[str]:
+    '''Return an existing top['outgoing_alert_module'] or generate one.
+
+    If the config has an 'outgoing_alert_module' entry it is taken as the
+    true list of modules that will send their alerts out of this top. This
+    allows some alerts to be handled by an alert_handler in some other top.
+
+    When 'outgoing_alert_module' is not in the config the list is generated
+    with all modules that have some outgoing alert.
+    '''
+    if 'outgoing_alert_module' in top:
+        return top['outgoing_alert_module']
+
+    modules = defaultdict(list)
+    for module in top['module']:
+        block = name_to_block.get(module['type'])
+        if block is None and allow_missing_blocks:
+            continue
+        if block.alerts:
+            if 'outgoing_alert' in module:
+                modules[module['outgoing_alert']].append(module['name'])
+
+    return modules
+
+
+def commit_outgoing_alert_modules(top: ConfigT, name_to_block: IpBlocksT):
+    """Ensure top['outgoing_alert_module'] is populated in the final config."""
+    top['outgoing_alert_module'] = get_outgoing_alert_modules(
+        top, name_to_block)
+
+
+def amend_alert(top: ConfigT,
+                name_to_block: IpBlocksT,
+                allow_missing_blocks=False):
+    """Check alert_module if exists, or just use all modules
+    """
+    alert_modules = get_alert_modules(top, name_to_block, allow_missing_blocks)
+    outgoing_modules = get_outgoing_alert_modules(top, name_to_block,
+                                                  allow_missing_blocks)
 
     if "alert" not in top or top["alert"] == "":
         top["alert"] = []
 
-    for m in top["alert_module"]:
+    alerts = []
+    outgoing_alerts = defaultdict(list)
+    missing_ips = []
+
+    default_handler = top.get("default_alert_handler", None)
+    for m in alert_modules + list(chain(*outgoing_modules.values())):
         ips = list(filter(lambda module: module["name"] == m, top["module"]))
         if len(ips) == 0:
-            log.warning("Cannot find IP %s which is used in the alert_module" %
-                        m)
+            missing_ips.append(m)
             continue
 
         ip = ips[0]
-        block = name_to_block[ip['type']]
-
+        block = name_to_block.get(ip['type'])
+        if block is None and allow_missing_blocks:
+            continue
         log.info("Adding alert from module %s" % ip["name"])
         # Note: we assume that all alerts are asynchronous in order to make the
         # design homogeneous and more amenable to DV automation and synthesis
@@ -914,74 +1767,104 @@ def amend_alert(top: OrderedDict, name_to_block: Dict[str, IpBlock]):
         for alert in block.alerts:
             alert_dict = alert.as_nwt_dict('alert')
             alert_dict['async'] = '1'
+            alert_dict['handler'] = ip.get("alert_handler", default_handler)
             qual_sig = lib.add_module_prefix_to_signal(alert_dict,
                                                        module=m.lower())
-            top["alert"].append(qual_sig)
+            alert_name = alert_dict['name']
+            qual_sig['desc'] = f'{m} {alert_name} alert'
+            if 'outgoing_alert' in ip:
+                outgoing_alerts[ip['outgoing_alert']].append(qual_sig)
+            else:
+                alerts.append(qual_sig)
+    if missing_ips:
+        raise SystemExit(
+            "The following IPs contributing alerts cannot be found: "
+            ", ".join(missing_ips))
+
+    top["alert"] = alerts
+    top["outgoing_alert"] = outgoing_alerts
 
 
-def amend_wkup(topcfg: OrderedDict, name_to_block: Dict[str, IpBlock]):
-
-    pwrmgr_name = _find_module_name(topcfg['module'], 'pwrmgr')
+def amend_wkup(topcfg: ConfigT,
+               name_to_block: IpBlocksT,
+               allow_missing_blocks=False):
 
     if "wakeups" not in topcfg or topcfg["wakeups"] == "":
         topcfg["wakeups"] = []
 
     # create list of wakeup signals
+    wakeups = []
+    signal_names = []
     for m in topcfg["module"]:
-        log.info("Adding wakeup from module %s" % m["name"])
-        block = name_to_block[m['type']]
+        block = name_to_block.get(m['type'])
+        if block is None and allow_missing_blocks:
+            continue
         for signal in block.wakeups:
-            log.info("Adding signal %s" % signal.name)
-            topcfg["wakeups"].append({
+            log.info("Adding wakeup signal %s from module %s", signal.name,
+                     m["name"])
+            wakeups.append({
                 'name': signal.name,
                 'width': str(signal.bits.width()),
                 'module': m["name"]
             })
+            # Reference the wakeup's inter-module signal, qualified by partition
+            # for a split IP.
+            signal_names.append(_partition_qualify(
+                f"{m['name'].lower()}.{signal.name.lower()}",
+                signal.partition, block.is_split_ip))
+    topcfg["wakeups"] = wakeups
 
-    # add wakeup signals to pwrmgr connections
-    signal_names = [
-        "{}.{}".format(s["module"].lower(), s["name"].lower())
-        for s in topcfg["wakeups"]
-    ]
-
-    topcfg["inter_module"]["connect"]["{}.wakeups".format(pwrmgr_name)] = signal_names
-    log.info("Intermodule signals: {}".format(
-        topcfg["inter_module"]["connect"]))
+    pwrmgr = lib.find_module(topcfg['module'], 'pwrmgr')
+    if pwrmgr:
+        # add wakeup signals to pwrmgr connections if there is one
+        topcfg["inter_module"]["connect"][f"{pwrmgr['name']}.wakeups"] = (
+            signal_names)
+        log.info("Intermodule signals: {}".format(
+            topcfg["inter_module"]["connect"]))
 
 
 # Handle reset requests from modules
-def amend_reset_request(topcfg: OrderedDict,
-                        name_to_block: Dict[str, IpBlock]):
-
-    pwrmgr_name = _find_module_name(topcfg['module'], 'pwrmgr')
-
+def amend_reset_request(topcfg: ConfigT,
+                        name_to_block: IpBlocksT,
+                        allow_missing_blocks=False):
     if "reset_requests" not in topcfg or topcfg["reset_requests"] == "":
-        topcfg["reset_requests"] = []
+        topcfg["reset_requests"] = {}
+    topcfg["reset_requests"].setdefault("peripheral", [])
 
     # create list of reset signals
+    reset_signals = []
+    signal_names = []
     for m in topcfg["module"]:
         log.info("Adding reset requests from module %s" % m["name"])
-        block = name_to_block[m['type']]
+        block = name_to_block.get(m['type'])
+        if block is None and allow_missing_blocks:
+            continue
         for signal in block.reset_requests:
             log.info("Adding signal %s" % signal.name)
-            topcfg["reset_requests"].append({
+            reset_signals.append({
                 'name': signal.name,
                 'width': str(signal.bits.width()),
-                'module': m["name"]
+                'module': m["name"],
+                'desc': signal.desc,
+                'enabled_after_reset': signal.enabled_after_reset
             })
+            # Reference the reset request's inter-module signal, qualified by
+            # partition for a split IP.
+            signal_names.append(_partition_qualify(
+                "{}.{}".format(m["name"].lower(), signal.name.lower()),
+                signal.partition, block.is_split_ip))
+    topcfg["reset_requests"]["peripheral"] = reset_signals
 
-    # add reset requests to pwrmgr connections
-    signal_names = [
-        "{}.{}".format(s["module"].lower(), s["name"].lower())
-        for s in topcfg["reset_requests"]
-    ]
-
-    topcfg["inter_module"]["connect"]["{}.rstreqs".format(pwrmgr_name)] = signal_names
+    pwrmgr = lib.find_module(topcfg['module'], 'pwrmgr')
+    if pwrmgr:
+        # add reset requests to pwrmgr connections if there is one
+        topcfg["inter_module"]["connect"][f"{pwrmgr['name']}.rstreqs"] = (
+            signal_names)
     log.info("Intermodule signals: {}".format(
         topcfg["inter_module"]["connect"]))
 
 
-def append_io_signal(temp: Dict, sig_inst: Dict) -> None:
+def append_io_signal(temp: ConfigT, sig_inst: Dict) -> None:
     '''Appends the signal to the correct list'''
     if sig_inst['type'] == 'inout':
         temp['inouts'].append(sig_inst)
@@ -1011,26 +1894,28 @@ def get_index_and_incr(ctrs: Dict, connection: str, io_dir: str) -> Dict:
             result = ctrs[connection]['outputs'] + ctrs[connection]['inouts']
             ctrs[connection]['outputs'] += 1
         else:
-            assert(0)  # should not happen
+            assert (0)  # should not happen
     else:
-        # For DIOs, the input/output arrays are identical in terms of index layout.
-        # Unused inputs are left unconnected and unused outputs are tied off.
+        # For DIOs, the input/output arrays are identical in terms of index
+        # layout. Unused inputs are left unconnected and unused outputs are
+        # tied off.
         if io_dir == 'input':
             result = ctrs[connection]['inputs'] + ctrs[connection]['inouts']
             ctrs[connection]['inputs'] += 1
         elif io_dir == 'output':
             result = (ctrs[connection]['outputs'] +
-                      ctrs[connection]['inouts'] +
-                      ctrs[connection]['inputs'])
+                      ctrs[connection]['inouts'] + ctrs[connection]['inputs'])
             ctrs[connection]['outputs'] += 1
         else:
-            assert(0)  # should not happen
+            assert (0)  # should not happen
 
     return result
 
 
-def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
-    """ Process pinmux/pinout configuration and assign available IOs
+def amend_pinmux_io(top: ConfigT,
+                    name_to_block: IpBlocksT,
+                    allow_missing_blocks=False):
+    """Process pinmux/pinout configuration and assign available IOs
     """
     pinmux = top['pinmux']
     pinout = top['pinout']
@@ -1041,6 +1926,110 @@ def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
     temp['inputs'] = []
     temp['outputs'] = []
 
+    # Port and signal prototypes for cross-PD connections
+    pd_default = top["power"]["default"]
+    m_pinmux = lib.find_module(top["module"], "pinmux")
+    pd_pinmux = m_pinmux.get("domain", pd_default)
+
+    port_proto = OrderedDict([('package', ''),
+                              ('struct', 'logic'),
+                              ('domain', ''),
+                              ('inter_pd', True),
+                              ('signame', ''),
+                              ('signame_chip', ''),
+                              ('width', -1),
+                              ('type', 'uni'),
+                              ('default', "'0"),
+                              ('direction', 'invalid'),
+                              ('conn_type', False),
+                              ('index', -1),
+                              ('netname', '')])
+
+    sig_proto = OrderedDict([('package', ''),
+                             ('struct', 'logic'),
+                             ('domain', 'chip'),
+                             ('signame', ''),
+                             ('width', -1),
+                             ('type', 'uni'),
+                             ('end_idx', -1),
+                             ('act', ''),
+                             ('suffix', ''),
+                             ('default', "'0")])
+
+    inter_pd_ports = []
+    chiplevel_sigs = []
+
+    # Helper function
+    def add_inter_pd_port_and_sig(sig_name, width, pd_mod, stem, mod_dir):
+        """Create ports for both PDs and a chiplevel signal for one IO signal.
+
+        mod_dir is the module port direction ('in' or 'out'); the pinmux port
+        gets the opposite direction. Port signames are stem + '_o'/'_i' to
+        match their respective directions.
+        """
+        pinm_dir = 'in' if mod_dir == 'out' else 'out'
+        mod_sfx = '_o' if mod_dir == 'out' else '_i'
+        pinm_sfx = '_i' if mod_dir == 'out' else '_o'
+
+        port_mod = port_proto.copy()
+        port_mod["domain"] = pd_mod
+        port_mod["signame"] = sig_name + stem + mod_sfx
+        port_mod["netname"] = sig_name + stem
+        port_mod["width"] = width
+        port_mod["direction"] = mod_dir
+
+        port_pinm = port_mod.copy()
+        port_pinm["domain"] = pd_pinmux
+        port_pinm["signame"] = sig_name + stem + pinm_sfx
+        port_pinm["direction"] = pinm_dir
+
+        chip_sig = sig_proto.copy()
+        chip_sig["signame"] = sig_name + stem
+        chip_sig["width"] = width
+
+        inter_pd_ports.append(port_mod)
+        inter_pd_ports.append(port_pinm)
+        chiplevel_sigs.append(chip_sig)
+
+    for m in top["module"]:
+        block = name_to_block.get(m['type'])
+        if block is None and allow_missing_blocks:
+            continue
+
+        for sig in block.get_signals_as_list_of_dicts(m.get('param_decl')):
+            # Each CIO belongs to the power domain of its owning partition.
+            pd_sig = lib.get_domain_of_partition(
+                m, sig.get('partition', PART_PRIMARY), pd_default)
+            # Skip all modules that are in the same PD as the pinmux.
+            if pd_sig == pd_pinmux:
+                continue
+
+            sig_name = f"cio_{m['name']}_{sig['name']}"
+
+            # Required objects to be created:
+            # 1) Ports for both PDs
+            # 2) Chiplevel signal
+            if sig["type"] in ['output', 'inout']:
+                add_inter_pd_port_and_sig(sig_name, sig['width'],
+                                          pd_sig, '_d2p', 'out')
+                add_inter_pd_port_and_sig(sig_name, sig['width'],
+                                          pd_sig, '_en_d2p', 'out')
+
+            if sig["type"] in ['input', 'inout']:
+                add_inter_pd_port_and_sig(sig_name, sig['width'],
+                                          pd_sig, '_p2d', 'in')
+
+    # Bring signame_chip into the expected dict format
+    for p in inter_pd_ports:
+        signame_chip = {}
+        for tgt in top["targets"]:
+            signame_chip[tgt["name"]] = p["netname"]
+        p["signame_chip"] = signame_chip
+
+    pinmux.setdefault("inter_pd", defaultdict())
+    pinmux["inter_pd"]["ports"] = inter_pd_ports
+    pinmux["inter_pd"]["definitions"] = chiplevel_sigs
+
     for sig in pinmux['signals']:
         # Get the signal information from the IP block type of this instance/
         mod_name = sig['instance']
@@ -1049,8 +2038,10 @@ def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
         if m is None:
             raise SystemExit("Module {} is not searchable.".format(mod_name))
 
-        block = name_to_block[m['type']]
-
+        block = name_to_block.get(m['type'])
+        if block is None and allow_missing_blocks:
+            continue
+        sig_attr = sig.get('attr', 'BidirStd')
         # If the signal is explicitly named.
         if sig['port'] != '':
 
@@ -1063,64 +2054,102 @@ def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
                 idx = -1
                 sig_name = sig['port']
 
-            sig_inst = deepcopy(block.get_signal_by_name_as_dict(sig_name))
+            sig_inst = deepcopy(block.get_signal_by_name_as_dict(sig_name, m.get('param_decl')))
 
             if idx >= 0 and idx >= sig_inst['width']:
-                raise SystemExit("Index {} is out of bounds for signal {}"
-                                 " with width {}.".format(idx, sig_name, sig_inst['width']))
+                raise SystemExit(f"Index {idx} is out of bounds for signal "
+                                 f"{sig_name} with width "
+                                 "{}.".format(sig_inst['width']))
             if idx == -1 and sig_inst['width'] != 1:
-                raise SystemExit("Bus signal {} requires an index.".format(sig_name))
+                raise SystemExit(f"Bus signal {sig_name} requires an index.")
+            if idx >= 0 and sig_inst['width'] == 1:
+                raise SystemExit(f"Signal {mod_name}.{sig_name} is not a bus "
+                                 "and must not have an index.")
 
             # If we got this far we know that the signal is valid and exists.
             # Augment this signal instance with additional information.
-            sig_inst.update({'idx': idx,
-                             'pad': sig['pad'],
-                             'attr': sig['attr'],
-                             'connection': sig['connection'],
-                             'desc': sig['desc']})
+            sig_inst.update({
+                'idx': idx,
+                'pad': sig['pad'],
+                'attr': sig_attr,
+                'connection': sig['connection'],
+                'desc': sig['desc']
+            })
             sig_inst['name'] = mod_name + '_' + sig_inst['name']
+            sig_inst['domain'] = lib.get_domain_of_partition(
+                m, sig_inst.get('partition', PART_PRIMARY), pd_default)
             append_io_signal(temp, sig_inst)
 
-        # Otherwise the name is a wildcard for selecting all available IO signals
-        # of this block and we need to extract them here one by one signals here.
+        # Otherwise the name is a wildcard for selecting all available IO
+        # signals of this block and we need to extract them here one by one
+        # signals here.
         else:
-            sig_list = deepcopy(block.get_signals_as_list_of_dicts())
+            sig_list = deepcopy(block.get_signals_as_list_of_dicts(m.get('param_decl')))
 
             for sig_inst in sig_list:
                 # If this is a multibit signal, unroll the bus and
                 # generate a single bit IO signal entry for each one.
+                pd_sig = lib.get_domain_of_partition(
+                    m, sig_inst.get('partition', PART_PRIMARY), pd_default)
                 if sig_inst['width'] > 1:
                     for idx in range(sig_inst['width']):
                         sig_inst_copy = deepcopy(sig_inst)
-                        sig_inst_copy.update({'idx': idx,
-                                              'pad': sig['pad'],
-                                              'attr': sig['attr'],
-                                              'connection': sig['connection'],
-                                              'desc': sig['desc']})
-                        sig_inst_copy['name'] = sig['instance'] + '_' + sig_inst_copy['name']
+                        sig_inst_copy.update({
+                            'idx': idx,
+                            'pad': sig['pad'],
+                            'attr': sig_attr,
+                            'connection': sig['connection'],
+                            'desc': sig['desc']
+                        })
+                        sig_inst_copy['name'] = sig[
+                            'instance'] + '_' + sig_inst_copy['name']
+                        sig_inst_copy['domain'] = pd_sig
                         append_io_signal(temp, sig_inst_copy)
                 else:
-                    sig_inst.update({'idx': -1,
-                                     'pad': sig['pad'],
-                                     'attr': sig['attr'],
-                                     'connection': sig['connection'],
-                                     'desc': sig['desc']})
+                    sig_inst.update({
+                        'idx': -1,
+                        'pad': sig['pad'],
+                        'attr': sig_attr,
+                        'connection': sig['connection'],
+                        'desc': sig['desc']
+                    })
                     sig_inst['name'] = sig['instance'] + '_' + sig_inst['name']
+                    sig_inst['domain'] = pd_sig
                     append_io_signal(temp, sig_inst)
 
     # Now that we've collected all input and output signals,
     # we can go through once again and stack them into one unified
     # list, and calculate MIO/DIO global indices.
-    pinmux['ios'] = (temp['inouts'] +
-                     temp['inputs'] +
-                     temp['outputs'])
+    pinmux['ios'] = (temp['inouts'] + temp['inputs'] + temp['outputs'])
+
+    # Each IO must be covered by exactly one pinmux signal entry.
+    known_ios = set()
+    for sig in pinmux['ios']:
+        key = (sig['name'], sig['idx'])
+        if key in known_ios:
+            name = sig['name'] if sig['idx'] < 0 else f"{sig['name']}[{sig['idx']}]"
+            raise SystemExit(f"Pinmux IO {name} is covered by multiple pinmux signal entries.")
+        known_ios.add(key)
 
     # Remember these counts to facilitate the RTL generation
-    pinmux['io_counts'] = {'dedicated': {'inouts': 0, 'inputs': 0, 'outputs': 0, 'pads': 0},
-                           'muxed': {'inouts': 0, 'inputs': 0, 'outputs': 0, 'pads': 0}}
+    pinmux['io_counts'] = {
+        'dedicated': {
+            'inouts': 0,
+            'inputs': 0,
+            'outputs': 0,
+            'pads': 0
+        },
+        'muxed': {
+            'inouts': 0,
+            'inputs': 0,
+            'outputs': 0,
+            'pads': 0
+        }
+    }
 
     for sig in pinmux['ios']:
-        glob_idx = get_index_and_incr(pinmux['io_counts'], sig['connection'], sig['type'])
+        glob_idx = get_index_and_incr(pinmux['io_counts'], sig['connection'],
+                                      sig['type'])
         sig['glob_idx'] = glob_idx
 
     # Calculate global indices for pads.
@@ -1146,8 +2175,9 @@ def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
         if sig['connection'] in ['muxed', 'manual']:
             continue
         if sig['pad'] in known_mapped_dio_pads:
-            raise SystemExit('Cannot have multiple IOs mapped to the same DIO pad {}'
-                             .format(sig['pad']))
+            raise SystemExit(
+                'Cannot have multiple IOs mapped to the same DIO pad {}'.
+                format(sig['pad']))
         known_mapped_dio_pads[sig['pad']] = sig
 
     for target in targets:
@@ -1160,17 +2190,56 @@ def amend_pinmux_io(top: Dict, name_to_block: Dict[str, IpBlock]):
             # Note that we can't have special_signals that are manual, since
             # there needs to exist a DIO connection.
             elif entry['pad'] in known_mapped_dio_pads:
-                # This index refers to the stacked {dio, mio} array
-                # on the chip-level, hence we have to add the amount of MIO pads.
+                # This index refers to the stacked {dio, mio} array on the
+                # chip-level, hence we have to add the amount of MIO pads.
                 idx = (known_mapped_dio_pads[entry['pad']]['glob_idx'] +
                        pinmux['io_counts']['muxed']['pads'])
                 entry['idx'] = idx
             else:
-                assert(0)  # Entry should be guaranteed to exist at this point
+                assert (0)  # Entry should be guaranteed to exist at this point
 
 
-def merge_top(topcfg: OrderedDict,
-              name_to_block: Dict[str, IpBlock],
+def amend_racl(top_cfg: ConfigT,
+               name_to_block: IpBlocksT,
+               allow_missing_blocks=False):
+    """Amend top_cfg based on racl configuration.
+
+    Parse racl configuration and annotate individual modules affected.
+    """
+    if 'racl_config' not in top_cfg:
+        return
+
+    # Read the top-level RACL information
+    top_cfg["racl"] = parse_racl_config(top_cfg["cfg_path"] /
+                                        top_cfg["racl_config"])
+
+    # Generate the RACL mappings for all subscribing IPs
+    for m in top_cfg['module']:
+        block = name_to_block.get(m['type'])
+        if block is None and allow_missing_blocks:
+            continue
+        racl_mappings = m.get('racl_mappings', {})
+        # Nothing to be done if there are no mappings or the mappings
+        # were expanded already.
+        # If racl_mappings is expanded the path is one of the fields
+        for if_name, mapping_path in racl_mappings.items():
+            if isinstance(mapping_path, dict):
+                # The racl_mappings values are expanded in place into a dict
+                # once and need no further updates.
+                continue
+            register_mapping, window_mapping, range_mapping, racl_group, _ = (
+                parse_racl_mapping(top_cfg["racl"],
+                                   top_cfg["cfg_path"] / mapping_path, if_name,
+                                   block))
+            m['racl_mappings'][if_name] = {
+                'racl_group': racl_group,
+                'register_mapping': register_mapping,
+                'window_mapping': window_mapping,
+                'range_mapping': range_mapping,
+            }
+
+
+def merge_top(topcfg: ConfigT, name_to_block: IpBlocksT,
               xbarobjs: OrderedDict) -> OrderedDict:
 
     # Combine ip cfg into topcfg
@@ -1192,12 +2261,13 @@ def merge_top(topcfg: OrderedDict,
     # Combine the alert (should be processed prior to xbar)
     amend_alert(topcfg, name_to_block)
 
-    # Creates input/output list in the pinmux
-    log.info("Processing PINMUX")
-    amend_pinmux_io(topcfg, name_to_block)
+    if lib.find_module(topcfg['module'], 'pinmux'):
+        # Creates input/output list in the pinmux
+        log.info("Processing PINMUX")
+        amend_pinmux_io(topcfg, name_to_block)
 
     # Combine xbar into topcfg
-    for xbar in xbarobjs:
+    for xbar in xbarobjs.values():
         amend_xbar(topcfg, name_to_block, xbar)
 
     # 2nd phase of xbar (gathering the devices address range)
@@ -1207,6 +2277,9 @@ def merge_top(topcfg: OrderedDict,
     # Add path names to declared resets.
     # Declare structure for exported resets.
     amend_resets(topcfg, name_to_block)
+
+    # Parse racl configuration and annotate individual modules affected.
+    amend_racl(topcfg, name_to_block)
 
     # remove unwanted fields 'debug_mem_base_addr'
     topcfg.pop('debug_mem_base_addr', None)

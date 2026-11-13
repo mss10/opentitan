@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """
@@ -51,16 +51,14 @@ def check_bool(x: Union[bool, str], err_prefix: str) -> Tuple[bool, bool]:
     if isinstance(x, bool):
         # if Bool returns as it is
         return x, False
-    if not x.lower() in ["true", "false"]:
+    if x.lower() not in ["true", "false"]:
         log.error(err_prefix + ": Bad field value " + x)
         return False, True
     else:
         return (x.lower() == "true"), False
 
 
-def check_ln(obj: Dict[str, object],
-             x: str,
-             withwidth: bool,
+def check_ln(obj: Dict[str, object], x: str, withwidth: bool,
              err_prefix: str) -> int:
     error = 0
     entry = obj[x]
@@ -84,11 +82,9 @@ def check_ln(obj: Dict[str, object],
     return error
 
 
-def check_keys(obj: Dict[str, object],
-               required_keys: Dict[str, List[str]],
+def check_keys(obj: Dict[str, object], required_keys: Dict[str, List[str]],
                optional_keys: Dict[str, List[str]],
-               added_keys: Dict[str, List[str]],
-               err_prefix: str) -> int:
+               added_keys: Dict[str, List[str]], err_prefix: str) -> int:
     error = 0
     for x in required_keys:
         if x not in obj:
@@ -122,7 +118,11 @@ val_types = {
         'one or more groups that have just name and dscr keys.'
         ' e.g. `{ name: "name", desc: "description"}`'
     ],
-    'lnw': ["name list+", 'name list that optionally contains a width'],
+    'lnw': [
+        "name list+", 'name list that optionally contains a width, and for '
+        'split IPs an optional partition key naming the partition that owns '
+        'the entry.'
+    ],
     'lp': ["parameter list", 'parameter list having default value optionally'],
     'g': ["group", "comma separated group of key:value enclosed in `{}`"],
     'lg': [

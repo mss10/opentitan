@@ -1,0 +1,108 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+//
+// ------------------- W A R N I N G: A U T O - G E N E R A T E D   C O D E !! -------------------//
+// PLEASE DO NOT HAND-EDIT THIS FILE. IT HAS BEEN AUTO-GENERATED WITH THE FOLLOWING COMMAND:
+// util/topgen.py -t hw/top_englishbreakfast/data/top_englishbreakfast.hjson
+//                -o hw/top_englishbreakfast/
+
+#include "hw/top_englishbreakfast/sw/autogen/top_englishbreakfast.h"
+
+/**
+ * PLIC Interrupt Source to Peripheral Map
+ *
+ * This array is a mapping from `top_englishbreakfast_plic_irq_id_t` to
+ * `top_englishbreakfast_plic_peripheral_t`.
+ */
+const top_englishbreakfast_plic_peripheral_t
+    top_englishbreakfast_plic_interrupt_for_peripheral[88] = {
+  [kTopEnglishbreakfastPlicIrqIdNone] = kTopEnglishbreakfastPlicPeripheralUnknown,
+  [kTopEnglishbreakfastPlicIrqIdUart0TxWatermark] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxWatermark] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0TxDone] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxOverflow] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxFrameErr] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxBreakErr] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxTimeout] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0RxParityErr] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart0TxEmpty] = kTopEnglishbreakfastPlicPeripheralUart0,
+  [kTopEnglishbreakfastPlicIrqIdUart1TxWatermark] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxWatermark] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1TxDone] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxOverflow] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxFrameErr] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxBreakErr] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxTimeout] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1RxParityErr] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdUart1TxEmpty] = kTopEnglishbreakfastPlicPeripheralUart1,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio0] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio1] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio2] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio3] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio4] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio5] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio6] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio7] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio8] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio9] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio10] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio11] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio12] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio13] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio14] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio15] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio16] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio17] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio18] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio19] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio20] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio21] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio22] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio23] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio24] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio25] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio26] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio27] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio28] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio29] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio30] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdGpio0Gpio31] = kTopEnglishbreakfastPlicPeripheralGpio0,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceUploadCmdfifoNotEmpty] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceUploadPayloadNotEmpty] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceUploadPayloadOverflow] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceReadbufWatermark] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceReadbufFlip] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceTpmHeaderNotEmpty] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceTpmRdfifoCmdEnd] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiDeviceTpmRdfifoDrop] = kTopEnglishbreakfastPlicPeripheralSpiDevice,
+  [kTopEnglishbreakfastPlicIrqIdSpiHost0Error] = kTopEnglishbreakfastPlicPeripheralSpiHost0,
+  [kTopEnglishbreakfastPlicIrqIdSpiHost0SpiEvent] = kTopEnglishbreakfastPlicPeripheralSpiHost0,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevPktReceived] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevPktSent] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevDisconnected] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevHostLost] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevLinkReset] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevLinkSuspend] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevLinkResume] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevAvOutEmpty] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevRxFull] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevAvOverflow] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevLinkInErr] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevRxCrcErr] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevRxPidErr] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevRxBitstuffErr] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevFrame] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevPowered] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevLinkOutErr] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdUsbdevAvSetupEmpty] = kTopEnglishbreakfastPlicPeripheralUsbdev,
+  [kTopEnglishbreakfastPlicIrqIdPwrmgrWakeup] = kTopEnglishbreakfastPlicPeripheralPwrmgr,
+  [kTopEnglishbreakfastPlicIrqIdAonTimerWkupTimerExpired] = kTopEnglishbreakfastPlicPeripheralAonTimer,
+  [kTopEnglishbreakfastPlicIrqIdAonTimerWdogTimerBark] = kTopEnglishbreakfastPlicPeripheralAonTimer,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlProgEmpty] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlProgLvl] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlRdFull] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlRdLvl] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlOpDone] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+  [kTopEnglishbreakfastPlicIrqIdFlashCtrlCorrErr] = kTopEnglishbreakfastPlicPeripheralFlashCtrl,
+};

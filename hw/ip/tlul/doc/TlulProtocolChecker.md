@@ -1,6 +1,4 @@
----
-title: "TL-UL Protocol Checker"
----
+# TL-UL Protocol Checker
 
 # TileLink-UL Protocol Checker
 
@@ -15,7 +13,7 @@ for TL-UL (TileLink Uncached Lightweight), based on
 The next sections list the checks for each signal of TL-UL channels A and D.
 More details:
 
-*   The source fields (`a_source` and `d_source`) identify inflight
+*   The source fields (`a_source` and `d_source`) identify in-flight
 transactions rather than physical agents. A single agent can use multiple
 source IDs to track multiple outstanding transactions. See spec section 5.4
 "Source and Sink Identifiers" for more details.

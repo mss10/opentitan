@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "sw/device/lib/base/macros.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif  // __cplusplus
@@ -16,12 +18,6 @@ extern "C" {
  * @file
  * @brief Bitfield Manipulation Functions
  */
-
-/**
- * All the bitfield functions are pure (they do not modify their arguments), so
- * the result must be used. We enable warnings to ensure this happens.
- */
-#define BITFIELD_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
 
 /**
  * A field of a 32-bit bitfield.
@@ -54,7 +50,7 @@ typedef struct bitfield_field32 {
  * @param field Field to read out from.
  * @return Zero-extended `field` from `bitfield`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline uint32_t bitfield_field32_read(uint32_t bitfield,
                                       bitfield_field32_t field) {
   return (bitfield >> field.index) & field.mask;
@@ -72,7 +68,7 @@ inline uint32_t bitfield_field32_read(uint32_t bitfield,
  * @param value Value for the new field.
  * @return `bitfield` with `field` set to `value`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline uint32_t bitfield_field32_write(uint32_t bitfield,
                                        bitfield_field32_t field,
                                        uint32_t value) {
@@ -103,11 +99,12 @@ typedef uint32_t bitfield_bit32_index_t;
  * @param bit_index The corresponding single bit to turn into a field.
  * @return A 1-bit field that corresponds to `bit_index`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline bitfield_field32_t bitfield_bit32_to_field32(
     bitfield_bit32_index_t bit_index) {
   return (bitfield_field32_t){
-      .mask = 0x1, .index = bit_index,
+      .mask = 0x1,
+      .index = bit_index,
   };
 }
 
@@ -118,7 +115,7 @@ inline bitfield_field32_t bitfield_bit32_to_field32(
  * @param bit_index Bit to read.
  * @return `true` if the bit was one, `false` otherwise.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline bool bitfield_bit32_read(uint32_t bitfield,
                                 bitfield_bit32_index_t bit_index) {
   return bitfield_field32_read(bitfield,
@@ -133,12 +130,30 @@ inline bool bitfield_bit32_read(uint32_t bitfield,
  * @param value Bit value to write to `bitfield`.
  * @return `bitfield` with the `bit_index`th bit set to `value`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline uint32_t bitfield_bit32_write(uint32_t bitfield,
                                      bitfield_bit32_index_t bit_index,
                                      bool value) {
   return bitfield_field32_write(bitfield, bitfield_bit32_to_field32(bit_index),
                                 value ? 0x1u : 0x0u);
+}
+
+/**
+ * Copies a bit from one bit set to the other.
+ *
+ * @param dest Bitfield to write to.
+ * @param dest_bit Bit to write to.
+ * @param src Bitfield to read from.
+ * @param src_bit Bit to read from.
+ * @return `dest` with the copied bit applied.
+ */
+OT_WARN_UNUSED_RESULT
+inline uint32_t bitfield_bit32_copy(uint32_t dest,
+                                    bitfield_bit32_index_t dest_bit,
+                                    uint32_t src,
+                                    bitfield_bit32_index_t src_bit) {
+  return bitfield_bit32_write(dest, dest_bit,
+                              bitfield_bit32_read(src, src_bit));
 }
 
 /**
@@ -158,7 +173,7 @@ inline uint32_t bitfield_bit32_write(uint32_t bitfield,
  * @param bitfield Bitfield to find the first set bit in.
  * @return One plus the index of the least-significant 1-bit of `bitfield`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline int32_t bitfield_find_first_set32(int32_t bitfield) {
   return __builtin_ffs(bitfield);
 }
@@ -182,7 +197,7 @@ inline int32_t bitfield_find_first_set32(int32_t bitfield) {
  * @param bitfield Bitfield to count leading 0-bits from.
  * @return The number of leading 0-bits in `bitfield`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline int32_t bitfield_count_leading_zeroes32(uint32_t bitfield) {
   return (bitfield != 0) ? __builtin_clz(bitfield) : 32;
 }
@@ -206,7 +221,7 @@ inline int32_t bitfield_count_leading_zeroes32(uint32_t bitfield) {
  * @param bitfield Bitfield to count trailing 0-bits from.
  * @return The number of trailing 0-bits in `bitfield`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline int32_t bitfield_count_trailing_zeroes32(uint32_t bitfield) {
   return (bitfield != 0) ? __builtin_ctz(bitfield) : 32;
 }
@@ -228,7 +243,7 @@ inline int32_t bitfield_count_trailing_zeroes32(uint32_t bitfield) {
  * @param bitfield Bitfield to count 1-bits from.
  * @return The number of 1-bits in `bitfield`.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline int32_t bitfield_popcount32(uint32_t bitfield) {
   return __builtin_popcount(bitfield);
 }
@@ -250,7 +265,7 @@ inline int32_t bitfield_popcount32(uint32_t bitfield) {
  * @param bitfield Bitfield to count 1-bits from.
  * @return The number of 1-bits in `bitfield`, modulo 2.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline int32_t bitfield_parity32(uint32_t bitfield) {
   return __builtin_parity(bitfield);
 }
@@ -273,9 +288,22 @@ inline int32_t bitfield_parity32(uint32_t bitfield) {
  * @param bitfield Bitfield to reverse bytes of.
  * @return `bitfield` with the order of bytes reversed.
  */
-BITFIELD_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 inline uint32_t bitfield_byteswap32(uint32_t bitfield) {
   return __builtin_bswap32(bitfield);
+}
+
+/**
+ * Check whether the bitfield value is power of two aligned.
+ *
+ * Zero will also return false.
+ *
+ * @param bitfield Value to be verified.
+ * @return True if bitfield is power of two, otherwise false.
+ */
+OT_WARN_UNUSED_RESULT
+inline bool bitfield_is_power_of_two32(uint32_t bitfield) {
+  return bitfield != 0 && (bitfield & (bitfield - 1)) == 0;
 }
 
 #ifdef __cplusplus

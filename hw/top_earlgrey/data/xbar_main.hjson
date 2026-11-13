@@ -1,175 +1,299 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 { name: "main",
   type: "xbar",
   clock_primary: "clk_main_i", // Main clock, used in sockets
-  other_clock_list: [ "clk_fixed_i" ] // Secondary clocks used by specific nodes
+  other_clock_list: [ "clk_fixed_i", "clk_io_i", "clk_usb_i"] // Secondary clocks used by specific nodes
   reset_primary: "rst_main_ni", // Main reset, used in sockets
-  other_reset_list: [ "rst_fixed_ni" ] // Secondary clocks used by specific nodes
+  other_reset_list: [ "rst_fixed_ni", "rst_io_ni", "rst_usb_ni"] // Secondary clocks used by specific nodes
 
+  // Rationale for pipeline and req/rsp_fifo_pass:
+  // For host interfaces that are used during production state (corei/cored),
+  // minimize the amount of host introduced latency.  This is accomplished
+  // by setting pipeline to false.
+  // For host interfaces that are only used for debug, relax the timing by
+  // inserting a register slice and not allowing passthrough (more access
+  // latency. This is accomplished by setting `req/rsp_fifo_pass` to false,
+  // and implicitly using the default of pipeline true.
+  //
+  // For device interfaces, especially configuration registers, latency is
+  // not generally a concern, thus use `req/rsp_fifo_pass` false and pipeline
+  // true.
+  // For device accesses to memories (ram / rom / rram), performance is a concern,
+  // so use pipeline false where permissible by timing. If not, find a combination
+  // that works.
   nodes: [
     { name:  "rv_core_ibex.corei",
       type:  "host",
+      addr_space: "hart",
       clock: "clk_main_i",
       reset: "rst_main_ni",
-      pipeline: "false"
-
+      pipeline: false
     },
-    { name:  "rv_core_ibex.cored",
+    { name:  "cheriot_mem_sys.cored",
       type:  "host",
+      addr_space: "hart",
       clock: "clk_main_i",
       reset: "rst_main_ni",
-      pipeline: "false"
+      pipeline: false
+    },
+    { name:  "cheriot_mem_sys.tbre",
+      type:  "host",
+      addr_space: "hart",
+      clock: "clk_main_i",
+      reset: "rst_main_ni",
+      pipeline: false
     },
     { name:      "rv_dm.sba",
       type:      "host",
+      addr_space: "hart",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "rv_dm.regs",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
-    { name:      "rv_dm.rom",
+    { name:      "rv_dm.mem",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "rom_ctrl.rom",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline:  "false",
+      req_fifo_pass: true,
+      rsp_fifo_pass: false,
     },
     { name:      "rom_ctrl.regs",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline:  "false",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "peri",
       type:      "device",
       clock:     "clk_fixed_i",
       reset:     "rst_fixed_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
-    { name:      "flash_ctrl.core",
+    { name:      "spi_host0",
+      type:      "device",
+      clock:     "clk_io_i",
+      reset:     "rst_io_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "spi_host1",
+      type:      "device",
+      clock:     "clk_io_i",
+      reset:     "rst_io_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "i3c0",
+      type:      "device",
+      clock:     "clk_io_i",
+      reset:     "rst_io_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "i3c1",
+      type:      "device",
+      clock:     "clk_io_i",
+      reset:     "rst_io_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "usbdev",
+      type:      "device",
+      clock:     "clk_usb_i",
+      reset:     "rst_usb_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "rram_ctrl.core",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
-    { name:      "flash_ctrl.prim",
+    { name:      "rram_macro.prim",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
-    { name:      "flash_ctrl.mem",
+    { name:      "rram_ctrl.host",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "hmac",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:         "kmac"
       type:         "device"
       clock:        "clk_main_i"
       reset:        "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     }
     { name:      "aes",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "entropy_src",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "csrng",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "edn0",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "edn1",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "rv_plic",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
       inst_type: "rv_plic",
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "otbn",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
-    { name:      "keymgr",
+    { name:      "keymgr_dpe",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "rv_core_ibex.cfg",
       type:      "device",
       clock:     "clk_main_i"
       reset:     "rst_main_ni"
-      pipeline_byp: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "sram_ctrl_main.regs",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline: "false"
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
     { name:      "sram_ctrl_main.ram",
       type:      "device",
       clock:     "clk_main_i",
       reset:     "rst_main_ni",
-      pipeline: "false"
+      pipeline:  false
+    },
+    { name:      "sram_ctrl_sec.regs",
+      type:      "device",
+      clock:     "clk_main_i",
+      reset:     "rst_main_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "sram_ctrl_meta.regs",
+      type:      "device",
+      clock:     "clk_main_i",
+      reset:     "rst_main_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "sram_ctrl_sec.ram",
+      type:      "device",
+      clock:     "clk_main_i",
+      reset:     "rst_main_ni",
+      pipeline:  false
+    },
+    { name:      "cheriot_mem_sys.regs",
+      type:      "device",
+      clock:     "clk_main_i",
+      reset:     "rst_main_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
+    },
+    { name:      "cheriot_mem_sys.revbm",
+      type:      "device",
+      clock:     "clk_main_i",
+      reset:     "rst_main_ni",
+      req_fifo_pass: false,
+      rsp_fifo_pass: false,
     },
   ],
   connections: {
-    rv_core_ibex.corei:  ["rom_ctrl.rom", "rv_dm.rom", "sram_ctrl_main.ram", "flash_ctrl.mem"],
-    rv_core_ibex.cored:  [
-      "rom_ctrl.rom", "rom_ctrl.regs", "rv_dm.rom", "rv_dm.regs",
-      "sram_ctrl_main.ram", "peri", "flash_ctrl.core", "flash_ctrl.prim", "flash_ctrl.mem",
-      "aes", "entropy_src", "csrng", "edn0", "edn1", "hmac",
-      "rv_plic", "otbn", "keymgr", "kmac", "sram_ctrl_main.regs",
-      "rv_core_ibex.cfg"
+    rv_core_ibex.corei:  ["rom_ctrl.rom", "rv_dm.mem", "sram_ctrl_main.ram", "sram_ctrl_sec.ram", "rram_ctrl.host"
     ],
+    cheriot_mem_sys.cored:  [
+      "rom_ctrl.rom", "rom_ctrl.regs", "rv_dm.mem", "rv_dm.regs",
+      "sram_ctrl_main.ram", "sram_ctrl_sec.ram", "peri", "spi_host0", "spi_host1", "usbdev", "i3c0", "i3c1",
+      "rram_ctrl.core", "rram_ctrl.host", "rram_macro.prim",
+      "aes", "entropy_src", "csrng", "edn0", "edn1", "hmac",
+      "rv_plic", "otbn", "keymgr_dpe", "kmac", "sram_ctrl_main.regs", "sram_ctrl_sec.regs",
+      "sram_ctrl_meta.regs", "rv_core_ibex.cfg", "cheriot_mem_sys.regs", "cheriot_mem_sys.revbm"
+    ],
+    // The revocation engine only reads the memories with capability tags, the SRAMs and the RRAM;
+    // it clears tags through the meta SRAM path.
+    cheriot_mem_sys.tbre: ["sram_ctrl_main.ram", "sram_ctrl_sec.ram", "rram_ctrl.host"],
+    // Note: rv_dm.sba reaches sram_ctrl_main.ram and sram_ctrl_sec.ram directly, bypassing
+    // the CHERIoT tag filter, so a system-bus write does not clear the capability tag of
+    // the location it overwrites. SBA accesses in CHERIoT mode are not supported.
     rv_dm.sba: [
-      "rom_ctrl.rom", "rom_ctrl.regs", "rv_dm.regs", "sram_ctrl_main.ram",
-      "peri", "flash_ctrl.core", "flash_ctrl.prim", "flash_ctrl.mem", "aes",
-      "entropy_src", "csrng", "edn0", "edn1", "hmac", "rv_plic",
-      "otbn", "keymgr", "kmac", "sram_ctrl_main.regs", "rv_core_ibex.cfg"
+      "rom_ctrl.rom", "rom_ctrl.regs", "rv_dm.mem", "rv_dm.regs",
+      "sram_ctrl_main.ram", "sram_ctrl_sec.ram", "peri", "spi_host0", "spi_host1", "usbdev", "i3c0", "i3c1",
+      "rram_ctrl.core", "rram_ctrl.host", "rram_macro.prim",
+      "aes", "entropy_src", "csrng", "edn0", "edn1", "hmac",
+      "rv_plic", "otbn", "keymgr_dpe", "kmac", "sram_ctrl_main.regs", "sram_ctrl_sec.regs",
+      "sram_ctrl_meta.regs", "rv_core_ibex.cfg", "cheriot_mem_sys.regs", "cheriot_mem_sys.revbm"
     ],
   },
 }

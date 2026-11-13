@@ -1,16 +1,16 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: "lowrisc:systems:padring:0.1"
+name: "lowrisc:systems:top_earlgrey_padring:0.1"
 description: "Chip-level padring instance"
 
 filesets:
   files_rtl:
     depend:
-      - lowrisc:ip:pinmux_component
-      - "!fileset_partner ? (lowrisc:systems:physical_pads)"
-      - "fileset_partner ? (partner:systems:physical_pads)"
+      - lowrisc:prim:mubi
+      - lowrisc:prim:pad_wrapper_pkg
+      - lowrisc:virtual_systems:top_earlgrey_physical_pads
     files:
       - rtl/padring.sv
     file_type: systemVerilogSource
@@ -20,9 +20,6 @@ filesets:
       # common waivers
       - lowrisc:lint:common
       - lowrisc:lint:comportable
-    files:
-      # - lint/padring.vlt
-    file_type: vlt
 
   files_ascentlint_waiver:
     depend:

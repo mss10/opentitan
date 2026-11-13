@@ -1,0 +1,690 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+#include "sw/device/silicon_creator/lib/cert/dice_chain.h"
+
+#include "sw/device/lib/base/hardened.h"
+#include "sw/device/lib/base/macros.h"
+#include "sw/device/lib/base/memory.h"
+#include "sw/device/lib/crypto/drivers/entropy.h"
+#include "sw/device/silicon_creator/lib/base/boot_measurements.h"
+#include "sw/device/silicon_creator/lib/base/sec_mmio.h"
+#include "sw/device/silicon_creator/lib/base/static_dice_cdi_0.h"
+#include "sw/device/silicon_creator/lib/base/util.h"
+#include "sw/device/silicon_creator/lib/cert/dice.h"
+#include "sw/device/silicon_creator/lib/dbg_print.h"
+#include "sw/device/silicon_creator/lib/drivers/keymgr_dpe.h"
+#include "sw/device/silicon_creator/lib/drivers/kmac.h"
+#include "sw/device/silicon_creator/lib/error.h"
+#include "sw/device/silicon_creator/lib/manifest.h"
+#include "sw/device/silicon_creator/lib/nvm_ctrl.h"
+#include "sw/device/silicon_creator/lib/otbn_boot_services.h"
+#include "sw/device/silicon_creator/lib/ownership/datatypes.h"
+#include "sw/device/silicon_creator/manuf/base/perso_tlv_data.h"
+
+/**
+ * Defines a class for parsing and building the DICE cert chain.
+ *
+ * All of the fields in this struct should be considered private, and users
+ * should call the public `dice_chain_*` functions instead.
+ */
+typedef struct dice_chain {
+  /**
+   * RAM buffer that mirrors the DICE cert chain in a flash page.
+   */
+  dice_page_t page;
+
+  /**
+   * Indicate whether `page` needs to be written back to flash.
+   */
+  hardened_bool_t data_dirty;
+
+  /**
+   * The amount of bytes in `page.data` that has been processed.
+   */
+  size_t tail_offset;
+
+  /**
+   * Indicate the info page currently buffered in `page`.
+   * This is used to skip unnecessary read ops.
+   */
+  nvm_info_page_t info_page;
+
+  /**
+   * Id pair which points to the endorsement and cert ids below.
+   */
+  cert_key_id_pair_t key_ids;
+
+  /**
+   * Public key id for signing endorsement cert.
+   */
+  hmac_digest_t endorsement_pubkey_id;
+
+  /**
+   * Subject public key id of the current cert.
+   */
+  hmac_digest_t subject_pubkey_id;
+
+  /**
+   * Subject public key contents of the current cert.
+   */
+  ecdsa_p256_public_key_t subject_pubkey;
+
+  /**
+   * Scratch buffer for constructing CDI certs.
+   */
+  uint8_t scratch_cert[kDicePageDataSize];
+
+  /**
+   * The current tlv cert the builder is processing.
+   */
+  perso_tlv_cert_obj_t cert_obj;
+
+  /**
+   * The version of the perso blob.
+   */
+  perso_blob_version_t blob_version;
+
+  /**
+   * Indicate whether the `cert_obj` is valid for the current `subject_pubkey`.
+   */
+  hardened_bool_t cert_valid;
+
+} dice_chain_t;
+
+static dice_chain_t dice_chain;
+
+cert_key_id_pair_t dice_chain_cdi_0_key_ids = (cert_key_id_pair_t){
+    .endorsement = &static_dice_cdi_0.uds_pubkey_id,
+    .cert = &static_dice_cdi_0.cdi_0_pubkey_id,
+};
+
+/**
+ * Keymgr dpe constant
+ */
+// TODO(#30777): Replace the hard-coded slot number
+// Slot Number must match with the ones defined in rom.c!
+// Pre-defined slot id for the attestation / sealing key chain
+enum {
+  /**
+   * Keymgr DPE default slot for sealing context
+   */
+  kKeymgrDPESealSlot = 0,
+  /**
+   * Keymgr DPE default slot for attestation context
+   */
+  kKeymgrDPEAttestSlot = 1,
+};
+// Default policy for newly derived DPE context
+static const sc_keymgr_dpe_policies_t kKeymgrDPEDefaultPolicy = {
+    .child = kScKeymgrDPESlotPolAllowChild,
+    .expo = kScKeymgrDPESlotPolNoExport,
+    .parent = kScKeymgrDPESlotPolEraseParent,
+    .keygen = kScKeymgrDPESlotPolAllowKeygen,
+};
+
+// Get the size of the remaining tail space that is not processed yet.
+OT_WARN_UNUSED_RESULT
+OT_NOINLINE
+static size_t dice_chain_get_tail_size(void) {
+  HARDENED_CHECK_GE(sizeof(dice_chain.page.data), dice_chain.tail_offset);
+  return sizeof(dice_chain.page.data) - dice_chain.tail_offset;
+}
+
+// Get the pointer to the remaining tail space that is not processed yet.
+OT_WARN_UNUSED_RESULT
+static uint8_t *dice_chain_get_tail_buffer(void) {
+  return &dice_chain.page.data[dice_chain.tail_offset];
+}
+
+// Cleanup stale `cert_obj` data and mark it as invalid.
+static void dice_chain_reset_cert_obj(void) {
+  memset(&dice_chain.cert_obj, 0, sizeof(dice_chain.cert_obj));
+  dice_chain.cert_valid = kHardenedBoolFalse;
+}
+
+/**
+ * Increments the DICE cert buffer offset to the next TLV object.
+ * (ensuring to round up to the 64-bit flash word offset to prevent potential
+ * ECC issues).
+ */
+static void dice_chain_next_cert_obj(void) {
+  // Round up to next flash word for next perso TLV object offset.
+  size_t cert_size = dice_chain.cert_obj.obj_size;
+
+  // The cert_size is only 12-bit, which won't cause unsigned overflow.
+  cert_size = util_size_to_words(cert_size) * sizeof(uint32_t);
+  cert_size = util_round_up_to(cert_size, 3);
+
+  // Jump to the next object.
+  dice_chain.tail_offset += cert_size;
+
+  // Post-check for the buffer boundary.
+  HARDENED_CHECK_LE(dice_chain.tail_offset, sizeof(dice_chain.page.data));
+
+  dice_chain_reset_cert_obj();
+}
+
+/**
+ * Load the tlv cert obj from the tail buffer and check if it's valid.
+ *
+ * This method will update the `dice_chain` fields of current certificate:
+ *   * `cert_obj` will be all zeros if not TLV cert entry is found.
+ *   * `cert_valid` will only be set to true if name and pubkey matches.
+ *
+ * @param name The cert name to match.
+ * @param name_size Size in byte of the `name` argument. Caller has to ensure it
+ * is smaller than kCrthNameSizeFieldMask.
+ * @return errors encountered during the operation.
+ */
+OT_WARN_UNUSED_RESULT
+static rom_error_t dice_chain_load_cert_obj(const char *name,
+                                            size_t name_size) {
+  rom_error_t err = perso_tlv_get_cert_obj(
+      dice_chain_get_tail_buffer(), dice_chain_get_tail_size(),
+      dice_chain.blob_version, &dice_chain.cert_obj);
+  if (err != kErrorOk) {
+    // Cleanup the stale value if error.
+    dice_chain_reset_cert_obj();
+
+    // If the cert is not found or corrupted, continue and allow the ROM_EXT
+    // to generate an identity certificate for the current DICE stage. The
+    // error is not fatal, and the cert obj has been marked as invalid.
+    return kErrorOk;
+  }
+
+  // Check if this cert is what we are looking for. The name and type (X.509 vs
+  // CWT) should match.
+  const perso_tlv_object_type_t kExpectedCertType =
+      kDiceCertFormat == kDiceCertFormatX509TcbInfo ? kPersoObjectTypeX509Cert
+                                                    : kPersoObjectTypeCwtCert;
+  if (name == NULL || memcmp(dice_chain.cert_obj.name, name, name_size) != 0 ||
+      kExpectedCertType != dice_chain.cert_obj.obj_type) {
+    // Name unmatched, keep the cert_obj but mark it as invalid.
+    dice_chain.cert_valid = kHardenedBoolFalse;
+    return kErrorOk;
+  }
+
+  // Check if the subject pubkey is matched. `cert_valid` will be set to false
+  // if unmatched.
+  RETURN_IF_ERROR(dice_cert_check_valid(
+      &dice_chain.cert_obj, &dice_chain.subject_pubkey_id,
+      &dice_chain.subject_pubkey, &dice_chain.cert_valid));
+
+  return kErrorOk;
+}
+
+// Skip the TLV entry if the name matches.
+static rom_error_t dice_chain_skip_cert_obj(const char *name,
+                                            size_t name_size) {
+  RETURN_IF_ERROR(dice_chain_load_cert_obj(NULL, 0));
+  if (memcmp(dice_chain.cert_obj.name, name, name_size) == 0) {
+    dice_chain_next_cert_obj();
+  }
+  return kErrorOk;
+}
+
+// Load the certificate data from flash to RAM buffer.
+OT_WARN_UNUSED_RESULT
+static rom_error_t dice_chain_load_nvm(nvm_info_page_t info_page) {
+  // Skip reload if it's already buffered.
+  if (dice_chain.info_page == info_page) {
+    dice_chain.tail_offset = 0;
+    return kErrorOk;
+  }
+
+  // We are switching to a different page, flush changes (if dirty) first.
+  RETURN_IF_ERROR(dice_chain_flush_nvm());
+
+  // Read in a DICE certificate(s) page.
+  RETURN_IF_ERROR(nvm_ctrl_info_read_zeros_on_read_error(
+      info_page, /*offset=*/0,
+      /*word_count=*/kDicePageWords, &dice_chain.page));
+
+  // Resets the flash page status.
+  dice_chain.data_dirty = kHardenedBoolFalse;
+  dice_chain.tail_offset = 0;
+  dice_chain.info_page = info_page;
+  dice_chain_reset_cert_obj();
+
+  // Detect the version of the blob stored in flash.
+  size_t offset = 0;
+  RETURN_IF_ERROR(perso_tlv_get_blob_version(
+      dice_chain.page.data, sizeof(dice_chain.page.data),
+      &dice_chain.blob_version, &offset));
+  dice_chain.tail_offset = util_round_up_to(offset, 3);
+
+  return kErrorOk;
+}
+
+// Add the hash digest to the last of the page.
+static rom_error_t dice_chain_seal_page(void) {
+  // Hash the entire page before the digest.
+  hmac_sha256(dice_chain.page.data, sizeof(dice_chain.page.data),
+              &dice_chain.page.digest);
+
+  // The page is going to be updated.
+  dice_chain.data_dirty = kHardenedBoolTrue;
+
+  return kErrorOk;
+}
+
+// Push the certificate to the tail with TLV header.
+OT_WARN_UNUSED_RESULT
+static rom_error_t dice_chain_push_cert(const char *name, const uint8_t *cert,
+                                        const size_t cert_size) {
+  // The data is going to be updated, mark it as dirty and clear the tail.
+  dice_chain.data_dirty = kHardenedBoolTrue;
+
+  // Invalidate all the remaining certificates in the tail buffer.
+  memset(dice_chain_get_tail_buffer(), 0, dice_chain_get_tail_size());
+
+  // Encode the certificate to the tail buffer.
+  size_t cert_page_left = dice_chain_get_tail_size();
+  perso_tlv_object_type_t cert_type =
+      kDiceCertFormat == kDiceCertFormatX509TcbInfo ? kPersoObjectTypeX509Cert
+                                                    : kPersoObjectTypeCwtCert;
+  RETURN_IF_ERROR(perso_tlv_cert_obj_build(
+      name, cert_type, cert, cert_size, dice_chain.blob_version,
+      dice_chain_get_tail_buffer(), &cert_page_left));
+
+  // Move the offset to the new tail.
+  RETURN_IF_ERROR(perso_tlv_get_cert_obj(
+      dice_chain_get_tail_buffer(), dice_chain_get_tail_size(),
+      dice_chain.blob_version, &dice_chain.cert_obj));
+  dice_chain_next_cert_obj();
+  return kErrorOk;
+}
+
+rom_error_t dice_chain_entropy_complex_init(void) {
+  // Initialize the entropy complex used by OTBN.
+  // Note: `OTCRYPTO_OK.value` is equal to `kErrorOk` but we cannot add a static
+  // assertion here since its definition is not an integer constant expression.
+  return (rom_error_t)entropy_complex_init(kHardenedBoolFalse).value;
+}
+
+rom_error_t dice_chain_attestation_silicon(void) {
+  // Initialize the entropy complex and KMAC for key manager operations.
+  HARDENED_RETURN_IF_ERROR(dice_chain_entropy_complex_init());
+  HARDENED_RETURN_IF_ERROR(kmac_keymgr_configure());
+
+  // Set keymgr reseed interval. Start with the maximum value to avoid
+  // entropy complex contention during the boot process.
+  sc_keymgr_dpe_entropy_reseed_interval_set(UINT16_MAX);
+  SEC_MMIO_WRITE_INCREMENT(kScKeymgrDPESecMmioReseedIntervalSet);
+
+  // Advance the keymgr dpe into the Available state and load the UDS in the
+  // selected DPE slot.
+  return sc_keymgr_dpe_advance_initial(kKeymgrDPESealSlot);
+}
+
+rom_error_t dice_chain_attestation_creator(
+    const keymgr_dpe_binding_value_t *rom_measurement,
+    const manifest_t *rom_manifest) {
+  keymgr_dpe_binding_value_t seal_binding_value;
+  memcpy(&seal_binding_value, &rom_manifest->binding_value,
+         sizeof(keymgr_dpe_binding_value_t));
+
+  // Prepare the data to derive the sealing CreatorRootKey.
+  const sc_keymgr_dpe_advance_data_t adv_sealing_data = {
+      .sel_src_slot = kKeymgrDPESealSlot,
+      .sel_dst_slot = kKeymgrDPESealSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = &seal_binding_value,
+      .version = rom_manifest->max_key_version,
+  };
+
+  // Prepare the data to derive the attestation CreatorRootKey.
+  // Before deriving the CreatorRootKey the driver loads the UDS
+  // into the attestation slot. Therefore, the source register
+  // points to an empty HW slot.
+  const sc_keymgr_dpe_advance_data_t adv_attestation_data = {
+      .sel_src_slot = kKeymgrDPEAttestSlot,
+      .sel_dst_slot = kKeymgrDPEAttestSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = rom_measurement,
+      .version = rom_manifest->max_key_version,
+  };
+
+  // Derive the attestation / sealing CreatorRootKey
+  SEC_MMIO_WRITE_INCREMENT(2 * (kScKeymgrDPESecMmioSwBindingSet +
+                                kScKeymgrDPESecMmioMaxVerSet +
+                                kScKeymgrDPESecMmioSlotPolicy));
+  return sc_keymgr_dpe_advance_creator(adv_sealing_data, adv_attestation_data);
+}
+
+rom_error_t dice_chain_attestation_creator_keygen(void) {
+  // Generate an ECC P256 keypair
+  HARDENED_RETURN_IF_ERROR(otbn_boot_cert_ecc_p256_keygen(
+      kDiceKeyUds, &static_dice_cdi_0.uds_pubkey_id,
+      &static_dice_cdi_0.uds_pubkey));
+
+  // Save UDS key for signing next stage cert.
+  return otbn_boot_attestation_key_save(kDiceKeyUds.keygen_seed_idx,
+                                        *kDiceKeyUds.keymgr_dpe_diversifier);
+}
+
+// TODO(#31823): Verify these static sw binding values for the CreatorIntKey.
+// Duplicated in `sw/device/silicon_creator/lib/drivers/keymgr_dpe_functest.c`.
+const keymgr_dpe_binding_value_t kDiceChainCreatorIntSealBindingValue = {
+    .data = {0x84794d9a, 0x8f8dbc8f, 0x983c982c, 0x9a1c6781, 0xcb547343,
+             0x92b7cd91, 0xcb2cfb9d, 0xd1224a62}};
+const keymgr_dpe_binding_value_t kDiceChainCreatorIntAttestBindingValue = {
+    .data = {0x09a1dd87, 0x67acaa58, 0x33f0d0df, 0xddb8e842, 0xa18ac2e0,
+             0x004207d0, 0x40f41d3c, 0x5b4a9a20}};
+
+rom_error_t dice_chain_attestation_creator_int(
+    const manifest_t *rom_ext_manifest) {
+  // Prepare the data to derive the sealing CreatorIntKey.
+  const sc_keymgr_dpe_advance_data_t adv_sealing_data = {
+      .sel_src_slot = kKeymgrDPESealSlot,
+      .sel_dst_slot = kKeymgrDPESealSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = &kDiceChainCreatorIntSealBindingValue,
+      .version = rom_ext_manifest->max_key_version,
+  };
+
+  // Prepare the data to derive the attestation CreatorIntKey.
+  const sc_keymgr_dpe_advance_data_t adv_attestation_data = {
+      .sel_src_slot = kKeymgrDPEAttestSlot,
+      .sel_dst_slot = kKeymgrDPEAttestSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = &kDiceChainCreatorIntAttestBindingValue,
+      .version = rom_ext_manifest->max_key_version,
+  };
+
+  // Derive the CreatorIntKeys from the CreatorRootKeys
+  SEC_MMIO_WRITE_INCREMENT(2 * (kScKeymgrDPESecMmioSwBindingSet +
+                                kScKeymgrDPESecMmioMaxVerSet +
+                                kScKeymgrDPESecMmioSlotPolicy));
+  // The driver verifies the kKeymgrDPESealSlot / kKeymgrDPEAttestSlot hold keys
+  // with boot stage set to BootStageOwnerInt (2).
+  HARDENED_RETURN_IF_ERROR(sc_keymgr_dpe_advance_creator_int(
+      adv_sealing_data, adv_attestation_data));
+
+  // TODO(#31823): Generate / Verify the UDS_1 certificate from the
+  // CreatorIntKey
+
+  return kErrorOk;
+}
+
+rom_error_t dice_chain_attestation_owner_int(
+    const keymgr_dpe_binding_value_t *rom_ext_measurement,
+    const manifest_t *rom_ext_manifest) {
+  // Generate CDI_0 attestation keys and (potentially) update certificate.
+  keymgr_dpe_binding_value_t seal_binding_value = {
+      .data = {rom_ext_manifest->identifier, 0}};
+
+  // Prepare the data to derive the sealing OwnerIntKey.
+  const sc_keymgr_dpe_advance_data_t adv_sealing_data = {
+      .sel_src_slot = kKeymgrDPESealSlot,
+      .sel_dst_slot = kKeymgrDPESealSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = &seal_binding_value,
+      .version = rom_ext_manifest->max_key_version,
+  };
+
+  // Prepare the data to derive the attestation OwnerIntKey.
+  const sc_keymgr_dpe_advance_data_t adv_attestation_data = {
+      .sel_src_slot = kKeymgrDPEAttestSlot,
+      .sel_dst_slot = kKeymgrDPEAttestSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = rom_ext_measurement,
+      .version = rom_ext_manifest->max_key_version,
+  };
+
+  // Derive the OwnerIntKeys from the CreatorIntKeys
+  SEC_MMIO_WRITE_INCREMENT(2 * (kScKeymgrDPESecMmioSwBindingSet +
+                                kScKeymgrDPESecMmioMaxVerSet +
+                                kScKeymgrDPESecMmioSlotPolicy));
+  // The driver verifies the kKeymgrDPESealSlot / kKeymgrDPEAttestSlot hold keys
+  // with boot stage set to BootStageOwner (3).
+  HARDENED_RETURN_IF_ERROR(
+      sc_keymgr_dpe_advance_owner_int(adv_sealing_data, adv_attestation_data));
+
+  // Generate an ECC P256 keypair
+  HARDENED_RETURN_IF_ERROR(otbn_boot_cert_ecc_p256_keygen(
+      kDiceKeyCdi0, &static_dice_cdi_0.cdi_0_pubkey_id,
+      &static_dice_cdi_0.cdi_0_pubkey));
+
+  // Switch page for the device generated CDI_0.
+  RETURN_IF_ERROR(dice_chain_load_nvm(kNvmInfoPageDiceCerts));
+
+  // Check if the current CDI_0 cert is valid.
+  dice_chain.subject_pubkey_id = static_dice_cdi_0.cdi_0_pubkey_id;
+  dice_chain.subject_pubkey = static_dice_cdi_0.cdi_0_pubkey;
+  RETURN_IF_ERROR(dice_chain_load_cert_obj("CDI_0", /*name_size=*/6));
+  if (dice_chain.cert_valid == kHardenedBoolFalse) {
+    // Update the cert page buffer.
+    static_dice_cdi_0.cert_size = sizeof(static_dice_cdi_0.cert_data);
+    HARDENED_RETURN_IF_ERROR(dice_cdi_0_cert_build(
+        (hmac_digest_t *)rom_ext_measurement->data,
+        rom_ext_manifest->security_version, &dice_chain_cdi_0_key_ids,
+        &static_dice_cdi_0.uds_pubkey, &static_dice_cdi_0.cdi_0_pubkey,
+        static_dice_cdi_0.cert_data, &static_dice_cdi_0.cert_size));
+  } else {
+    // Replace UDS with CDI_0 key for endorsing next stage cert.
+    HARDENED_RETURN_IF_ERROR(otbn_boot_attestation_key_save(
+        kDiceKeyCdi0.keygen_seed_idx, *kDiceKeyCdi0.keymgr_dpe_diversifier));
+  }
+
+  return kErrorOk;
+}
+
+// Compare the UDS identity in the static critical section to the UDS cert
+// cached in the flash.
+static rom_error_t dice_chain_attestation_check_uds(void) {
+  // Switch page for the factory provisioned UDS cert.
+  RETURN_IF_ERROR(dice_chain_load_nvm(kNvmInfoPageFactoryCerts));
+
+  // Check if the UDS cert is valid.
+  dice_chain.endorsement_pubkey_id = static_dice_cdi_0.uds_pubkey_id;
+  dice_chain.subject_pubkey_id = static_dice_cdi_0.uds_pubkey_id;
+  dice_chain.subject_pubkey = static_dice_cdi_0.uds_pubkey;
+  RETURN_IF_ERROR(dice_chain_load_cert_obj("UDS", /*name_size=*/4));
+  if (dice_chain.cert_valid == kHardenedBoolFalse) {
+    // The UDS key ID (and cert itself) should never change unless:
+    // 1. there is a hardware issue / the page has been corrupted, or
+    // 2. the cert has not yet been provisioned.
+    //
+    // In both cases, we do nothing, and boot normally, later attestation
+    // attempts will fail in a detectable manner.
+
+    // CAUTION: This error message should match the one in
+    //   //sw/host/provisioning/ft_lib/src/lib.rs
+    dbg_puts("error: UDS certificate not valid\r\n");
+  }
+
+  return kErrorOk;
+}
+
+// Refresh the cache if a new CDI_0 is generated.
+static rom_error_t dice_chain_attestation_check_cdi_0(void) {
+  // Switch page for the device CDI chain.
+  RETURN_IF_ERROR(dice_chain_load_nvm(kNvmInfoPageDiceCerts));
+
+  // Set the endorsement key for the next cert.
+  dice_chain.endorsement_pubkey_id = static_dice_cdi_0.cdi_0_pubkey_id;
+
+  // Save cdi 0 to flash if regenerated.
+  if (static_dice_cdi_0.cert_size != 0) {
+    dbg_puts("warning: CDI_0 certificate not valid; updating\r\n");
+    return dice_chain_push_cert("CDI_0", static_dice_cdi_0.cert_data,
+                                static_dice_cdi_0.cert_size);
+  } else {
+    return dice_chain_skip_cert_obj("CDI_0", /*name_size=*/6);
+  }
+}
+
+// Check the hash digest at the last of the page.
+static rom_error_t dice_chain_seal_page_check(nvm_info_page_t info_page) {
+  RETURN_IF_ERROR(dice_chain_load_nvm(info_page));
+  // Hash the entire page before the digest.
+  hmac_digest_t expected_digest;
+  hmac_sha256(dice_chain.page.data, sizeof(dice_chain.page.data),
+              &expected_digest);
+
+  // Compare with the digest stored at the end of the page.
+  if (memcmp(&dice_chain.page.digest, &expected_digest,
+             sizeof(hmac_digest_t)) != 0) {
+    return kErrorDicePageCorrupted;
+  }
+
+  return kErrorOk;
+}
+
+rom_error_t dice_chain_immutable_section_check(void) {
+  if (dice_chain_seal_page_check(kNvmInfoPageFactoryCerts) != kErrorOk) {
+    dbg_puts("warning: corrupted FactoryCerts page\r\n");
+  }
+
+  // Handles the certificates from the rom
+  return dice_chain_attestation_check_uds();
+}
+
+rom_error_t dice_chain_rom_ext_check(void) {
+  if (dice_chain_seal_page_check(kNvmInfoPageFactoryCerts) != kErrorOk) {
+    dbg_puts("warning: corrupted FactoryCerts page\r\n");
+  }
+
+  // Retry if the current cache is corrupted.
+  rom_error_t error = dice_chain_seal_page_check(kNvmInfoPageDiceCerts);
+  if (error == kErrorDicePageCorrupted) {
+    dbg_puts("warning: corrupted DiceCerts page\r\n");
+    // Clear the corrupted page and reboot.
+    dice_chain.data_dirty = kHardenedBoolTrue;
+    memset(&dice_chain.page, 0, sizeof(dice_chain.page));
+    RETURN_IF_ERROR(dice_chain_flush_nvm());
+
+    if (static_dice_cdi_0.cert_size > 0) {
+      // Continue since CDI_0 has been generated
+      error = kErrorOk;
+    }
+  }
+  RETURN_IF_ERROR(error);
+
+  // Handles the certificates from the immutable rom_ext.
+  RETURN_IF_ERROR(dice_chain_attestation_check_uds());
+  return dice_chain_attestation_check_cdi_0();
+}
+
+rom_error_t dice_chain_attestation_owner(
+    const manifest_t *owner_manifest,
+    keymgr_dpe_binding_value_t *bl0_measurement,
+    hmac_digest_t *owner_measurement, hmac_digest_t *owner_history_hash,
+    keymgr_dpe_binding_value_t *sealing_binding,
+    owner_app_domain_t key_domain) {
+  // Handles the certificates from the immutable rom_ext first.
+  RETURN_IF_ERROR(dice_chain_attestation_check_uds());
+  RETURN_IF_ERROR(dice_chain_attestation_check_cdi_0());
+
+  // Generate CDI_1 attestation keys and (potentially) update certificate.
+  static_assert(
+      sizeof(hmac_digest_t) == sizeof(keymgr_dpe_binding_value_t),
+      "Expect the keymgr binding value to be the same size as a sha256 digest");
+
+  // Aggregate the owner firmware (BL0) measurement and the ownership
+  // measurement into a single attestation measurment.  The attestation
+  // measurement is used to initialize the keymgr.
+  hmac_digest_t attest_measurement;
+  hmac_sha256_configure(false);
+  hmac_sha256_start();
+  hmac_sha256_update(bl0_measurement, sizeof(*bl0_measurement));
+  hmac_sha256_update(owner_measurement, sizeof(*owner_measurement));
+  hmac_sha256_process();
+  hmac_sha256_final(&attest_measurement);
+
+  // Prepare the data to derive the sealing OwnerKey.
+  const sc_keymgr_dpe_advance_data_t adv_sealing_data = {
+      .sel_src_slot = kKeymgrDPESealSlot,
+      .sel_dst_slot = kKeymgrDPESealSlot,
+      .policy = kKeymgrDPEDefaultPolicy,
+      .binding_value = sealing_binding,
+      .version = owner_manifest->max_key_version,
+  };
+
+  // Prepare the data to derive the attestation OwnerKey.
+  sc_keymgr_dpe_advance_data_t adv_attestation_data;
+  adv_attestation_data.sel_src_slot = kKeymgrDPEAttestSlot;
+  adv_attestation_data.sel_dst_slot = kKeymgrDPEAttestSlot;
+  adv_attestation_data.policy = kKeymgrDPEDefaultPolicy;
+  adv_attestation_data.binding_value =
+      (keymgr_dpe_binding_value_t *)&attest_measurement;
+  adv_attestation_data.version = owner_manifest->max_key_version;
+
+  // Derive the OwnerKeys from the OwnerIntKeys
+  SEC_MMIO_WRITE_INCREMENT(2 * (kScKeymgrDPESecMmioSwBindingSet +
+                                kScKeymgrDPESecMmioMaxVerSet +
+                                kScKeymgrDPESecMmioSlotPolicy));
+  // The driver verifies the kKeymgrDPESealSlot / kKeymgrDPEAttestSlot hold keys
+  // with boot stage set to BootStageRuntime (4).
+  HARDENED_RETURN_IF_ERROR(
+      sc_keymgr_dpe_advance_owner(adv_sealing_data, adv_attestation_data));
+
+  // Generate an ECC P256 keypair
+  HARDENED_RETURN_IF_ERROR(otbn_boot_cert_ecc_p256_keygen(
+      kDiceKeyCdi1, &dice_chain.subject_pubkey_id, &dice_chain.subject_pubkey));
+
+  // Check if the current CDI_1 cert is valid.
+  RETURN_IF_ERROR(dice_chain_load_cert_obj("CDI_1", /*name_size=*/6));
+  if (dice_chain.cert_valid == kHardenedBoolFalse) {
+    dbg_puts("warning: CDI_1 certificate not valid; updating\r\n");
+    // Update the cert page buffer.
+    size_t updated_cert_size = kDicePageDataSize;
+    // TODO(#19596): add owner configuration block measurement to CDI_1 cert.
+    HARDENED_RETURN_IF_ERROR(dice_cdi_1_cert_build(
+        (hmac_digest_t *)bl0_measurement, owner_measurement, owner_history_hash,
+        owner_manifest->security_version, key_domain, &dice_chain.key_ids,
+        &static_dice_cdi_0.cdi_0_pubkey, &dice_chain.subject_pubkey,
+        dice_chain.scratch_cert, &updated_cert_size));
+    RETURN_IF_ERROR(dice_chain_push_cert("CDI_1", dice_chain.scratch_cert,
+                                         updated_cert_size));
+  } else {
+    // Cert is valid, move to the next one.
+    dice_chain_next_cert_obj();
+
+    // Replace CDI_0 with CDI_1 key for endorsing next stage cert.
+    HARDENED_RETURN_IF_ERROR(otbn_boot_attestation_key_save(
+        kDiceKeyCdi1.keygen_seed_idx, *kDiceKeyCdi1.keymgr_dpe_diversifier));
+  }
+  dice_chain.endorsement_pubkey_id = dice_chain.subject_pubkey_id;
+
+  return kErrorOk;
+}
+
+// Write the DICE certs to flash if they have been updated.
+rom_error_t dice_chain_flush_nvm(void) {
+  if (dice_chain.data_dirty == kHardenedBoolTrue) {
+    RETURN_IF_ERROR(dice_chain_seal_page());
+
+    // Error if a different page to kNvmInfoPageDiceCerts is provided.
+    HARDENED_CHECK_EQ(dice_chain.info_page, kNvmInfoPageDiceCerts);
+    static_assert(sizeof(dice_chain.page) == kNvmInfoPageDiceCertsSize,
+                  "Invalid dice_chain buffer size");
+    RETURN_IF_ERROR(nvm_ctrl_info_erase(dice_chain.info_page));
+    RETURN_IF_ERROR(nvm_ctrl_info_write(dice_chain.info_page,
+                                        /*offset=*/0,
+                                        /*word_count=*/kDicePageWords,
+                                        &dice_chain.page));
+    dice_chain.data_dirty = kHardenedBoolFalse;
+  }
+  return kErrorOk;
+}
+
+rom_error_t dice_chain_init(void) {
+  // Variable initialization.
+  memset(&dice_chain, 0, sizeof(dice_chain));
+  dice_chain.data_dirty = kHardenedBoolFalse;
+  dice_chain.key_ids = (cert_key_id_pair_t){
+      .endorsement = &dice_chain.endorsement_pubkey_id,
+      .cert = &dice_chain.subject_pubkey_id,
+  };
+  dice_chain_reset_cert_obj();
+
+  // Configure DICE certificate flash info page and buffer it into RAM.
+  nvm_ctrl_cert_info_page_creator_cfg(kNvmInfoPageDiceCerts);
+  nvm_ctrl_info_cfg_set(kNvmInfoPageFactoryCerts, kNvmCertInfoPageCfg);
+  nvm_ctrl_cert_info_page_owner_restrict(kNvmInfoPageFactoryCerts);
+  return kErrorOk;
+}

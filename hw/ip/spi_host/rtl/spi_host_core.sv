@@ -1,17 +1,19 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Core Implemenation module for Serial Peripheral Interface (SPI) Host IP.
+// Core Implementation module for Serial Peripheral Interface (SPI) Host IP.
 //
 
 module spi_host_core #(
-  parameter  int NumCS     = 1
+  parameter  int NumCS = 1,
+  localparam int CSW   = prim_util_pkg::vbits(NumCS)
 ) (
   input                             clk_i,
   input                             rst_ni,
 
   input spi_host_cmd_pkg::command_t command_i,
+  input logic [CSW-1:0]             command_csid_i,
   input                             command_valid_i,
   output                            command_ready_o,
   input                             en_i,
@@ -20,6 +22,7 @@ module spi_host_core #(
   input        [3:0]                tx_be_i,
   input                             tx_valid_i,
   output logic                      tx_ready_o,
+  output logic                      tx_byte_select_full_o,
 
   output logic [31:0]               rx_data_o,
   output logic                      rx_valid_o,
@@ -87,6 +90,12 @@ module spi_host_core #(
     .flush_i      (tx_flush_sr),
     .sw_rst_i
   );
+  // The byte_select module greedily pops data from the TX FIFO, so
+  // the FIFO is observed as having an effective depth of N+1.
+  // The byte_valid_o signal indicates when the byte_select contains
+  // a valid word. Pass this on up to the TX FIFO to adjust the
+  // reported depth/full/empty flags.
+  assign tx_byte_select_full_o = tx_valid_sr;
 
   spi_host_shift_register u_shift_reg (
     .clk_i,
@@ -121,6 +130,7 @@ module spi_host_core #(
     .rst_ni,
     .en_i,
     .command_i,
+    .command_csid_i,
     .command_valid_i,
     .command_ready_o,
     .sck_o,

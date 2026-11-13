@@ -1,5 +1,0 @@
----
-title: "IP cores"
----
-
-{{% sectionContent %}}

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -15,7 +15,7 @@ class kmac_sideload_vseq extends kmac_long_msg_and_output_vseq;
   }
 
   constraint en_sideload_c {
-    en_sideload == 1;
+    reg_en_sideload == 1;
   }
 
 endclass

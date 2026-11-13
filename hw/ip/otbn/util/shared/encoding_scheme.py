@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -7,9 +7,11 @@
 import re
 from typing import Dict, List, Optional, Set
 
+from serialize.parse_helpers import (check_keys,
+                                     check_str, check_list, index_list)
+
 from .bit_ranges import BitRanges
 from .bool_literal import BoolLiteral
-from .yaml_parse_helpers import check_keys, check_str, check_list, index_list
 
 
 class EncSchemeField:
@@ -117,7 +119,8 @@ class EncSchemeImport:
                 field_name = arg_parts[0]
                 field_what = ('literal value for field {!r} when inheriting '
                               'from {!r} in encoding scheme {!r}'
-                              .format(arg_parts[0], self.parent, importer_name))
+                              .format(arg_parts[0],
+                                      self.parent, importer_name))
                 field_value = BoolLiteral.from_string(arg_parts[1], field_what)
 
                 if field_name in self.settings:

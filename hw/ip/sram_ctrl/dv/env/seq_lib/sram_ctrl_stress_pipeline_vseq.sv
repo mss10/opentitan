@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,6 +16,11 @@ class sram_ctrl_stress_pipeline_vseq extends sram_ctrl_multiple_keys_vseq;
       [2501 : 4000] :/ 2,
       [4001 : 5000] :/ 1
     };
+  }
+
+  // Reduce iteration as stress_pipeline runs many operations in one iteration
+  constraint num_trans_c {
+    num_trans inside {[5:10]};
   }
 
   virtual task pre_start();

@@ -1,20 +1,25 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-interface uart_if #(realtime UartDefaultClkPeriodNs = 104166.667ns) ();
+interface uart_if #(realtime UartDefaultClkPeriod = 104166.667ns) ();
   wire uart_tx;
   logic uart_rx;
 
   // generate local clk
-  realtime uart_clk_period_ns = UartDefaultClkPeriodNs;
+  realtime uart_clk_period = UartDefaultClkPeriod;
   bit   uart_tx_clk = 1'b1;
   int   uart_tx_clk_pulses = 0;
   bit   uart_rx_clk = 1'b1;
   int   uart_rx_clk_pulses = 0;
 
+  // UART TX from the DUT when signaled over muxed IOs can experience glitches in the same
+  // time-step (a simulation artifact). Delaying by 1ps eliminates them.
+  wire uart_tx_int;
+  assign #1ps uart_tx_int = uart_tx;
+
   clocking mon_tx_cb @(negedge uart_tx_clk);
-    input  #10ns uart_tx;
+    input  #10ns uart_tx_int;
   endclocking
   modport mon_tx_mp(clocking mon_tx_cb);
 

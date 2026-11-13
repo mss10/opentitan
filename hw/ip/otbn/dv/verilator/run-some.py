@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -89,9 +89,11 @@ def write_ninja(handle: TextIO,
     # The rule to build the Verilated system
     handle.write('rule fusesoc\n'
                  f'  command = fusesoc --cores-root={projdir_from_destdir} '
-                 'run --target=sim --setup --build lowrisc:ip:otbn_top_sim '
+                 'run --target=sim --setup --build '
+                 '--mapping=lowrisc:prim_generic:all:0.1 lowrisc:ip:otbn_top_sim '
                  '>fusesoc.log 2>&1\n\n')
-    handle.write('tb = build/lowrisc_ip_otbn_top_sim_0.1/sim-verilator/Votbn_top_sim\n\n')
+    handle.write('tb = build/lowrisc_ip_otbn_top_sim_0.1/'
+                 'sim-verilator/Votbn_top_sim\n\n')
     handle.write('build $tb: fusesoc\n\n')
 
     # Collect up all the generated files

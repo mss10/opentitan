@@ -1,10 +1,9 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
-from collections import Counter
-import typing
-from typing import Dict, List, Optional, Tuple
+from collections import Counter, defaultdict, namedtuple
+from typing import Dict, Iterator, List, Optional
 
 from elftools.dwarf.dwarfinfo import DWARFInfo  # type: ignore
 from elftools.elf.elffile import ELFFile  # type: ignore
@@ -22,13 +21,16 @@ class ExecutionStats:
         self.program = program
 
         self.stall_count = 0
-        self.insn_histo = Counter()  # type: typing.Counter[str]
-        self.func_calls = []  # type: List[Dict[str, int]]
-        self.loops = []  # type: List[Dict[str, int]]
+        self.insn_histo: Counter[str] = Counter()
+        self.func_calls: List[Dict[str, int]] = []
+        self.loops: List[Dict[str, int]] = []
 
         # Histogram indexed by the length of the (extended) basic block.
-        self.basic_block_histo = Counter()  # type: typing.Counter[int]
-        self.ext_basic_block_histo = Counter()  # type: typing.Counter[int]
+        self.basic_block_histo: Counter[int] = Counter()
+        self.ext_basic_block_histo: Counter[int] = Counter()
+
+        # Coverage map indexed by pc.
+        self.coverage: Counter[int] = Counter()
 
         self._current_basic_block_len = 0
         self._current_ext_basic_block_len = 0
@@ -58,6 +60,7 @@ class ExecutionStats:
 
         '''
         pc = state_bc.pc
+        self.coverage[pc] += 1
 
         is_jump = isinstance(insn, JAL) or isinstance(insn, JALR)
         is_branch = isinstance(insn, BEQ) or isinstance(insn, BNE)
@@ -91,33 +94,36 @@ class ExecutionStats:
                 'iterations': iterations,
             })
 
-        is_last_insn_in_loop_body = state_bc.loop_stack.is_last_insn_in_loop_body(pc)
+        last_in_loop_body = state_bc.loop_stack.is_last_insn_in_loop_body(pc)
 
         # Basic blocks
+        #
         # A basic block is a linear sequence of code ending with an instruction
         # that can potentially change the control flow: a jump, a branch, the
         # last instruction in a loop (LOOP or LOOPI) body, or an ECALL. The
-        # length of the basic block equals the number of instructions within the
-        # basic block.
+        # length of the basic block equals the number of instructions within
+        # the basic block.
         self._current_basic_block_len += 1
-        if (is_jump or is_branch or is_last_insn_in_loop_body or
+        if (is_jump or is_branch or last_in_loop_body or
                 isinstance(insn, ECALL)):
 
             self.basic_block_histo[self._current_basic_block_len] += 1
             self._current_basic_block_len = 0
 
         # Extended basic blocks
+        #
         # An extended basic block is a sequence of one or more basic blocks
-        # which can be statically determined at compile time.
-        # Extended basic blocks end with a branch, the last instruction in a
-        # LOOP body, or an ECALL instruction.
+        # which can be statically determined at compile time. Extended basic
+        # blocks end with a branch, the last instruction in a LOOP body, or an
+        # ECALL instruction.
 
-        # Determine if the current instruction is the last instruction in a LOOP
-        # body (only LOOP, not LOOPI!).
+        # Determine if the current instruction is the last instruction in a
+        # LOOP body (only LOOP, not LOOPI!).
         finishing_loop = False
-        if is_last_insn_in_loop_body:
+        if last_in_loop_body:
             loop_insn_addr = state_bc.loop_stack.stack[-1].get_loop_insn_addr()
-            finishing_loop = isinstance(self._insn_at_addr(loop_insn_addr), LOOP)
+            last_insn = self._insn_at_addr(loop_insn_addr)
+            finishing_loop = isinstance(last_insn, LOOP)
 
         self._current_ext_basic_block_len += 1
         if is_branch or finishing_loop or isinstance(insn, ECALL):
@@ -125,29 +131,44 @@ class ExecutionStats:
             self._current_ext_basic_block_len = 0
 
 
-def _dwarf_decode_file_line(dwarf_info: DWARFInfo,
-                            address: int) -> Optional[Tuple[str, int]]:
-    # Go over all the line programs in the DWARF information, looking for
-    # one that describes the given address.
+SourceLine = namedtuple('SourceLine', ['addr', 'path', 'lineno'])
+
+
+def _dwarf_iter_file_line(dwarf_info: DWARFInfo,
+                          full_path: bool = False) -> Iterator[Optional[SourceLine]]:
+    # Go over all the line programs in the DWARF information.
     for CU in dwarf_info.iter_CUs():
         # First, look at line programs to find the file/line for the address
         lineprog = dwarf_info.line_program_for_CU(CU)
-        prevstate = None
         for entry in lineprog.get_entries():
             # We're interested in those entries where a new state is assigned
             if entry.state is None:
                 continue
-            if entry.state.end_sequence:
-                # if the line number sequence ends, clear prevstate.
-                prevstate = None
+            state = entry.state
+
+            if state.end_sequence:
+                yield None
                 continue
-            # Looking for a range of addresses in two consecutive states that
-            # contain the required address.
-            if prevstate and prevstate.address <= address < entry.state.address:
-                filename = lineprog['file_entry'][prevstate.file - 1].name.decode('utf-8')
-                line = prevstate.line
-                return filename, line
-            prevstate = entry.state
+
+            file_ent = lineprog['file_entry'][state.file - 1]
+            raw_path = file_ent.name
+            dir_index = file_ent.dir_index
+            if full_path and len(lineprog['include_directory']) > 0 and dir_index > 0:
+                dir = lineprog['include_directory'][dir_index - 1]
+                raw_path = dir + b'/' + raw_path
+            path = raw_path.decode('utf-8')
+            yield SourceLine(state.address, path, state.line)
+
+
+def _dwarf_decode_file_line(dwarf_info: DWARFInfo, address: int) -> Optional[SourceLine]:
+    # Go over all the line programs in the DWARF information, looking for
+    # one that describes the given address.
+    lines = list(_dwarf_iter_file_line(dwarf_info, full_path=False))
+    for before, after in zip(lines, lines[1:]):
+        if before is None or after is None:
+            continue
+        if before.addr <= address < after.addr:
+            return before
     return None
 
 
@@ -180,7 +201,8 @@ class ExecutionStatAnalyzer:
             for sym_addr in self._addr_symbol_map.keys():
                 if sym_addr <= address and sym_addr > func_addr:
                     func_addr = sym_addr
-            symbol_name = self._addr_symbol_map[func_addr] + f"+{address - func_addr:#x}"
+            func_name = self._addr_symbol_map[func_addr]
+            symbol_name = func_name + f"+{address - func_addr:#x}"
 
         file_line = None
         if self._elf_file.has_dwarf_info():
@@ -191,7 +213,7 @@ class ExecutionStatAnalyzer:
         if symbol_name:
             add_info.append(f"{symbol_name}")
         if file_line:
-            add_info.append(f"at {file_line[0]}:{file_line[1]}")
+            add_info.append(f"at {file_line.path}:{file_line.lineno}")
 
         str = f"{address:#x}"
         if add_info:
@@ -263,15 +285,15 @@ class ExecutionStatAnalyzer:
 
         out = ""
 
-        # TODO: Add the start address as function?
-
         # Build function call graphs and a call site index
         # caller-indexed == forward, callee-indexed == reverse
-        # The call graphs are on function granularity; the call sites dictionary
-        # is indexed by the called function, but uses the call site as value.
-        callgraph = {}  # type: Dict[int, typing.Counter[int]]
-        rev_callgraph = {}  # type: Dict[int, typing.Counter[int]]
-        rev_callsites = {}  # type: Dict[int, typing.Counter[int]]
+        #
+        # The call graphs are on function granularity; the call sites
+        # dictionary is indexed by the called function, but uses the call site
+        # as value.
+        callgraph: Dict[int, Counter[int]] = {}  # type
+        rev_callgraph: Dict[int, Counter[int]] = {}
+        rev_callsites: Dict[int, Counter[int]] = {}
         for c in self._stats.func_calls:
             if c['caller_func'] not in callgraph:
                 callgraph[c['caller_func']] = Counter()
@@ -297,8 +319,8 @@ class ExecutionStatAnalyzer:
                 func = self._describe_imem_addr(rev_caller_func)
                 out += f"    * {cnt} times by function {func}\n"
             out += "  from the following call sites\n"
-            for rev_callsite, cnt in rev_callsites[rev_callee_func].most_common():
-                func = self._describe_imem_addr(rev_callsite)
+            for rc, cnt in rev_callsites[rev_callee_func].most_common():
+                func = self._describe_imem_addr(rc)
                 out += f"    * {cnt} times from {func}\n"
 
             has_one_callsite = len(rev_callsites[rev_callee_func]) == 1
@@ -308,9 +330,9 @@ class ExecutionStatAnalyzer:
                 out += "    no other function (leaf function).\n"
 
                 if not has_one_callsite:
-                    # We don't count it as leaf function call if it has only one
-                    # call site to prevent double-counting these as optimization
-                    # opportunity.
+                    # We don't count it as leaf function call if it has only
+                    # one call site to prevent double-counting these as
+                    # optimization opportunity.
                     total_leaf_calls += sum(rev_caller_funcs.values())
             else:
                 caller_funcs = callgraph[rev_callee_func]
@@ -367,3 +389,24 @@ class ExecutionStatAnalyzer:
             out += f"avg: {loop_iterations_avg:.02f}\n"
 
         return out
+
+    def dump_lcov_coverage(self) -> str:
+        if not self._elf_file.has_dwarf_info():
+            return ''
+        dwarf_info = self._elf_file.get_dwarf_info()
+
+        hits_by_path: defaultdict[str, Dict[int, int]] = defaultdict(dict)
+        for info in _dwarf_iter_file_line(dwarf_info, full_path=True):
+            if info is None:
+                continue
+            hit = self._stats.coverage.get(info.addr, 0)
+            hits_by_path[info.path][info.lineno] = hit
+
+        out = []
+        for path, hits in hits_by_path.items():
+            out.append(f'SF:{path}')
+            for line, hit in hits.items():
+                out.append(f'DA:{line},{hit}')
+            out.append('end_of_record')
+
+        return '\n'.join(out) + '\n'

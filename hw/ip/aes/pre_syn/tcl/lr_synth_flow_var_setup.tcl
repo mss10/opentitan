@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,14 +12,15 @@ set_flow_var ip_name "aes" "IP name"
 set_flow_var top_module "aes" "top module"
 set_flow_var out_dir "syn_out" "Output directory for synthesis"
 set_flow_var pre_map_out "./${lr_synth_out_dir}/generated/${lr_synth_top_module}.pre_map.v" "Pre-mapping netlist out"
+set_flow_var alma_out "./${lr_synth_out_dir}/generated/${lr_synth_top_module}.alma.v" "Alma netlist out for pre-silicon SCA verification"
 set_flow_var netlist_out "./${lr_synth_out_dir}/generated/${lr_synth_top_module}_netlist.v" "netlist out"
 set_flow_var config_file "${lr_synth_ip_name}_lr_synth_conf.tcl" "Synth config file"
 set_flow_var rpt_out "./${lr_synth_out_dir}/reports" "Report output directory"
 set_flow_bool_var flatten 1 "flatten"
 set_flow_bool_var timing_run 0 "timing run"
 set_flow_bool_var aes_192_enable 1 "Enable support of 192-bit key length"
-set_flow_bool_var masking 1 "Enable 1st order masking of the AES cipher core"
-set_flow_var s_box_impl 4 "AES S-Box implementation"
+set_flow_bool_var sec_masking 1 "Enable 1st order masking of the AES cipher core"
+set_flow_var sec_s_box_impl 4 "AES S-Box implementation"
 
 source $lr_synth_config_file
 

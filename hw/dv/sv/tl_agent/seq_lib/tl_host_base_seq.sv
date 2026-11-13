@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -22,7 +22,7 @@
 // using the adapter. It does not provide any ability to perform "late randomization" of
 // request. This causes our a_source constraints to be violated. Since we need this to ensure that
 // the a_source is set taking into account the most up-to-date DUT state, we supply this sequence
-// as the adapter's parent_seqeunce instead (see tl_reg_adapter for more details). The UVM map then
+// as the adapter's parent_sequence instead (see tl_reg_adapter for more details). The UVM map then
 // uses this sequence instead of the dummy one to invoke start_item(), finish_item() and
 // get_response() instead. So, instead of doing the late randomization in randomize_req(), we do it
 // in finish_item() instead.
@@ -66,7 +66,6 @@ class tl_host_base_seq #(type REQ_T = tl_seq_item) extends dv_base_seq #(
     `downcast(req, item)
     if (cfg == null) get_cfg(req);
     if (override_a_source_val) begin
-      req.a_source_is_overridden = 1'b1;
       req.a_source = overridden_a_source_val;
       cfg.add_to_a_source_pend_q(req.a_source);
     end else begin

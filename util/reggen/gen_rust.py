@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """
@@ -12,14 +12,13 @@ import textwrap
 import warnings
 from typing import Optional, Set, TextIO
 
-
-from .field import Field
-from .ip_block import IpBlock
-from .params import LocalParam
-from .register import Register
-from .multi_register import MultiRegister
-from .signal import Signal
-from .window import Window
+from reggen.field import Field
+from reggen.ip_block import IpBlock
+from reggen.params import LocalParam
+from reggen.register import Register
+from reggen.multi_register import MultiRegister
+from reggen.signal import Signal
+from reggen.window import Window
 
 
 def genout(outfile: TextIO, msg: str) -> None:
@@ -116,16 +115,13 @@ def gen_const(outstr: TextIO,
     return output
 
 
-def gen_const_register(outstr: TextIO,
-                       reg: Register,
-                       comp: str,
-                       width: int,
-                       rnames: Set[str],
-                       existing_defines: Set[str]) -> None:
+def gen_const_register(outstr: TextIO, reg: Register, comp: str, width: int,
+                       rnames: Set[str], existing_defines: Set[str]) -> None:
     rname = reg.name
     offset = reg.offset
 
-    genout(outstr, format_comment(first_line(reg.desc)))
+    if reg.desc:
+        genout(outstr, format_comment(first_line(reg.desc)))
     defname = as_define(comp + '_' + rname)
     gen_const(outstr, defname, 'REG_OFFSET', offset, existing_defines, True)
 
@@ -141,29 +137,22 @@ def gen_const_register(outstr: TextIO,
             if field_width != width:
                 mask = field.bits.bitmask() >> field.bits.lsb
                 gen_const(outstr, dname, 'MASK', mask, existing_defines, True)
-                gen_const(outstr, dname, 'OFFSET', field.bits.lsb, existing_defines)
+                gen_const(outstr, dname, 'OFFSET', field.bits.lsb,
+                          existing_defines)
 
             if field.enum is not None:
                 for enum in field.enum:
                     ename = as_define(enum.name)
-                    gen_const(
-                        outstr,
-                        defname + '_' + as_define(field.name),
-                        'VALUE_' + ename,
-                        enum.value,
-                        existing_defines,
-                        True)
+                    gen_const(outstr, defname + '_' + as_define(field.name),
+                              'VALUE_' + ename, enum.value, existing_defines,
+                              True)
 
     genout(outstr, '\n')
     return
 
 
-def gen_const_window(outstr: TextIO,
-                     win: Window,
-                     comp: str,
-                     regwidth: int,
-                     rnames: Set[str],
-                     existing_defines: Set[str]) -> None:
+def gen_const_window(outstr: TextIO, win: Window, comp: str, regwidth: int,
+                     rnames: Set[str], existing_defines: Set[str]) -> None:
     offset = win.offset
 
     genout(outstr, format_comment('Memory area: ' + first_line(win.desc)))
@@ -180,16 +169,14 @@ def gen_const_window(outstr: TextIO,
         gen_const(outstr, defname, 'MASK', mask, existing_defines, True)
 
 
-def gen_rust_module_param(outstr: TextIO,
-                          param: LocalParam,
-                          module_name: str,
+def gen_rust_module_param(outstr: TextIO, param: LocalParam, module_name: str,
                           existing_defines: Set[str]) -> None:
     # Presently there is only one type (int), however if the new types are
     # added, they potentially need to be handled differently.
     known_types = ["int"]
     if param.param_type not in known_types:
-        warnings.warn("Cannot generate a module define of type {}"
-                      .format(param.param_type))
+        warnings.warn(
+            f"Cannot generate a module define of type {param.param_type}")
         return
 
     if param.desc is not None:
@@ -204,10 +191,8 @@ def gen_rust_module_param(outstr: TextIO,
     genout(outstr, '\n')
 
 
-def gen_const_module_params(outstr: TextIO,
-                            module_data: IpBlock,
-                            module_name: str,
-                            register_width: int,
+def gen_const_module_params(outstr: TextIO, module_data: IpBlock,
+                            module_name: str, register_width: int,
                             existing_defines: Set[str]) -> None:
     for param in module_data.params.get_localparams():
         gen_rust_module_param(outstr, param, module_name, existing_defines)
@@ -218,11 +203,8 @@ def gen_const_module_params(outstr: TextIO,
     genout(outstr, '\n')
 
 
-def gen_multireg_field_defines(outstr: TextIO,
-                               regname: str,
-                               field: Field,
-                               subreg_num: int,
-                               regwidth: int,
+def gen_multireg_field_defines(outstr: TextIO, regname: str, field: Field,
+                               subreg_num: int, regwidth: int,
                                existing_defines: Set[str]) -> None:
     field_width = field.bits.width()
     fields_per_reg = regwidth // field_width
@@ -238,32 +220,28 @@ def gen_multireg_field_defines(outstr: TextIO,
     genout(outstr, '\n')
 
 
-def gen_const_multireg(outstr: TextIO,
-                       multireg: MultiRegister,
-                       component: str,
-                       regwidth: int,
-                       rnames: Set[str],
+def gen_const_multireg(outstr: TextIO, multireg: MultiRegister, component: str,
+                       regwidth: int, rnames: Set[str],
                        existing_defines: Set[str]) -> None:
-    comment = multireg.reg.desc + " (common parameters)"
+    preg = multireg.pregs[0]
+    comment = preg.desc + " (common parameters)"
     genout(outstr, format_comment(first_line(comment)))
-    if len(multireg.reg.fields) == 1:
-        regname = as_define(component + '_' + multireg.reg.name)
-        gen_multireg_field_defines(outstr, regname, multireg.reg.fields[0],
-                                   len(multireg.regs), regwidth, existing_defines)
+    if len(preg.fields) == 1:
+        regname = as_define(component + '_' + preg.name)
+        gen_multireg_field_defines(outstr, regname, preg.fields[0],
+                                   len(multireg.cregs), regwidth,
+                                   existing_defines)
     else:
-        log.warn("Non-homogeneous multireg " + multireg.reg.name +
+        log.warn("Non-homogeneous multireg " + preg.name +
                  " skip multireg specific data generation.")
 
-    for subreg in multireg.regs:
+    for subreg in multireg.cregs:
         gen_const_register(outstr, subreg, component, regwidth, rnames,
                            existing_defines)
 
 
-def gen_interrupt_field(outstr: TextIO,
-                        interrupt: Signal,
-                        component: str,
-                        regwidth: int,
-                        existing_defines: Set[str]) -> None:
+def gen_interrupt_field(outstr: TextIO, interrupt: Signal, component: str,
+                        regwidth: int, existing_defines: Set[str]) -> None:
     fieldlsb = interrupt.bits.lsb
     iname = interrupt.name
     defname = as_define(component + '_INTR_COMMON_' + iname)
@@ -279,11 +257,8 @@ def gen_interrupt_field(outstr: TextIO,
             gen_const(outstr, defname, 'OFFSET', fieldlsb, existing_defines)
 
 
-def gen_const_interrupts(outstr: TextIO,
-                         block: IpBlock,
-                         component: str,
-                         regwidth: int,
-                         existing_defines: Set[str]) -> None:
+def gen_const_interrupts(outstr: TextIO, block: IpBlock, component: str,
+                         regwidth: int, existing_defines: Set[str]) -> None:
     # If no_auto_intr is true, then we do not generate common defines,
     # because the bit offsets for a particular interrupt may differ between
     # the interrupt enable/state/test registers.
@@ -292,13 +267,12 @@ def gen_const_interrupts(outstr: TextIO,
 
     genout(outstr, format_comment(first_line("Common Interrupt Offsets")))
     for intr in block.interrupts:
-        gen_interrupt_field(outstr, intr, component, regwidth, existing_defines)
+        gen_interrupt_field(outstr, intr, component, regwidth,
+                            existing_defines)
     genout(outstr, '\n')
 
 
-def gen_rust(block: IpBlock,
-             outfile: TextIO,
-             src_lic: Optional[str],
+def gen_rust(block: IpBlock, outfile: TextIO, src_lic: Optional[str],
              src_copy: str) -> int:
     rnames = block.get_rnames()
 
@@ -317,24 +291,25 @@ def gen_rust(block: IpBlock,
     for rb in block.reg_blocks.values():
         for x in rb.entries:
             if isinstance(x, Register):
-                gen_const_register(outstr, x, block.name, block.regwidth, rnames,
-                                   existing_defines)
+                gen_const_register(outstr, x, block.name, block.regwidth,
+                                   rnames, existing_defines)
                 continue
 
             if isinstance(x, MultiRegister):
-                gen_const_multireg(outstr, x, block.name, block.regwidth, rnames,
-                                   existing_defines)
+                gen_const_multireg(outstr, x, block.name, block.regwidth,
+                                   rnames, existing_defines)
                 continue
 
             if isinstance(x, Window):
-                gen_const_window(outstr, x, block.name, block.regwidth,
-                                 rnames, existing_defines)
+                gen_const_window(outstr, x, block.name, block.regwidth, rnames,
+                                 existing_defines)
                 continue
 
     generated = outstr.getvalue()
     outstr.close()
 
-    genout(outfile, '// Generated register constants for ' + block.name + '\n\n')
+    genout(outfile,
+           '// Generated register constants for ' + block.name + '\n\n')
     if src_copy != '':
         genout(outfile, '// Copyright information found in source file:\n')
         genout(outfile, '// ' + src_copy + '\n\n')
@@ -358,7 +333,7 @@ def test_gen_const() -> None:
     assert (gen_const(outstr, 'MACRO', 'NAME', 10, set()) == basic_oneline)
 
     long_macro_name = 'A_VERY_VERY_VERY_VERY_VERY_VERY_VERY_VERY_VERY_VERY_VERY_LONG_MACRO_NAME'
-    multiline = ('pub const ' + long_macro_name + ' \\\n' +
-                 '  1000000000;\n')
+    multiline = ('pub const ' + long_macro_name + ' \\\n  1000000000;\n')
 
-    assert (gen_const(outstr, long_macro_name, '', 1000000000, set()) == multiline)
+    assert (gen_const(outstr, long_macro_name, '', 1000000000,
+                      set()) == multiline)

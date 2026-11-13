@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""Command-line tool to validate and convert register hjson
@@ -9,11 +9,16 @@ import argparse
 import logging as log
 import re
 import sys
-from pathlib import PurePath
+from pathlib import Path
 
-from reggen import (gen_cheader, gen_dv, gen_fpv, gen_html,
-                    gen_json, gen_rtl, gen_rust, gen_selfdoc, version)
+from reggen import (
+    gen_cfg_md, gen_cheader, gen_dv, gen_fpv, gen_md, gen_html, gen_json, gen_rtl,
+    gen_rust, gen_sec_cm_testplan, gen_selfdoc, systemrdl_exporter, gen_tock, version,
+    vendor_specific
+)
 from reggen.ip_block import IpBlock
+
+import version_file
 
 DESC = """regtool, generate register info from Hjson source"""
 
@@ -41,7 +46,17 @@ def main():
                         help='input file in Hjson type')
     parser.add_argument('-d',
                         action='store_true',
-                        help='Output register documentation (html)')
+                        help='Output register documentation (markdown)')
+    parser.add_argument('-a',
+                        '--alias',
+                        type=Path,
+                        default=None,
+                        help='Alias register file in Hjson type')
+    parser.add_argument('-S',
+                        '--scrub',
+                        default=False,
+                        action='store_true',
+                        help='Scrub alias register definition')
     parser.add_argument('--cdefines',
                         '-D',
                         action='store_true',
@@ -50,9 +65,18 @@ def main():
                         '-R',
                         action='store_true',
                         help='Output Rust constants')
+    parser.add_argument('--tock',
+                        action='store_true',
+                        help='Output Tock constants')
+    parser.add_argument('--interfaces',
+                        action='store_true',
+                        help='Output interfaces documentation (markdown)')
+    parser.add_argument('--doc-html-old',
+                        action='store_true',
+                        help='Output html documentation (depreciated)')
     parser.add_argument('--doc',
                         action='store_true',
-                        help='Output source file documentation (gfm)')
+                        help='Output source file documentation (markdown)')
     parser.add_argument('-j',
                         action='store_true',
                         help='Output as formatted JSON')
@@ -60,9 +84,15 @@ def main():
     parser.add_argument('-r',
                         action='store_true',
                         help='Output as SystemVerilog RTL')
+    parser.add_argument('--sec-cm-testplan',
+                        action='store_true',
+                        help='Generate security countermeasures testplan.')
     parser.add_argument('-s',
                         action='store_true',
                         help='Output as UVM Register class')
+    parser.add_argument('--systemrdl',
+                        action='store_true',
+                        help='Output a SystemRDL description')
     parser.add_argument('-f',
                         action='store_true',
                         help='Output as FPV CSR rw assertion module')
@@ -70,10 +100,11 @@ def main():
                         '-t',
                         help='Target directory for generated RTL; '
                         'tool uses ../rtl if blank.')
-    parser.add_argument('--dv-base-prefix',
-                        default='dv_base',
-                        help='Prefix for the DV register classes from which '
-                        'the register models are derived.')
+    parser.add_argument(
+        '--dv-base-names',
+        nargs="+",
+        help='Names or prefix for the DV register classes from which '
+        'the register models are derived.')
     parser.add_argument('--outfile',
                         '-o',
                         type=argparse.FileType('w'),
@@ -83,6 +114,10 @@ def main():
                         '-v',
                         action='store_true',
                         help='Verbose and run validate twice')
+    parser.add_argument('--quiet',
+                        '-q',
+                        action='store_true',
+                        help='Log only errors, not warnings')
     parser.add_argument('--param',
                         '-p',
                         type=str,
@@ -100,40 +135,67 @@ def main():
     parser.add_argument('--novalidate',
                         action='store_true',
                         help='Skip validate, just output json')
+    parser.add_argument('--node',
+                        '-n',
+                        type=str,
+                        default="",
+                        help='''Regblock node to generate.
+                                By default, generate for all nodes.
+                                ''')
+    parser.add_argument(
+        '--version-stamp',
+        type=str,
+        default=None,
+        help=
+        'If version stamping, the location of workspace version stamp file.')
+
+    parser.add_argument('--vendor-specific-fields',
+                        type=str,
+                        default=None,
+                        help='A hjson file describing vendor defined fields.')
 
     args = parser.parse_args()
+
+    vendor_specific.extend_optional_fields(args.vendor_specific_fields)
 
     if args.version:
         version.show_and_exit(__file__, ["Hjson", "Mako"])
 
+    log_format = "%(filename)s:%(lineno)d: %(levelname)s: %(message)s"
     verbose = args.verbose
-    if (verbose):
-        log.basicConfig(format="%(levelname)s: %(message)s", level=log.DEBUG)
+    if verbose:
+        log.basicConfig(format=log_format, level=log.DEBUG)
+    elif args.quiet:
+        log.basicConfig(format=log_format, level=log.ERROR)
     else:
-        log.basicConfig(format="%(levelname)s: %(message)s")
+        log.basicConfig(format=log_format)
 
-    # Entries are triples of the form (arg, (format, dirspec)).
+    # Entries are triples of the form (arg, (fmt, dirspec)).
     #
-    # arg is the name of the argument that selects the format. format is the
+    # arg is the name of the argument that selects the format. fmt is the
     # name of the format. dirspec is None if the output is a single file; if
     # the output needs a directory, it is a default path relative to the source
     # file (used when --outdir is not given).
     arg_to_format = [('j', ('json', None)), ('c', ('compact', None)),
-                     ('d', ('html', None)), ('doc', ('doc', None)),
+                     ('d', ('registers', None)), ('doc', ('doc', None)),
                      ('r', ('rtl', 'rtl')), ('s', ('dv', 'dv')),
                      ('f', ('fpv', 'fpv/vip')), ('cdefines', ('cdh', None)),
-                     ('rust', ('rs', None))]
-    format = None
+                     ('sec_cm_testplan', ('sec_cm_testplan', 'data')),
+                     ('rust', ('rs', None)), ('tock', ('trs', None)),
+                     ('interfaces', ('interfaces', None)),
+                     ('systemrdl', ('systemrdl', None)),
+                     ('doc_html_old', ('doc_html_old', None))]
+    fmt = None
     dirspec = None
     for arg_name, spec in arg_to_format:
         if getattr(args, arg_name):
-            if format is not None:
+            if fmt is not None:
                 log.error('Multiple output formats specified on '
-                          'command line ({} and {}).'.format(format, spec[0]))
+                          'command line ({} and {}).'.format(fmt, spec[0]))
                 sys.exit(1)
-            format, dirspec = spec
-    if format is None:
-        format = 'hjson'
+            fmt, dirspec = spec
+    if fmt is None:
+        fmt = 'hjson'
 
     infile = args.input
 
@@ -145,8 +207,7 @@ def main():
         if len(tokens) != 2:
             raise ValueError('Entry {} in list of parameter defaults to '
                              'apply is {!r}, which is not of the form '
-                             'param=value.'
-                             .format(idx, raw_param))
+                             'param=value.'.format(idx, raw_param))
         params.append((tokens[0], tokens[1]))
 
     # Define either outfile or outdir (but not both), depending on the output
@@ -156,30 +217,33 @@ def main():
     if dirspec is None:
         if args.outdir is not None:
             log.error('The {} format expects an output file, '
-                      'not an output directory.'.format(format))
+                      'not an output directory.'.format(fmt))
             sys.exit(1)
 
         outfile = args.outfile
     else:
         if args.outfile is not sys.stdout:
             log.error('The {} format expects an output directory, '
-                      'not an output file.'.format(format))
+                      'not an output file.'.format(fmt))
             sys.exit(1)
 
         if args.outdir is not None:
             outdir = args.outdir
         elif infile is not sys.stdin:
-            outdir = str(PurePath(infile.name).parents[1].joinpath(dirspec))
+            outdir = str(Path(infile.name).parents[1].joinpath(dirspec))
         else:
             # We're using sys.stdin, so can't infer an output directory name
             log.error(
                 'The {} format writes to an output directory, which '
                 'cannot be inferred automatically if the input comes '
                 'from stdin. Use --outdir to specify it manually.'.format(
-                    format))
+                    fmt))
             sys.exit(1)
 
-    if format == 'doc':
+    # Extract version stamp from file
+    version_stamp = version_file.VersionInformation(args.version_stamp)
+
+    if fmt == 'doc':
         with outfile:
             gen_selfdoc.document(outfile)
         exit(0)
@@ -187,28 +251,46 @@ def main():
     srcfull = infile.read()
 
     try:
-        obj = IpBlock.from_text(srcfull, params, infile.name)
+        obj = IpBlock.from_text(srcfull, params, infile.name, args.node)
     except ValueError as err:
         log.error(str(err))
         exit(1)
 
+    # Parse and validate alias register definitions (this ensures that the
+    # structure of the original register node and the alias register file is
+    # identical).
+    if args.alias is not None:
+        try:
+            obj.alias_from_path(args.scrub, args.alias)
+        except ValueError as err:
+            log.error(str(err))
+            exit(1)
+    else:
+        if args.scrub:
+            raise ValueError('The --scrub argument is only meaningful in '
+                             'combination with the --alias argument')
+
     if args.novalidate:
         with outfile:
-            gen_json.gen_json(obj, outfile, format)
+            gen_json.gen_json(obj, outfile, fmt)
             outfile.write('\n')
     else:
-        if format == 'rtl':
+        if fmt == 'rtl':
             return gen_rtl.gen_rtl(obj, outdir)
-        if format == 'dv':
-            return gen_dv.gen_dv(obj, args.dv_base_prefix, outdir)
-        if format == 'fpv':
+        if fmt == 'sec_cm_testplan':
+            return gen_sec_cm_testplan.gen_sec_cm_testplan(obj, outdir)
+        if fmt == 'dv':
+            return gen_dv.gen_dv(obj, args.dv_base_names, outdir)
+        if fmt == 'fpv':
             return gen_fpv.gen_fpv(obj, outdir)
         src_lic = None
         src_copy = ''
         found_spdx = None
         found_lunder = None
         copy = re.compile(r'.*(copyright.*)|(.*\(c\).*)', re.IGNORECASE)
+        # REUSE-IgnoreStart
         spdx = re.compile(r'.*(SPDX-License-Identifier:.+)')
+        # REUSE-IgnoreEnd
         lunder = re.compile(r'.*(Licensed under.+)', re.IGNORECASE)
         for line in srcfull.splitlines():
             mat = copy.match(line)
@@ -226,14 +308,27 @@ def main():
             src_lic += '\n' + found_spdx
 
         with outfile:
-            if format == 'html':
+            if fmt == 'registers':
+                return gen_md.gen_md(obj, outfile)
+            elif fmt == 'interfaces':
+                # Assumes the registers will be in a file called `registers.md`
+                # and within the same location as the output's destination.
+                # Exposing this as an option would nice to do.
+                return gen_cfg_md.gen_cfg_md(obj, outfile, "registers.md")
+            elif fmt == 'doc_html_old':
                 return gen_html.gen_html(obj, outfile)
-            elif format == 'cdh':
-                return gen_cheader.gen_cdefines(obj, outfile, src_lic, src_copy)
-            elif format == 'rs':
+            elif fmt == 'cdh':
+                return gen_cheader.gen_cdefines(obj, outfile, src_lic,
+                                                src_copy)
+            elif fmt == 'rs':
                 return gen_rust.gen_rust(obj, outfile, src_lic, src_copy)
+            elif fmt == 'trs':
+                return gen_tock.gen_tock(obj, outfile, infile.name, src_lic,
+                                         src_copy, version_stamp)
+            elif fmt == 'systemrdl':
+                return systemrdl_exporter.SystemrdlExporter(obj).export(outfile)
             else:
-                return gen_json.gen_json(obj, outfile, format)
+                return gen_json.gen_json(obj, outfile, fmt)
 
             outfile.write('\n')
 

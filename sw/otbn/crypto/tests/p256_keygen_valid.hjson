@@ -1,0 +1,47 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+{
+  /**
+   * @param[out] dmem[d0]: First share of secret key.
+   * @param[out] dmem[d1]: Second share of secret key.
+   * @param[out]  dmem[x]: Public key x-coordinate.
+   * @param[out]  dmem[y]: Public key y-coordinate.
+   */
+
+  "input": {
+    "dmem": {
+      "mode": "0x00000497"  # MODE_KEYGEN
+    }
+  }
+  "output": {
+    "dmem": {
+      # Verified that (x, y) == (d0 + d1) * G:
+      # >>> from ecdsa import NIST256p
+      # >>> n = NIST256p.order
+      # >>> G = NIST256p.generator
+      # >>> x = 0xd4c1f0fde9bf65f5f358f35f3df790b8b0d07771399df9ec9ecccf4cd808540b
+      # >>> y = 0xf1d9ee24374b72ea560e96f8ca90b4e25156bfa66bc44d25504b49e19fcc29e9
+      # >>> d0 = 0x602b3ff59f5862ef4f93c1a903390c5b75e6163aa1aca785209e98db46f41c264b984022c4476a57
+      # >>> d1 = 0xda8e40616087ec109027d691f91478a1034110f59d3d2cac0883e167ee45dee620d5c75f66de749c
+      # >>> P = ((d0 + d1) % n) * G
+      # >>> P.x() == x and P.y() == y
+      "x": "0xd4c1f0fde9bf65f5f358f35f3df790b8b0d07771399df9ec9ecccf4cd808540b"
+      "y": "0xf1d9ee24374b72ea560e96f8ca90b4e25156bfa66bc44d25504b49e19fcc29e9"
+
+      "d0":
+        '''
+          0x000000000000000000000000000000000000000000000000602b3ff59f5862ef
+            4f93c1a903390c5b75e6163aa1aca785209e98db46f41c264b984022c4476a57
+
+        '''
+
+      "d1":
+        '''
+          0x000000000000000000000000000000000000000000000000da8e40616087ec10
+            9027d691f91478a1034110f59d3d2cac0883e167ee45dee620d5c75f66de749c
+        '''
+    }
+  }
+}

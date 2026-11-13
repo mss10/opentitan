@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,14 +12,14 @@ from ..config import Config
 from ..program import ProgInsn, Program
 from ..model import Model
 from ..snippet import Snippet
-from ..snippet_gen import GenCont, GenRet, SimpleGenRet
+from ..snippet_gen import GenCont, GenRet
 
 
 class LoopDupEndInner(Loop):
     '''The generator used by LoopDupEnd to make the inner loop'''
     def __init__(self, cfg: Config, insns_file: InsnsFile) -> None:
         super().__init__(cfg, insns_file)
-        self.loop_end_stack = []  # type: List[int]
+        self.loop_end_stack: List[int] = []
 
     def gen_with_end(self,
                      loop_end: int,
@@ -90,7 +90,7 @@ class LoopDupEnd(Loop):
                   bogus_insn: ProgInsn,
                   cont: GenCont,
                   model: Model,
-                  program: Program) -> Optional[SimpleGenRet]:
+                  program: Program) -> Optional[GenRet]:
         loop_end = model.pc + 4 * (bodysize - 1)
         cont = cont
         self.stack.append((loop_end, cont))
@@ -105,7 +105,7 @@ class LoopDupEnd(Loop):
                   num_insns: int,
                   model: Model,
                   program: Program) -> Optional[Tuple[Snippet, Model]]:
-        # Overriden from base class. The Loop generator derives a loop body as
+        # Overridden from base class. The Loop generator derives a loop body as
         # some (possibly empty) free-form "head" part, followed by a sled of
         # straight-line instructions. Here, we override the "sled generation"
         # and insert another loop, carefully crafted to collide with the end
@@ -124,8 +124,7 @@ class LoopDupEnd(Loop):
         if ret is None:
             return None
 
-        snippet, done, model = ret
-        assert not done
+        snippet, model = ret
 
         # Add a bogus extra copy of the loop end address to model's loop stack
         # here. Then Loop's _gen_body implementation will pop the top one off,

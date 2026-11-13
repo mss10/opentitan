@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -8,53 +8,80 @@ module tb;
   import dv_utils_pkg::*;
   import csrng_env_pkg::*;
   import csrng_test_pkg::*;
+  import prim_mubi_pkg::*;
+  import csrng_reg_pkg::NumApps;
 
   // macro includes
   `include "uvm_macros.svh"
   `include "dv_macros.svh"
 
-  wire clk, rst_n, devmode;
-  wire intr_cmd_req_done;
-  wire intr_entropy_req;
-  wire intr_hw_inst_exc;
-  wire intr_cs_fatal_err;
-  wire [NUM_MAX_INTERRUPTS-1:0] interrupts;
-  wire [7:0]                    otp_en_cs_sw_app_read;
-  csrng_pkg::csrng_req_t [NUM_HW_APPS-1:0] csrng_cmd_req;
-  csrng_pkg::csrng_rsp_t [NUM_HW_APPS-1:0] csrng_cmd_rsp;
+  // CSRNG has a "software app" for random numbers that are read over TLUL, then zero or more
+  // "hardware apps" which each have a connection through csrng_cmd_i / csrng_cmd_o.
+  //
+  // This number of apps isn't passed as a parameter to the design because each app has associated
+  // registers, which need auto-generating by reggen. However, the design exposes the number of apps
+  // (both HW and SW) as csrng_reg_pkg::NumApps.
+  //
+  // This value should be positive. Define NumHwApps locally because several things depend on that
+  // (such as the width of the csrng_cmd_i/o ports).
+  localparam int unsigned NumHwApps = (NumApps > 0) ? NumApps - 1 : 0;
+
+  // Check that NumApps really was positive. Also, check that NumHwApps matches the corresponding
+  // parameter in the dut.
+  initial begin
+    if (NumApps <= 0)
+      `uvm_error("tb", "NumApps should be strictly positive.")
+
+    if (NumHwApps != dut.NumHwApps)
+      `uvm_error("tb", "NumHwApps from dut doesn't match the value inferred from csrng_reg_pkg.")
+  end
+
+  wire   clk, rst_n;
+  wire   edn_disable, entropy_src_disable;
+  wire   intr_cmd_req_done;
+  wire   intr_entropy_req;
+  wire   intr_hw_inst_exc;
+  wire   intr_cs_fatal_err;
+  wire[NUM_MAX_INTERRUPTS-1:0]          interrupts;
+  wire[MuBi4Width - 1:0]                lc_hw_debug_en;
+  csrng_pkg::csrng_req_t[NumHwApps-1:0] csrng_cmd_req;
+  csrng_pkg::csrng_rsp_t[NumHwApps-1:0] csrng_cmd_rsp;
 
   // interfaces
   clk_rst_if clk_rst_if(.clk(clk), .rst_n(rst_n));
   pins_if#(NUM_MAX_INTERRUPTS) intr_if(interrupts);
-  pins_if#(1) devmode_if(devmode);
-  pins_if#(8) otp_en_cs_sw_app_read_if(otp_en_cs_sw_app_read);
+  pins_if#(MuBi4Width) lc_hw_debug_en_if(lc_hw_debug_en);
   tl_if tl_if(.clk(clk), .rst_n(rst_n));
-  csrng_if  csrng_if[NUM_HW_APPS](.clk(clk), .rst_n(rst_n));
+  csrng_if  csrng_if[NumHwApps](.clk(clk), .rst_n(edn_disable === 1'b1 ? 1'b0 : rst_n));
+  csrng_agents_if csrng_agents_if();
   push_pull_if#(.HostDataWidth(entropy_src_pkg::FIPS_CSRNG_BUS_WIDTH))
-      entropy_src_if(.clk(clk), .rst_n(rst_n));
+      entropy_src_if(.clk(clk), .rst_n(entropy_src_disable === 1'b1 ? 1'b0 : rst_n));
+  csrng_path_if csrng_path_if (.csrng_cmd_i(csrng_cmd_i));
 
-//  assign otp_en_csrng_sw_app_read = 1 ? otp_ctrl_pkg::Enabled : '0;
-  `DV_ALERT_IF_CONNECT
+  bind dut csrng_assert_if csrng_assert_if (.csrng_cmd_i(csrng_cmd_i));
+
+  // All CSRNG-EDN interfaces (and therefore EDN agents) can currently only be disabled together.
+  assign edn_disable = csrng_agents_if.edn_disable;
+  assign entropy_src_disable = csrng_agents_if.entropy_src_disable;
+
+  `DV_ALERT_IF_CONNECT()
 
   // dut
-  csrng#(.NHwApps(NUM_HW_APPS)) dut (
+  csrng#(.RndCnstCsKeymgrDivNonProduction(LC_HW_DEBUG_EN_ON_DATA),
+         .RndCnstCsKeymgrDivProduction(LC_HW_DEBUG_EN_OFF_DATA))
+  dut (
     .clk_i                      (clk      ),
     .rst_ni                     (rst_n    ),
 
     .tl_i                       (tl_if.h2d),
     .tl_o                       (tl_if.d2h),
 
-    .otp_en_csrng_sw_app_read_i (otp_en_cs_sw_app_read),
-
-    .lc_hw_debug_en_i           (lc_ctrl_pkg::On),
+    .lc_hw_debug_en_i           (lc_ctrl_pkg::lc_tx_t'(lc_hw_debug_en)),
 
     .entropy_src_hw_if_o        (entropy_src_if.req),
     .entropy_src_hw_if_i        ({entropy_src_if.ack, entropy_src_if.d_data[entropy_src_pkg::
                                   CSRNG_BUS_WIDTH-1:0], entropy_src_if.d_data[entropy_src_pkg::
                                   CSRNG_BUS_WIDTH]}),
-
-    .cs_aes_halt_i              (1'b0),
-    .cs_aes_halt_o              (),
 
     .csrng_cmd_i                (csrng_cmd_req),
     .csrng_cmd_o                (csrng_cmd_rsp),
@@ -68,7 +95,7 @@ module tb;
     .intr_cs_fatal_err_o        (intr_cs_fatal_err)
   );
 
-  for (genvar i = 0; i < NUM_HW_APPS; i++) begin : gen_csrng_if
+  for (genvar i = 0; i < NumHwApps; i++) begin : gen_csrng_if
     assign csrng_cmd_req[i]    = csrng_if[i].cmd_req;
     assign csrng_if[i].cmd_rsp = csrng_cmd_rsp[i];
     initial begin
@@ -83,19 +110,30 @@ module tb;
   assign interrupts[FifoErr]    = intr_cs_fatal_err;
 
   initial begin
+    uvm_config_db#(int unsigned)::set(null, "uvm_test_top", "num_hw_apps", dut.NumHwApps);
+
     // Drive clk and rst_n from clk_if
     clk_rst_if.set_active();
     uvm_config_db#(virtual clk_rst_if)::set(null, "*.env", "clk_rst_vif", clk_rst_if);
     uvm_config_db#(intr_vif)::set(null, "*.env", "intr_vif", intr_if);
-    uvm_config_db#(devmode_vif)::set(null, "*.env", "devmode_vif", devmode_if);
-    uvm_config_db#(virtual pins_if#(8))::set(null, "*.env", "otp_en_cs_sw_app_read_vif",
-        otp_en_cs_sw_app_read_if);
+    uvm_config_db#(virtual pins_if#(MuBi4Width))::set(null, "*.env", "lc_hw_debug_en_vif",
+        lc_hw_debug_en_if);
     uvm_config_db#(virtual tl_if)::set(null, "*.env.m_tl_agent*", "vif", tl_if);
     uvm_config_db#(virtual push_pull_if#(.HostDataWidth(entropy_src_pkg::FIPS_CSRNG_BUS_WIDTH)))::
       set(null, "*.env.m_entropy_src_agent*", "vif", entropy_src_if);
-    uvm_config_db#(virtual csrng_cov_if)::set(null, "*.env", "csrng_cov_if", dut.u_csrng_cov_if );
+    uvm_config_db#(virtual csrng_cov_if)::set(null, "*.env", "csrng_cov_if", dut.u_csrng_cov_if);
+    uvm_config_db#(virtual csrng_assert_if)::set(null, "*.env", "csrng_assert_vif",
+                                                 dut.csrng_assert_if);
+    uvm_config_db#(virtual csrng_path_if)::set(null, "*.env", "csrng_path_vif", csrng_path_if);
+    uvm_config_db#(virtual csrng_agents_if)::set(null, "*.env", "csrng_agents_vif",
+                                                 csrng_agents_if);
     $timeformat(-12, 0, " ps", 12);
     run_test();
   end
+
+  // Assertion controls
+  `DV_ASSERT_CTRL("EntropySrcIf_ReqHighUntilAck_A_CTRL", entropy_src_if.ReqHighUntilAck_A)
+  `DV_ASSERT_CTRL("EntropySrcIf_AckAssertedOnlyWhenReqAsserted_A_CTRL",
+                  entropy_src_if.AckAssertedOnlyWhenReqAsserted_A)
 
 endmodule

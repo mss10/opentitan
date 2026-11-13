@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -31,6 +31,8 @@ class xbar_env_cfg extends dv_base_env_cfg;
   uint               min_device_rsp_delay = 0;
   uint               max_device_rsp_delay = 20;
 
+  // option to run short iteration
+  bit short_xbar_test = 0;
   `uvm_object_utils_begin(xbar_env_cfg)
     `uvm_field_array_object(host_agent_cfg,    UVM_DEFAULT)
     `uvm_field_array_object(device_agent_cfg,  UVM_DEFAULT)
@@ -40,9 +42,9 @@ class xbar_env_cfg extends dv_base_env_cfg;
 
   `uvm_object_new
 
-  virtual function void initialize(bit [TL_AW-1:0] csr_base_addr = '1);
+  virtual function void initialize(bit inherit_ral_models = 1'b0);
     is_initialized = 1'b1;
-    ral_model_names = {}; // no csr in xbar
+    ral_model_names.delete(); // no csr in xbar
     // Host TL agent cfg
     num_hosts             = xbar_hosts.size();
     num_enabled_hosts     = xbar_hosts.size();

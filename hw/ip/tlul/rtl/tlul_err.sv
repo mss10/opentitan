@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -32,8 +32,11 @@ module tlul_err import tlul_pkg::*; (
   assign instr_wr_err = prim_mubi_pkg::mubi4_test_true_strict(tl_i.a_user.instr_type) &
                         (op_full | op_partial);
 
+  logic instr_type_err;
+  assign instr_type_err = prim_mubi_pkg::mubi4_test_invalid(tl_i.a_user.instr_type);
+
   // Anything that doesn't fall into the permitted category, it raises an error
-  assign err_o = ~(opcode_allowed & a_config_allowed) | instr_wr_err;
+  assign err_o = ~(opcode_allowed & a_config_allowed) | instr_wr_err | instr_type_err;
 
   // opcode check
   assign opcode_allowed = (tl_i.a_opcode == PutFullData)
@@ -45,9 +48,10 @@ module tlul_err import tlul_pkg::*; (
   logic mask_chk;       // inactive lane a_mask check
   logic fulldata_chk;   // PutFullData should have size match to mask
 
+  localparam bit [MW-1:0] MaskOne = 1;
   logic [MW-1:0] mask;
 
-  assign mask = (1 << tl_i.a_address[SubAW-1:0]);
+  assign mask = MaskOne << tl_i.a_address[SubAW-1:0];
 
   always_comb begin
     addr_sz_chk  = 1'b0;
@@ -82,10 +86,6 @@ module tlul_err import tlul_pkg::*; (
           fulldata_chk = 1'b0;
         end
       endcase
-    end else begin
-      addr_sz_chk  = 1'b0;
-      mask_chk     = 1'b0;
-      fulldata_chk = 1'b0;
     end
   end
 

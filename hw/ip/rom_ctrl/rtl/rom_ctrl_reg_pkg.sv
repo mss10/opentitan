@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -11,7 +11,14 @@ package rom_ctrl_reg_pkg;
 
   // Address widths within the block
   parameter int RegsAw = 7;
-  parameter int RomAw = 15;
+
+  // Number of registers for every interface
+  parameter int NumRegsRegs = 18;
+
+  // Alert indices
+  typedef enum int {
+    AlertFatalIdx = 0
+  } rom_ctrl_alert_idx_t;
 
   ///////////////////////////////////////////////
   // Typedefs for registers for regs interface //
@@ -34,11 +41,11 @@ package rom_ctrl_reg_pkg;
     struct packed {
       logic        d;
       logic        de;
-    } checker_error;
+    } integrity_error;
     struct packed {
       logic        d;
       logic        de;
-    } integrity_error;
+    } checker_error;
   } rom_ctrl_hw2reg_fatal_alert_cause_reg_t;
 
   typedef struct packed {
@@ -86,8 +93,9 @@ package rom_ctrl_reg_pkg;
   parameter logic [RegsAw-1:0] ROM_CTRL_EXP_DIGEST_7_OFFSET = 7'h 44;
 
   // Reset values for hwext registers and their fields for regs interface
-  parameter logic [0:0] ROM_CTRL_ALERT_TEST_RESVAL = 1'h 0;
+  parameter logic [31:0] ROM_CTRL_ALERT_TEST_RESVAL = 32'h 80000000;
   parameter logic [0:0] ROM_CTRL_ALERT_TEST_FATAL_RESVAL = 1'h 0;
+  parameter logic [0:0] ROM_CTRL_ALERT_TEST_REGWEN_RESVAL = 1'h 1;
 
   // Register index for regs interface
   typedef enum int {
@@ -113,7 +121,7 @@ package rom_ctrl_reg_pkg;
 
   // Register width information to check illegal writes for regs interface
   parameter logic [3:0] ROM_CTRL_REGS_PERMIT [18] = '{
-    4'b 0001, // index[ 0] ROM_CTRL_ALERT_TEST
+    4'b 1111, // index[ 0] ROM_CTRL_ALERT_TEST
     4'b 0001, // index[ 1] ROM_CTRL_FATAL_ALERT_CAUSE
     4'b 1111, // index[ 2] ROM_CTRL_DIGEST_0
     4'b 1111, // index[ 3] ROM_CTRL_DIGEST_1
@@ -133,9 +141,4 @@ package rom_ctrl_reg_pkg;
     4'b 1111  // index[17] ROM_CTRL_EXP_DIGEST_7
   };
 
-  // Window parameters for rom interface
-  parameter logic [RomAw-1:0] ROM_CTRL_ROM_OFFSET = 15'h 0;
-  parameter int unsigned      ROM_CTRL_ROM_SIZE   = 'h 8000;
-
 endpackage
-

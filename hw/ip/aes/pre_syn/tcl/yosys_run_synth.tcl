@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -21,20 +21,58 @@ yosys "read_verilog -sv $lr_synth_out_dir/generated/*.v"
 # You can use
 #    yosys "chparam -list $lr_synth_top_module"
 # To print the available parameters.
-if { $lr_synth_top_module != "aes_sbox" } {
+# For an unknown reason, synthesis of the aes_ghash module fails with an error if we try to set any top-level paramaters.
+if { $lr_synth_top_module != "aes_sbox" && $lr_synth_top_module != "aes_sub_bytes" && $lr_synth_top_module != "aes_reduced_round" && $lr_synth_top_module != "aes_ghash" && $lr_synth_top_module != "aes_ghash_wrap"} {
   yosys "chparam -set AES192Enable $lr_synth_aes_192_enable $lr_synth_top_module"
-  yosys "chparam -set Masking $lr_synth_masking $lr_synth_top_module"
+  yosys "chparam -set SecMasking $lr_synth_sec_masking $lr_synth_top_module"
 }
-yosys "chparam -set SBoxImpl $lr_synth_s_box_impl $lr_synth_top_module"
+if { $lr_synth_top_module != "aes_ghash" && $lr_synth_top_module != "aes_ghash_wrap"} {
+  yosys "chparam -set SecSBoxImpl $lr_synth_sec_s_box_impl $lr_synth_top_module"
+}
 
-# Remap Xilinx Vivado "keep" attributes to Yosys style.
-yosys "attrmap -tocase keep -imap keep=\"true\" keep=1 -imap keep=\"false\" keep=0 -remove keep=0"
+# Remap Xilinx Vivado "dont_touch" attributes to Yosys "keep" attributes.
+yosys "attrmap -tocase keep -imap dont_touch=\"yes\" keep=1 -imap dont_touch=\"no\" keep=0 -remove keep=0"
+
+# Place keep_hierarchy constraints on relevant modules to prevent aggressive synthesis optimizations
+# across the boundaries of these modules.
+yosys "hierarchy -check -top $lr_synth_top_module"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_and2*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_buf*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_clock*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_flop*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_xnor2*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_xor2*"
+yosys "setattr -mod -set keep_hierarchy 1 *aes_*_fsm_p*"
+yosys "setattr -mod -set keep_hierarchy 1 *aes_*_fsm_n*"
 
 # Synthesize.
-yosys "synth $flatten_opt -top $lr_synth_top_module"
+yosys "synth -nofsm $flatten_opt -top $lr_synth_top_module"
 yosys "opt -purge"
 
 yosys "write_verilog $lr_synth_pre_map_out"
+
+# Remove keep_hierarchy constraints before writing out the netlist for Alma as it doesn't like
+# these constraints.
+yosys "setattr -mod -set keep_hierarchy 0 *prim_and2*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_buf*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_clock*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_flop*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_xnor2*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_xor2*"
+yosys "setattr -mod -set keep_hierarchy 0 *aes_*_fsm_p*"
+yosys "setattr -mod -set keep_hierarchy 0 *aes_*_fsm_n*"
+
+yosys "write_verilog $lr_synth_alma_out"
+
+# Re-add keep_hierarchy constraints for further synthesis steps.
+yosys "setattr -mod -set keep_hierarchy 1 *prim_and2*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_buf*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_clock*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_flop*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_xnor2*"
+yosys "setattr -mod -set keep_hierarchy 1 *prim_xor2*"
+yosys "setattr -mod -set keep_hierarchy 1 *aes_*_fsm_p*"
+yosys "setattr -mod -set keep_hierarchy 1 *aes_*_fsm_n*"
 
 yosys "dfflibmap -liberty $lr_synth_cell_library_path"
 yosys "opt"
@@ -47,7 +85,22 @@ if { $lr_synth_timing_run } {
   yosys "abc -liberty $lr_synth_cell_library_path"
 }
 
-yosys "clean"
+# Remove keep_hierarchy constraints before the final flattening step. We're done optimizing.
+yosys "setattr -mod -set keep_hierarchy 0 *prim_and2*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_buf*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_clock*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_flop*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_xnor2*"
+yosys "setattr -mod -set keep_hierarchy 0 *prim_xor2*"
+yosys "setattr -mod -set keep_hierarchy 0 *aes_*_fsm_p*"
+yosys "setattr -mod -set keep_hierarchy 0 *aes_*_fsm_n*"
+
+# Final flattening.
+if { $lr_synth_flatten } {
+  yosys "flatten"
+}
+
+yosys "clean -purge"
 yosys "write_verilog $lr_synth_netlist_out"
 
 if { $lr_synth_timing_run } {
@@ -62,4 +115,3 @@ yosys "check"
 yosys "log ======== Yosys Stat Report ========"
 yosys "tee -o $lr_synth_out_dir/reports/area.rpt stat -liberty $lr_synth_cell_library_path"
 yosys "log ====== End Yosys Stat Report ======"
-

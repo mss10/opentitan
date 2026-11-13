@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -8,94 +8,79 @@
 // List of Xbar device memory map
 tl_device_t xbar_devices[$] = '{
     '{"uart0", '{
-        '{32'h40000000, 32'h40000fff}
+        '{32'h40000000, 32'h4000003f}
     }},
     '{"uart1", '{
-        '{32'h40010000, 32'h40010fff}
+        '{32'h40010000, 32'h4001003f}
     }},
     '{"uart2", '{
-        '{32'h40020000, 32'h40020fff}
+        '{32'h40020000, 32'h4002003f}
     }},
     '{"uart3", '{
-        '{32'h40030000, 32'h40030fff}
+        '{32'h40030000, 32'h4003003f}
     }},
     '{"i2c0", '{
-        '{32'h40080000, 32'h40080fff}
+        '{32'h40080000, 32'h4008007f}
     }},
     '{"i2c1", '{
-        '{32'h40090000, 32'h40090fff}
+        '{32'h40090000, 32'h4009007f}
     }},
     '{"i2c2", '{
-        '{32'h400a0000, 32'h400a0fff}
+        '{32'h400a0000, 32'h400a007f}
     }},
-    '{"pattgen", '{
-        '{32'h400e0000, 32'h400e0fff}
+    '{"gpio0", '{
+        '{32'h40040000, 32'h400403ff}
     }},
-    '{"pwm_aon", '{
-        '{32'h40450000, 32'h40450fff}
-    }},
-    '{"gpio", '{
-        '{32'h40040000, 32'h40040fff}
+    '{"gpio1", '{
+        '{32'h40050000, 32'h400503ff}
     }},
     '{"spi_device", '{
-        '{32'h40050000, 32'h40051fff}
-    }},
-    '{"spi_host0", '{
-        '{32'h40060000, 32'h40060fff}
-    }},
-    '{"spi_host1", '{
-        '{32'h40070000, 32'h40070fff}
+        '{32'h40060000, 32'h40061fff}
     }},
     '{"rv_timer", '{
-        '{32'h40100000, 32'h40100fff}
+        '{32'h40100000, 32'h401001ff}
     }},
-    '{"usbdev", '{
-        '{32'h40110000, 32'h40110fff}
+    '{"pwrmgr", '{
+        '{32'h40400000, 32'h4040007f}
     }},
-    '{"pwrmgr_aon", '{
-        '{32'h40400000, 32'h40400fff}
+    '{"rstmgr", '{
+        '{32'h40410000, 32'h4041007f}
     }},
-    '{"rstmgr_aon", '{
-        '{32'h40410000, 32'h40410fff}
+    '{"clkmgr", '{
+        '{32'h40420000, 32'h4042007f}
     }},
-    '{"clkmgr_aon", '{
-        '{32'h40420000, 32'h40420fff}
-    }},
-    '{"pinmux_aon", '{
+    '{"pinmux", '{
         '{32'h40460000, 32'h40460fff}
     }},
     '{"otp_ctrl__core", '{
         '{32'h40130000, 32'h40131fff}
     }},
-    '{"otp_ctrl__prim", '{
-        '{32'h40132000, 32'h40132fff}
-    }},
-    '{"lc_ctrl", '{
-        '{32'h40140000, 32'h40140fff}
+    '{"lc_ctrl__regs", '{
+        '{32'h40140000, 32'h401400ff}
     }},
     '{"sensor_ctrl", '{
-        '{32'h40490000, 32'h40490fff}
+        '{32'h40490000, 32'h4049007f}
     }},
     '{"alert_handler", '{
-        '{32'h40150000, 32'h40150fff}
+        '{32'h40150000, 32'h401507ff}
     }},
-    '{"sram_ctrl_ret_aon__regs", '{
-        '{32'h40500000, 32'h40500fff}
+    '{"sram_ctrl_ret__regs", '{
+        '{32'h40500000, 32'h4050003f}
     }},
-    '{"sram_ctrl_ret_aon__ram", '{
-        '{32'h40600000, 32'h40600fff}
+    '{"sram_ctrl_ret__ram", '{
+        '{32'h40600000, 32'h40601fff}
     }},
-    '{"aon_timer_aon", '{
-        '{32'h40470000, 32'h40470fff}
+    '{"aon_timer", '{
+        '{32'h40470000, 32'h4047003f}
     }},
-    '{"sysrst_ctrl_aon", '{
-        '{32'h40430000, 32'h40430fff}
+    '{"sysrst_ctrl", '{
+        '{32'h40430000, 32'h404300ff}
     }},
-    '{"adc_ctrl_aon", '{
-        '{32'h40440000, 32'h40440fff}
+    '{"adc_ctrl", '{
+        '{32'h40440000, 32'h4044007f}
     }},
     '{"ast", '{
-        '{32'h40480000, 32'h40480fff}
+        '{32'h40480000, 32'h404803ff}
 }}};
 
   // List of Xbar hosts
@@ -108,27 +93,22 @@ tl_host_t xbar_hosts[$] = '{
         "i2c0",
         "i2c1",
         "i2c2",
-        "pattgen",
-        "gpio",
+        "gpio0",
+        "gpio1",
         "spi_device",
-        "spi_host0",
-        "spi_host1",
         "rv_timer",
-        "usbdev",
-        "pwrmgr_aon",
-        "rstmgr_aon",
-        "clkmgr_aon",
-        "pinmux_aon",
+        "pwrmgr",
+        "rstmgr",
+        "clkmgr",
+        "pinmux",
         "otp_ctrl__core",
-        "otp_ctrl__prim",
-        "lc_ctrl",
+        "lc_ctrl__regs",
         "sensor_ctrl",
         "alert_handler",
         "ast",
-        "sram_ctrl_ret_aon__ram",
-        "sram_ctrl_ret_aon__regs",
-        "aon_timer_aon",
-        "adc_ctrl_aon",
-        "sysrst_ctrl_aon",
-        "pwm_aon"}}
+        "sram_ctrl_ret__ram",
+        "sram_ctrl_ret__regs",
+        "aon_timer",
+        "adc_ctrl",
+        "sysrst_ctrl"}}
 };

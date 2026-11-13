@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,7 @@ lint_off -rule DECLFILENAME -file "*/src/dm_pkg.sv" -match "Filename 'dm_pkg' do
 
 // Waive some unused bits warnings in dm_pkg.sv. These are in parameters to
 // functions used for encoding RISC-V instructions.
-lint_off -rule UNUSED -file "*/src/dm_pkg.sv" -match "Bits of signal are not used: 'imm'[0]"
+lint_off -rule UNUSED -file "*/src/dm_pkg.sv" -match "Bits of *are not used: 'imm'[0]"
 
 // The dm_sba package doesn't use its dmactive_i input directly: it uses the
 // input because that's used by an assertion that gets bound in to the dm_sba
@@ -50,6 +50,27 @@ lint_off -rule UNUSED -file "*/src/dm_mem.sv" -match "Bits of signal are not use
 // the "resp" field.
 lint_off -rule UNUSED -file "*/src/dmi_jtag.sv" -match "Bits of signal are not used: 'dmi_resp'[1:0]"
 
-// In debug_rom.sv, the addr_i input is a full 64-bit address. We only
+// In debug_rom.sv and debug_rom_cheriot.sv, the addr_i input is a full 64-bit address. We only
 // use bits 7:3; waive the others.
 lint_off -rule UNUSED -file "*/debug_rom/debug_rom.sv" -match "Bits of signal are not used: 'addr_i'[63:8,2:0]"
+lint_off -rule UNUSED -file "*/debug_rom/debug_rom_cheriot.sv" -match "Bits of signal are not used: 'addr_i'[63:8,2:0]"
+
+// Waive a warning where we're subtracting an undecorated integer from a bit-vector with fixed
+// width.
+lint_off -rule WIDTH -file "*/src/dm_mem.sv" -match "*SUB expects 32 bits*'DataCount' generates 4 bits."
+
+// Subtraction between two part selects. Oddly, these look like they are actually the same size so
+// this might actually be Verilator doing something a bit strange.
+lint_off -rule WIDTH -file "*/src/dm_mem.sv" -match "*SUB expects 32*but*SEL*10 bits."
+
+// Avoid a warning about address truncation. These addresses are both derived
+// from the 64-bit dm::HaltAddress. They get assigned to something with
+// DbgAddressBits (12) bits. Both HaltAddress and DbgAddressBits come from the
+// original code (neither is a parameter that is being passed in from
+// OpenTitan)
+lint_off -rule WIDTH -file "*/src/dm_mem.sv" -match "Operator VAR 'Rom*Addr' expects 12 bits*generates 64 bits."
+
+// Avoid a warning about widths from a line that computes with "ABC / 2" rather
+// than "ABC >> 1". Verilator doesn't infer that the widths will fit in the way
+// the author expects.
+lint_off -rule WIDTH -file "*/src/dm_mem.sv" -match "Operator DIV expects 32 bits*ProgBufSize*5 bits."

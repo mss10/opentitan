@@ -1,11 +1,10 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 import random
 from typing import Optional
 
-from shared.operand import ImmOperandType, RegOperandType, OptionOperandType
 from shared.insn_yaml import Insn, InsnsFile
 
 from ..config import Config
@@ -33,78 +32,9 @@ class BadLoadStore(SnippetGen):
         self.weights = []
 
         self.lw = self._get_named_insn(insns_file, 'lw')
-
-        # LW has three operands: grd, offset, grs
-        if not (len(self.lw.operands) == 3 and
-                isinstance(self.lw.operands[0].op_type, RegOperandType) and
-                self.lw.operands[0].op_type.reg_type == 'gpr' and
-                self.lw.operands[0].op_type.is_dest() and
-                isinstance(self.lw.operands[1].op_type, ImmOperandType) and
-                isinstance(self.lw.operands[2].op_type, RegOperandType) and
-                self.lw.operands[2].op_type.reg_type == 'gpr' and
-                not self.lw.operands[2].op_type.is_dest()):
-            raise RuntimeError('LW instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
-
         self.sw = self._get_named_insn(insns_file, 'sw')
-
-        # SW Instruction Checks
-        # SW has three operands: grs1, offset, grs2
-        if not (len(self.sw.operands) == 3 and
-                isinstance(self.sw.operands[0].op_type, RegOperandType) and
-                self.sw.operands[0].op_type.reg_type == 'gpr' and
-                not self.sw.operands[0].op_type.is_dest() and
-                isinstance(self.sw.operands[1].op_type, ImmOperandType) and
-                isinstance(self.sw.operands[2].op_type, RegOperandType) and
-                self.sw.operands[2].op_type.reg_type == 'gpr' and
-                not self.sw.operands[2].op_type.is_dest()):
-            raise RuntimeError('SW instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
-
         self.bnlid = self._get_named_insn(insns_file, 'bn.lid')
-
-        # BN.LID Instruction Checks
-        # bn.lid expects the operands: grd, grs1, offset, grs1_inc, grd_inc
-        if len(self.bnlid.operands) != 5:
-            raise RuntimeError('Unexpected number of operands for bn.lid')
-
-        if not (isinstance(self.bnlid.operands[0].op_type, RegOperandType) and
-                (self.bnlid.operands[0].op_type.reg_type == 'gpr' and
-                not self.bnlid.operands[0].op_type.is_dest() and
-                isinstance(self.bnlid.operands[1].op_type, RegOperandType) and
-                self.bnlid.operands[1].op_type.reg_type == 'gpr' and
-                not self.bnlid.operands[1].op_type.is_dest() and
-                isinstance(self.bnlid.operands[2].op_type, ImmOperandType) and
-                self.bnlid.operands[2].op_type.signed and
-                isinstance(self.bnlid.operands[3].op_type, OptionOperandType) and
-                isinstance(self.bnlid.operands[4].op_type, OptionOperandType))):
-            raise RuntimeError('BN.LID instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
         self.bnsid = self._get_named_insn(insns_file, 'bn.sid')
-
-        # BN.SID Instruction Checks
-
-        # bn.sid expects the operands: grs1, grs2, offset, grs1_inc,
-        # grs2_inc
-        if len(self.bnsid.operands) != 5:
-            raise RuntimeError('Unexpected number of operands for bn.sid')
-
-        if not (isinstance(self.bnsid.operands[0].op_type, RegOperandType) and
-                self.bnsid.operands[0].op_type.reg_type == 'gpr' and
-                not self.bnsid.operands[0].op_type.is_dest() and
-                isinstance(self.bnsid.operands[1].op_type, RegOperandType) and
-                self.bnsid.operands[1].op_type.reg_type == 'gpr' and
-                not self.bnsid.operands[1].op_type.is_dest() and
-                isinstance(self.bnsid.operands[2].op_type, ImmOperandType) and
-                self.bnsid.operands[2].op_type.signed and
-                isinstance(self.bnsid.operands[3].op_type, OptionOperandType) and
-                isinstance(self.bnsid.operands[4].op_type, OptionOperandType)):
-            raise RuntimeError('BN.LID instruction from instructions file is '
-                               'not the shape expected by the BadLoadStore'
-                               'generator.')
 
         for insn in [self.sw, self.bnsid, self.lw, self.bnlid]:
             weight = cfg.insn_weights.get(insn.mnemonic)
@@ -145,7 +75,7 @@ class BadLoadStore(SnippetGen):
         snippet = ProgSnippet(model.pc, [prog_insn])
         snippet.insert_into_program(program)
 
-        return (snippet, True, model)
+        return (snippet, model)
 
     def fill_insn(self, insn: Insn, model: Model) -> Optional[ProgInsn]:
         '''Try to pick one of BN.XID or XW instructions
@@ -256,13 +186,15 @@ class BadLoadStore(SnippetGen):
 
         elif insn.mnemonic == 'sw':
             # Any known register is okay for grs2 operand since it will be
-            # guaranteed to have an out of bounds address to store the value from
-            # We definitely have a known register (x0), so this should never fail
+            # guaranteed to have an out of bounds address to store the value
+            # from We definitely have a known register (x0), so this should
+            # never fail
             op_val_grs2 = random.choice(known_regs)[0]
 
             op_val = [op_val_grs2, offset_val, op_val_grs1]
 
-        return ProgInsn(insn, op_val, ('dmem', 4096))
+        # Emulate OOB by setting the memory address to the memory size
+        return ProgInsn(insn, op_val, ('dmem', model.dmem_size))
 
     def _fill_bn_xid(self, insn: Insn, model: Model) -> Optional[ProgInsn]:
         '''Fill out a BN.LID or BN.SID instruction'''
@@ -279,24 +211,36 @@ class BadLoadStore(SnippetGen):
         # Get known registers
         known_regs = model.regs_with_known_vals('gpr')
 
-        idx, u_val = random.choice(known_regs)
-        val = u_val - (1 << 32) if u_val >> 31 else u_val
-        tgt_addr = random.randrange(val + min_offset, val + max_offset, 32)
+        # Try to find a target address which is OOB and that can be reached with an offset fitting
+        # in the available immediate bits. We help ourself by picking the GPR (supplying the
+        # address) at random and test whether the required offset can be encoded. There cannot be
+        # made a success estimate but there is at least the save solution of picking x0 and a
+        # negative offset. We try for 50 picks and give up if we do not find a solution.
+        idx = None
+        bn_offset_val = None
+        for _ in range(50):
+            idx, u_val = random.choice(known_regs)
+            val = u_val - (1 << 32) if u_val >> 31 else u_val
+            tgt_addr = random.randrange(val + min_offset, val + max_offset, 32)
 
-        # Check if randomized tgt_addr is in OOB region.
-        if tgt_addr >> 12:
+            # Check if randomized tgt_addr is in OOB region. If not, try another one.
+            if 0 <= tgt_addr and tgt_addr < model.dmem_size:
+                continue
+
+            # Compute the required offset immediate
             bn_imm_val = tgt_addr - val
-        # If randomized tgt_addr is not in OOB region, make sure bn_imm_val is
-        # big enough. So that the new resulting tgt_addr will definitely
-        # be in OOB region.
-        else:
-            bn_imm_val = tgt_addr + model.dmem_size - val
 
-        # Check if the final target address is in OOB region
-        assert bn_imm_val + val < 0 or bn_imm_val + val >= model.dmem_size
+            # Try to encode the required offset
+            bn_offset_val = bn_imm_op_type.op_val_to_enc_val(bn_imm_val, model.pc)
 
-        bn_offset_val = bn_imm_op_type.op_val_to_enc_val(bn_imm_val, model.pc)
-        assert bn_offset_val is not None
+            # If we have found a possible offset ensure that immediate will lead to OOB address
+            if bn_offset_val is not None:
+                assert bn_imm_val + val < 0 or bn_imm_val + val >= model.dmem_size
+                break
+
+        # Give up if we haven't found a solution
+        if bn_offset_val is None:
+            return None
 
         # Get the chosen base register index as grs1 operand.
         op_val_grs1 = idx
@@ -305,17 +249,19 @@ class BadLoadStore(SnippetGen):
         if insn.mnemonic == 'bn.lid':
             # Pick grd randomly. Since we can write to any register
             # (including x0) this should always succeed.
-            op_val_grd = model.pick_operand_value(self.bnlid.operands[0].op_type)
+            op_val_grd = model.pick_operand_value(insn.operands[0].op_type)
             assert op_val_grd is not None
 
             op_val = [op_val_grd, op_val_grs1, bn_offset_val, 0, 0]
 
         elif insn.mnemonic == 'bn.sid':
             # Any known register is okay for grs2 operand since it will be
-            # guaranteed to have an out of bounds address to store the value from.
-            # We definitely have a known register (x0), so this should never fail
+            # guaranteed to have an out of bounds address to store the value
+            # from. We definitely have a known register (x0), so this should
+            # never fail
             op_val_grs2 = random.choice(known_regs)[0]
 
             op_val = [op_val_grs1, op_val_grs2, bn_offset_val, 0, 0]
 
-        return ProgInsn(insn, op_val, ('dmem', 4096))
+        # Emulate OOB by setting the memory address to the memory size
+        return ProgInsn(insn, op_val, ('dmem', model.dmem_size))

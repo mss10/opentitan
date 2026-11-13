@@ -1,17 +1,20 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 name: "lowrisc:prim_xilinx:pad_wrapper"
 description: "prim"
+virtual:
+  - lowrisc:prim:pad_wrapper
+
 filesets:
   files_rtl:
     depend:
       - lowrisc:prim:assert
       - lowrisc:prim:pad_wrapper_pkg
     files:
-      - rtl/prim_xilinx_pad_wrapper.sv
+      - rtl/prim_pad_wrapper.sv
     file_type: systemVerilogSource
 
   files_verilator_waiver:

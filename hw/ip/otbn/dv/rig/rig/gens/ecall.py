@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -49,7 +49,7 @@ class ECall(SnippetGen):
             cont: GenCont,
             model: Model,
             program: Program) -> Optional[GenRet]:
-        return (self.gen_at(model.pc, program), True, model)
+        return (self.gen_at(model.pc, program), model)
 
     def pick_weight(self,
                     model: Model,

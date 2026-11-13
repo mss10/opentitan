@@ -1,9 +1,11 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Shift Register for Serial Peripheral Interface (SPI) Host IP.
 //
+
+`include "prim_assert.sv"
 
 module spi_host_shift_register (
   input              clk_i,
@@ -54,7 +56,7 @@ module spi_host_shift_register (
   `ASSERT(SpeedValid, speed_i != RsvdSpd, clk_i, rst_ni)
 
   assign next_bits  = full_cyc_i ? sd_i : sd_i_q;
-  assign sr_shifted = (speed_i == Standard) ? {sr_q[6:0], next_bits[0]} :
+  assign sr_shifted = (speed_i == Standard) ? {sr_q[6:0], next_bits[1]} :
                       (speed_i == Dual)     ? {sr_q[5:0], next_bits[1:0]} :
                       (speed_i == Quad)     ? {sr_q[3:0], next_bits[3:0]} :
                       8'h00;
@@ -62,7 +64,7 @@ module spi_host_shift_register (
   assign sd_o       = (speed_i == Standard) ? {3'b000, sr_q[7]}   :
                       (speed_i == Dual)     ? {2'b00,  sr_q[7:6]} :
                       (speed_i == Quad)     ? {sr_q[7:4]} :
-                      4'h00;
+                      4'h0;
 
   // Buffer the rx_data outputs to simplify three-way flow control
   // between fsm, shift reg and byte_merge.

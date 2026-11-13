@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -31,7 +31,7 @@
   fusesoc_core_:      "{eval_cmd} echo \"{fusesoc_core}\" | tr ':' '_'"
 
   // TODO: switch the tool to dc once the corresponding edalize backend is available
-  sv_flist_gen_opts:  ["--cores-root {proj_root}",
+  sv_flist_gen_opts:  ["--cores-root {proj_root}/hw",
                        "run"
                        "{sv_flist_gen_flags}",
                        "--target={flow}",
@@ -39,16 +39,41 @@
                        "--build-root={build_dir}",
                        "--setup",
                        "{fusesoc_core}"]
+  // The technology-dependent prims and the top-specific cores are virtual, so
+  // a mapping is needed to resolve them.  Partners select a different prim
+  // library by overriding this, or with dvsim's --fusesoc-mapping.
+  sv_flist_gen_flags: ["--mapping=lowrisc:prim_generic:all:0.1"]
+
   sv_flist_gen_dir:   "{build_dir}/syn-icarus"
   sv_flist:           "{sv_flist_gen_dir}/{fusesoc_core_}.scr"
-  sv_flist_gen_flags: ["--flag=fileset_{design_level}"]
 
-  // Common fail patterns.
+  // Can be used to hook in an additional post elab scripting step.
+  post_elab_script: ""
+
+  // By default we run full synthesis including ATP reporting.
+  // This can be overridden with either of the following
+  // values in order to terminate earlier (listed in order):
+  // - "analyze"
+  // - "elab"
+  // - "compile"
+  // - "reports"
+  // Every stage includes the prior stages, and the report parsing script
+  // will expect the associated reports to be available (otherwise an
+  // error will be generated and the flow will fail).
+  termination_stage: "reports"
+
+  // Common pass or fail patterns.
   build_fail_patterns: [// FuseSoC build error
                         "^ERROR:.*$"]
 
   exports: [
-    { syn_root: "{syn_root}" },
-    { foundry_root: "{foundry_root}" },
+    { SYN_ROOT:          "{syn_root}" },
+    { FOUNDRY_ROOT:      "{foundry_root}" },
+    { BUILD_DIR:         "{build_dir}" },
+    { DUT:               "{dut}" },
+    { PARAMS:            "{params}" },
+    { SV_FLIST:          "{sv_flist}" },
+    { POST_ELAB_SCRIPT:  "{post_elab_script}" }
+    { TERMINATION_STAGE: "{termination_stage}" }
   ]
 }

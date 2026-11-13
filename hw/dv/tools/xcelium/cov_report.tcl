@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,9 +8,17 @@
 # exclusion script and the coverage refinement files are passed to the IMC invocation using the
 # -load, -init and -load_refinement switches respectively (whichever ones are applicable).
 
+# Generate "detachable" reports that work despite browser Cross-Origin Request Security protection.
+# They have the downside that you have to select the .report file yourself in-browser.
+config reports.detachable_report_data -set true
+
 # Set the output directory for the reports database using the env var 'cov_report_dir'.
 # The supplied env var may have quotes or spaces that needs to be trimmed.
 set cov_report_dir [string trim $::env(cov_report_dir) " \"'"]
+
+# Set the input merged coverage database directory using the env var 'cov_merge_db_dir'.
+# The supplied env var may have quotes or spaces that needs to be trimmed.
+set cov_merge_db_dir [string trim $::env(cov_merge_db_dir) " \"'"]
 
 # Set the DUT name.
 set dut [string trim $::env(DUT_TOP)]
@@ -25,6 +33,21 @@ report -summary \
   -local off \
   -grading covered \
   -out $cov_report_dir/cov_report.txt
+
+# Generate a detailed exclusion report
+#
+# This is the only place the attribution appears. The HTML report below passes -exclComments as
+# well, but the exported report_data carries the rule kind and nothing else, so the report here is
+# what makes the attribution available. The comment is what tells a UNR exclusion apart from a hand
+# written one, since IMC records both as ordinary refinement rules.
+# This information is useful to better understand what the tool or the user has excluded and the
+# reasons.
+report -detail \
+  -inst $dut \
+  -metrics all \
+  -excludes \
+  -exclComments \
+  -out $cov_report_dir/cov_excl_report.txt
 
 # Generate the functional coverage report for tracking.
 report -summary \
@@ -47,3 +70,6 @@ report_metrics \
   -assertionStatus \
   -allAssertionCounters \
   -all
+
+# rank the test runs
+rank -runfile $cov_merge_db_dir/runs.txt -html -out_html $cov_report_dir/grading -overwrite

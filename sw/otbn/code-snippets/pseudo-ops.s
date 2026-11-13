@@ -1,9 +1,10 @@
-/* Copyright lowRISC contributors. */
+/* Copyright lowRISC contributors (OpenTitan project). */
 /* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
     An example of the pseudo-operations supported by the OTBN ISA
 */
+.section .text.start
 
 nop_example:
     /* NOP is a no-op, and expands to addi x0, x0, 0 */

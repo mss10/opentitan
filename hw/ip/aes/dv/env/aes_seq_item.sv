@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,7 +7,7 @@ class aes_seq_item extends uvm_sequence_item;
   `uvm_object_utils(aes_seq_item)
 
   aes_item_type_e  item_type;
-  aes_op_e operation;
+  bit [1:0] operation;
 
   ///////////////////////////////////////
   //  Control Knobs                    //
@@ -19,7 +19,7 @@ class aes_seq_item extends uvm_sequence_item;
   bit             manual_op;
   // 0: output data cannot be overwritten
 
-  // lenth of plaintext / cypher (max is 128b/16b per block)
+  // length of plaintext / cypher (max is 128b/16b per block)
   // used to mask bits that are not part of the data vector
   bit [3:0]       data_len            = 0;
   // key len 0: 128, 1: 192, 2: 256 3: NOT VALID
@@ -33,6 +33,8 @@ class aes_seq_item extends uvm_sequence_item;
   // indicate if the initialization vector is valid
   bit [3:0]       iv_vld;
   aes_mode_e      mode;
+  bit [2:0]       reseed_rate;
+
   bit             en_b2b_transactions  = 1;
   int             b2b_pct              = 80;
 
@@ -65,6 +67,8 @@ class aes_seq_item extends uvm_sequence_item;
   bit             start_item       = 0;
   // indicate a message was split in two with this item.
   bit             split_item       = 0;
+  // use sideload
+  bit                          sideload_en;
 
 
   ///////////////////////////////////////
@@ -80,8 +84,10 @@ class aes_seq_item extends uvm_sequence_item;
   // bit to select if we clear 1 or more regs
   rand int                          clr_reg_dist_select;
 
-  // this is only used to program dut in illegal mode
+  // AES mode setting used to test illegal mode settings. This is used e.g. in the aes_config_error
+  // test.
   rand bit [$bits(aes_mode_e) -1:0] aes_mode;
+  rand bit                          aes_illegal_mode_gcm;
 
   // clear reg vector
   // [3] output data
@@ -90,10 +96,30 @@ class aes_seq_item extends uvm_sequence_item;
   // [0] key
   rand clear_t                      clear_reg;
 
+  constraint aes_illegal_mode_gcm_c {
+    if (`EN_GCM) {
+      // If the hardware supports GCM, AES_GCM is not an illegal mode setting and we should not use
+      // this to test the DUT's behavior in case of illegal mode settings.
+      aes_illegal_mode_gcm == 0;
+    } else {
+      // If the hardware does NOT support GCM, we should randomly select AES_GCM or any of the
+      // non-one-hot settings.
+      aes_illegal_mode_gcm dist { 0 := 4,
+                                  1 := 1};
+    }
+  }
+
   constraint aes_mode_c {
-   // force to be !onehot
+    solve aes_illegal_mode_gcm before aes_mode;
     if (mode == AES_NONE) {
-      !($countones(aes_mode) == 1);
+      // Enforce an illegal value. This includes values with multiple or no bits set as well as the
+      // value AES_GCM if support for GCM is not enabled. All these should be resolved to AES_NONE
+      // by the hardware.
+      if (aes_illegal_mode_gcm) {
+         aes_mode == AES_GCM;
+      } else {
+        $countones(aes_mode) != 1;
+      }
     } else {
       aes_mode == mode;
     }
@@ -130,6 +156,7 @@ class aes_seq_item extends uvm_sequence_item;
 
   function void post_randomize();
     bit [3:0]           index;
+    `uvm_info(`gfn, $sformatf("Key Mask %b", key_mask), UVM_LOW)
     if (key_mask) begin
       case (key_len)
         3'b001: begin
@@ -170,7 +197,7 @@ class aes_seq_item extends uvm_sequence_item;
       , UVM_FULL)
 
     return &data_out_vld;
-  endfunction // data_in_valid
+  endfunction // data_out_valid
 
   // if ret_clean = 0
   // return 1 only of all registers have been written
@@ -198,7 +225,7 @@ class aes_seq_item extends uvm_sequence_item;
 
   // if ret_clean = 0
   // return 1 only of all registers have been written
-  // if ret_celan = 1
+  // if ret_clean = 1
   // return 1 if all or none of the registers have been written
   function bit iv_clean(bit ret_clean, bit clear);
     `uvm_info(`gfn, $sformatf("\n\t ----| IV status %b ", iv_vld), UVM_MEDIUM)
@@ -247,8 +274,15 @@ class aes_seq_item extends uvm_sequence_item;
                    key_vld[0], key_vld[1], (&key_vld[0] && &key_vld[1]), iv_vld, &iv_vld), UVM_MEDIUM)
         return ((&key_vld[0] && &key_vld[1]) && &iv_vld);
       end
+      AES_GCM: begin
+        `uvm_info(`gfn, $sformatf("return key vld(%b, %b) %b AND iv (%b) &%b",
+                   key_vld[0], key_vld[1], (&key_vld[0] && &key_vld[1]), iv_vld,
+                   &iv_vld), UVM_MEDIUM)
+        return ((&key_vld[0] && &key_vld[1]) && &iv_vld);
+      end
       default: begin
-        `uvm_fatal(`gfn, $sformatf("\n\t ----| I AM IN DEFAULT CASE I SHOULD NOT BE HERE"))
+        // only happen in illegal cases so always return "not start"
+        return 0;
       end
     endcase // case (mode)
   endfunction // message_start
@@ -281,6 +315,7 @@ class aes_seq_item extends uvm_sequence_item;
     operation        = rhs_.operation;
     mode             = rhs_.mode;
     data_in          = rhs_.data_in;
+    data_in_vld      = rhs_.data_in_vld;
     key              = rhs_.key;
     key_len          = rhs_.key_len;
     key_vld          = rhs_.key_vld;
@@ -297,6 +332,8 @@ class aes_seq_item extends uvm_sequence_item;
     start_item       = rhs_.start_item;
     split_item       = rhs_.split_item;
     data_was_cleared = rhs_.data_was_cleared;
+    sideload_en      = rhs_.sideload_en;
+    reseed_rate      = rhs_.reseed_rate;
   endfunction // copy
 
 
@@ -326,7 +363,8 @@ class aes_seq_item extends uvm_sequence_item;
     str = {str,  $psprintf("\n\t ----| AES Mode:    \t %s                          |----\t ",
                           mode.name()) };
     str = {str,  $psprintf("\n\t ----| Operation:    \t %s                          |----\t ",
-                           operation.name() ) };
+                           operation == AES_ENC ? "AES_ENC" :
+                           operation == AES_DEC ? "AES_DEC" : "INVALID")};
     str = {str,  $psprintf("\n\t ----| Key len:    \t %s  \t(%3b)                           |----\t ",
                           (key_len==3'b001) ? "128b" : (key_len == 3'b010) ? "192b" : "256b", key_len)};
     str = {str,  $psprintf("\n\t ----| Key Share 0: \t ")};
@@ -337,7 +375,7 @@ class aes_seq_item extends uvm_sequence_item;
     for (int i=0; i <8; i++) begin
       str = {str, $psprintf("%h ",key[1][i])};
     end
-    str = {str,  $sformatf("\n\t ----| Initializaion vector:         \t ")};
+    str = {str,  $sformatf("\n\t ----| Initialization vector:         \t ")};
     for (int i=0; i <4; i++) begin
       str = {str, $sformatf("%h ",iv[i])};
     end

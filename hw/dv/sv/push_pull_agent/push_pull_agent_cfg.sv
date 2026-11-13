@@ -1,10 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 class push_pull_agent_cfg #(parameter int HostDataWidth = 32,
                             parameter int DeviceDataWidth = HostDataWidth)
-  extends dv_base_agent_cfg;
+  extends dv_reactive_agent_cfg;
 
   // interface handle used by driver, monitor & the sequencer, via cfg handle
   virtual push_pull_if#(HostDataWidth, DeviceDataWidth) vif;
@@ -13,30 +13,40 @@ class push_pull_agent_cfg #(parameter int HostDataWidth = 32,
   // Should be set from the IP level environment.
   push_pull_agent_e agent_type;
 
+  // Indicates the type of req-ack handshake.
+  pull_handshake_e pull_handshake_type;
+
   // Configures the agent to act in bidirectional mode,
   // transferring data on both sides of the handshake.
-  bit in_bidirectional_mode = 1'b0;
+  bit in_bidirectional_mode;
 
   // A knob to keep the data until next req, rather than driving unknown after handshake
   // completes. See #4465 for the detailed discussion
-  bit hold_h_data_until_next_req = 0;
-  bit hold_d_data_until_next_req = 0;
-
-  // Device-side delay range for both Push/Pull protocols.
-  rand int unsigned device_delay_min;
-  rand int unsigned device_delay_max;
-  rand int unsigned large_device_delay_max_weight = 10; // max 100
+  bit hold_h_data_until_next_req;
+  bit hold_d_data_until_next_req;
 
   // Host-side delay range for both Push/Pull protocols.
   rand int unsigned host_delay_min;
   rand int unsigned host_delay_max;
-  rand int unsigned large_host_delay_max_weight = 10; // max 100
+
+  // Device-side delay range for both Push/Pull protocols.
+  rand int unsigned device_delay_min;
+  rand int unsigned device_delay_max;
+
+  // 4-phase pull protocol delay ranges to de-assert req & ack.
+  rand int unsigned req_lo_delay_min;
+  rand int unsigned req_lo_delay_max;
+  rand int unsigned ack_lo_delay_min;
+  rand int unsigned ack_lo_delay_max;
 
   // Enables/disable all protocol delays.
   rand bit zero_delays;
 
   // Enable starting the device sequence by default if configured in Device mode.
   bit start_default_device_seq = 1;
+
+  // Ignore backpressure (ready signal) if configured as a Push Host
+  bit ignore_push_host_backpressure = 0;
 
   // These data queues allows users to specify data to be driven by the sequence at a higher level.
   //
@@ -51,22 +61,76 @@ class push_pull_agent_cfg #(parameter int HostDataWidth = 32,
   local bit [HostDataWidth-1:0]   h_user_data_q[$];
   local bit [DeviceDataWidth-1:0] d_user_data_q[$];
 
-  constraint device_delay_min_c {
-    device_delay_min == 0;
-  }
-
-  constraint device_delay_max_c {
-    device_delay_max dist {1000 :/ large_device_delay_max_weight,
-                           100  :/ 100 - large_device_delay_max_weight};
-  }
-
   constraint host_delay_min_c {
-    host_delay_min == 0;
+    soft host_delay_min == 0;
   }
 
   constraint host_delay_max_c {
-    host_delay_max dist {1000 :/ large_host_delay_max_weight,
-                         100  :/ 100 - large_host_delay_max_weight};
+    solve zero_delays before host_delay_max;
+    if (zero_delays) {
+      host_delay_max == 0;
+    } else {
+      host_delay_max dist {
+        [1:10] :/ 1,
+        [11:50] :/ 4,
+        [51:100] :/ 3,
+        [101:500] :/ 2,
+        [501:1000] :/ 1
+      };
+    }
+  }
+
+  constraint device_delay_min_c {
+    soft device_delay_min == 0;
+  }
+
+  constraint device_delay_max_c {
+    solve zero_delays before device_delay_max;
+    if (zero_delays) {
+      device_delay_max == 0;
+    } else {
+      device_delay_max dist {
+        [1:10] :/ 1,
+        [11:50] :/ 4,
+        [51:100] :/ 3,
+        [101:500] :/ 2,
+        [501:1000] :/ 1
+      };
+    }
+  }
+
+  constraint req_lo_delay_min_c {
+    soft req_lo_delay_min == 0;
+  }
+
+  constraint req_lo_delay_max_c {
+    solve zero_delays before req_lo_delay_max;
+    if (zero_delays) {
+      req_lo_delay_max == 0;
+    } else {
+      req_lo_delay_max dist {
+        [1:10] :/ 1,
+        [11:50] :/ 4,
+        [51:100] :/ 3
+      };
+    }
+  }
+
+  constraint ack_lo_delay_min_c {
+    soft ack_lo_delay_min == 0;
+  }
+
+  constraint ack_lo_delay_max_c {
+    solve zero_delays before ack_lo_delay_max;
+    if (zero_delays) {
+      ack_lo_delay_max == 0;
+    } else {
+      ack_lo_delay_max dist {
+        [1:10] :/ 1,
+        [11:50] :/ 4,
+        [51:100] :/ 3
+      };
+    }
   }
 
   // Bias randomization in favor of enabling zero delays less often.
@@ -78,12 +142,14 @@ class push_pull_agent_cfg #(parameter int HostDataWidth = 32,
   // Setter method for the user data queues - must be called externally to place specific user-data
   // to be sent by the driver.
   function void add_h_user_data(bit [HostDataWidth-1:0] data);
+    `uvm_info(`gfn, $sformatf("Added h user data %p", data), UVM_HIGH)
     h_user_data_q.push_back(data);
   endfunction
 
   // Setter method for the user data queues - must be called externally to place specific user-data
   // to be sent by the driver.
   function void add_d_user_data(bit [DeviceDataWidth-1:0] data);
+    `uvm_info(`gfn, $sformatf("Added d user data %p", data), UVM_HIGH)
     d_user_data_q.push_back(data);
   endfunction
 
@@ -123,17 +189,49 @@ class push_pull_agent_cfg #(parameter int HostDataWidth = 32,
     return (d_user_data_q.size() > 0);
   endfunction
 
+  // Return true if the interface is completely silent
+  virtual function logic is_silent();
+    return !((agent_type == PushAgent) ?
+             (vif.mon_cb.valid || vif.mon_cb.ready) :
+             (vif.mon_cb.req || vif.mon_cb.ack));
+  endfunction
+
+  // Return true if there's a stalled transaction
+  //
+  // If this is a pull agent, there is a stalled transaction when the req signal is high (so
+  // something is trying to read data), but the ack signal is low (there's no data available). If it
+  // is a push agent, there is a stalled transaction when the valid signal is high (so something is
+  // trying to provide data) but the ready signal is low (the data isn't being consumed).
+  virtual function logic is_stalled();
+    return ((agent_type == PushAgent) ?
+            (vif.mon_cb.valid && !vif.mon_cb.ready) :
+            (vif.mon_cb.req && !vif.mon_cb.ack));
+  endfunction
+
+  // Wait for any current transaction to finish
+  //
+  virtual task wait_while_running();
+    while (is_stalled()) @(vif.mon_cb);
+    // Add one last cycle to wait past the final cycle for the transaction that was stalled.
+    @(vif.mon_cb);
+  endtask
+
   `uvm_object_param_utils_begin(push_pull_agent_cfg#(HostDataWidth, DeviceDataWidth))
-    `uvm_field_enum(push_pull_agent_e, agent_type, UVM_DEFAULT)
-    `uvm_field_int(in_bidirectional_mode,          UVM_DEFAULT)
-    `uvm_field_int(device_delay_min,               UVM_DEFAULT)
-    `uvm_field_int(device_delay_max,               UVM_DEFAULT)
-    `uvm_field_int(host_delay_min,                 UVM_DEFAULT)
-    `uvm_field_int(host_delay_max,                 UVM_DEFAULT)
-    `uvm_field_int(zero_delays,                    UVM_DEFAULT)
-    `uvm_field_int(start_default_device_seq,       UVM_DEFAULT)
-    `uvm_field_queue_int(h_user_data_q,            UVM_DEFAULT)
-    `uvm_field_queue_int(d_user_data_q,            UVM_DEFAULT)
+    `uvm_field_enum(push_pull_agent_e, agent_type,         UVM_DEFAULT)
+    `uvm_field_enum(pull_handshake_e, pull_handshake_type, UVM_DEFAULT)
+    `uvm_field_int(in_bidirectional_mode,                  UVM_DEFAULT)
+    `uvm_field_int(host_delay_min,                         UVM_DEFAULT)
+    `uvm_field_int(host_delay_max,                         UVM_DEFAULT)
+    `uvm_field_int(device_delay_min,                       UVM_DEFAULT)
+    `uvm_field_int(device_delay_max,                       UVM_DEFAULT)
+    `uvm_field_int(req_lo_delay_min,                       UVM_DEFAULT)
+    `uvm_field_int(req_lo_delay_max,                       UVM_DEFAULT)
+    `uvm_field_int(ack_lo_delay_min,                       UVM_DEFAULT)
+    `uvm_field_int(ack_lo_delay_max,                       UVM_DEFAULT)
+    `uvm_field_int(zero_delays,                            UVM_DEFAULT)
+    `uvm_field_int(start_default_device_seq,               UVM_DEFAULT)
+    `uvm_field_queue_int(h_user_data_q,                    UVM_DEFAULT)
+    `uvm_field_queue_int(d_user_data_q,                    UVM_DEFAULT)
   `uvm_object_utils_end
 
   `uvm_object_new

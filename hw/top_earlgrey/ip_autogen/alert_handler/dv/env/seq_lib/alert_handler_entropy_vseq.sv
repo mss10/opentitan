@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,7 +17,8 @@ class alert_handler_entropy_vseq extends alert_handler_smoke_vseq;
   // increase the possibility to enable more alerts, because alert_handler only sends ping on
   // enabled alerts
   constraint enable_one_alert_c {
-    alert_en dist {'1 :/ 9, [0:('1-1)] :/ 1};
+    alert_en        dist {'1 :/ 9, [0:('1-1'b1)] :/ 1};
+    (~alert_regwen) dist {'1 :/ 9, [0:('1-1'b1)] :/ 1};
   }
 
   constraint sig_int_c {

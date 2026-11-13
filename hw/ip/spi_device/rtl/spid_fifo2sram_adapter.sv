@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -8,6 +8,8 @@
   interface. This module does not have a way to manage the FIFO status
   (empty/ full).
 */
+
+`include "prim_assert.sv"
 
 module spid_fifo2sram_adapter #(
   parameter int unsigned FifoWidth = 8,
@@ -23,6 +25,7 @@ module spid_fifo2sram_adapter #(
 ) (
   input clk_i,
   input rst_ni,
+  input clr_i,
 
   input                        wvalid_i,
   output logic                 wready_o,
@@ -52,8 +55,8 @@ module spid_fifo2sram_adapter #(
 
   logic sram_ack, fifoptr_inc;
 
-  assign sram_req_o = wvalid_i;
-  assign wready_o   = sram_gnt_i;
+  assign sram_req_o = wvalid_i & !clr_i;
+  assign wready_o   = sram_gnt_i & !clr_i;
 
   assign sram_write_o = 1'b 1;
 
@@ -74,8 +77,8 @@ module spid_fifo2sram_adapter #(
     always_comb begin
       sram_wdata_o = '0;
       sram_wmask_o = '0;
-      for(int unsigned i = 0; i < SubWordW ; i++) begin
-        if (fifoptr[0+:$clog2(SubWordW)] == i) begin
+      for(int unsigned i = 0; i < NumEntryPerWord ; i++) begin
+        if (fifoptr[0+:SubWordW] == i) begin
           sram_wdata_o[i*FifoWidth+:FifoWidth] = wdata_i;
           sram_wmask_o[i*FifoWidth+:FifoWidth] = {FifoWidth{1'b1}};
         end
@@ -85,7 +88,7 @@ module spid_fifo2sram_adapter #(
   end else begin : g_one_entry_per_word
     assign sram_addr_o = SramBaseAddr + SramAw'(fifoptr);
     assign sram_wdata_o = SramDw'(wdata_i);
-    assign sram_wmask_o = SramDw'(2**FifoWidth-1);
+    assign sram_wmask_o = SramDw'({1'b0, {FifoWidth{1'b1}}});
   end
 
   assign sram_ack = sram_req_o && sram_gnt_i;
@@ -94,6 +97,8 @@ module spid_fifo2sram_adapter #(
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
+      fifoptr <= '0;
+    end else if (clr_i) begin
       fifoptr <= '0;
     end else if (fifoptr_inc) begin
       fifoptr <= (fifoptr == FifoPtrW'(FifoDepth-1))

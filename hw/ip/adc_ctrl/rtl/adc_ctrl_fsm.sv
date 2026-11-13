@@ -1,11 +1,14 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Description adc_ctrl detection FSM module
 
+`include "prim_assert.sv"
+
 module adc_ctrl_fsm
   import adc_ctrl_reg_pkg::*;
+  import adc_ctrl_pkg::*;
 (
   input clk_aon_i,
   input rst_aon_ni,
@@ -27,11 +30,14 @@ module adc_ctrl_fsm
   output logic [9:0] chn0_val_o,
   output logic [9:0] chn1_val_o,
   output logic       adc_ctrl_done_o,
-  output logic       oneshot_done_o
+  output logic       oneshot_done_o,
+  output fsm_state_e aon_fsm_state_o, // FSM state output for debug purposes
+  output logic       aon_fsm_trans_o // FSM lp -> np transition indication pulse
 );
 
   logic trigger_q;
   logic trigger_l2h, trigger_h2l;
+
 
   logic [3:0] pwrup_timer_cnt_d, pwrup_timer_cnt_q;
   logic pwrup_timer_cnt_clr, pwrup_timer_cnt_en;
@@ -42,36 +48,16 @@ module adc_ctrl_fsm
   logic lp_sample_cnt_clr, lp_sample_cnt_en;
   logic [23:0] wakeup_timer_cnt_d, wakeup_timer_cnt_q;
   logic wakeup_timer_cnt_clr, wakeup_timer_cnt_en;
-  logic [NumAdcFilter-1:0] adc_ctrl_match_q, fst_lp_match;
-  logic any_fst_lp_match, stay_match;
+  logic [NumAdcFilter-1:0] adc_ctrl_match_q;
+  logic stay_match;
   logic [15:0] np_sample_cnt_d, np_sample_cnt_q;
   logic np_sample_cnt_clr, np_sample_cnt_en;
+  logic [7:0] lp_sample_cnt_thresh;
+  logic [15:0] np_sample_cnt_thresh;
 
-  //FSM flow
-  //1. PWRDN->PWRUP->IDLE->ONEST_0->ONEST_021->ONEST_1->PWRDN
-  //2. PWRDN->PWRUP->IDLE->LP_0->LP_021->LP_1->LP_EVAL->LP_SLP->LP_PWRUP->LP0->
-  //   LP_021->LP_1->LP_EVAL->NP_0->NP_021->NP_1->NP_EVAL->NP_0...repeat
-  //3. PWRDN->PWRUP->IDLE->NP_0->NP_021->NP_1->NP_EVAL->NP_0....repeat
-  typedef enum logic [3:0] {
-                            PWRDN = 4'h0,// in the power down state
-                            PWRUP = 4'h1,// being powered up
-                            IDLE = 4'h2,// powered up after the pwrup_timer
-                            ONEST_0 = 4'h3,// in oneshot mode; sample channel0 value
-                            ONEST_021 = 4'h4,// in oneshot mode; transition from chn0 to chn1
-                            ONEST_1 = 4'h5,// in oneshot mode; sample channel1 value
-                            LP_0 = 4'h6,// in low-power mode, sample channel0 value
-                            LP_021 = 4'h7,// in low-power mode, transition from chn0 to chn1
-                            LP_1 = 4'h8,// in low-power mode, sample channel1 value
-                            LP_EVAL = 4'h9,// in low-power mode, evaluate if there is a match
-                            LP_SLP = 4'ha,// in low-power mode, go to sleep
-                            LP_PWRUP = 4'hb,// in low-power mode, being powered up
-                            NP_0 = 4'hc,// in normal-power mode, sample channel0 value
-                            NP_021 = 4'hd,// in normal-power mode, transition from chn0 to chn1
-                            NP_1 = 4'he,// in normal-power mode, sample channel1 value
-                            NP_EVAL = 4'hf// in normal-power mode, detection is done
-                            } fsm_state_e;
 
   fsm_state_e fsm_state_q, fsm_state_d;
+  assign aon_fsm_state_o = fsm_state_q;
 
   always_ff @(posedge clk_aon_i or negedge rst_aon_ni) begin
     if (!rst_aon_ni) begin
@@ -93,7 +79,7 @@ module adc_ctrl_fsm
     if (!rst_aon_ni) begin
       pwrup_timer_cnt_q    <= '0;
     end
-    else if (pwrup_timer_cnt_clr || cfg_fsm_rst_i) begin
+    else if (pwrup_timer_cnt_clr || cfg_fsm_rst_i || trigger_h2l) begin
        pwrup_timer_cnt_q <= '0;
     end else begin
        pwrup_timer_cnt_q <= pwrup_timer_cnt_d;
@@ -106,7 +92,7 @@ module adc_ctrl_fsm
     if (!rst_aon_ni) begin
       lp_sample_cnt_q    <= '0;
     end
-    else if (lp_sample_cnt_clr || cfg_fsm_rst_i) begin
+    else if (lp_sample_cnt_clr || cfg_fsm_rst_i || trigger_h2l) begin
       lp_sample_cnt_q <= '0;
     end else begin
       lp_sample_cnt_q <= lp_sample_cnt_d;
@@ -119,7 +105,7 @@ module adc_ctrl_fsm
     if (!rst_aon_ni) begin
       np_sample_cnt_q    <= '0;
     end
-    else if (np_sample_cnt_clr || cfg_fsm_rst_i) begin
+    else if (np_sample_cnt_clr || cfg_fsm_rst_i || trigger_h2l) begin
       np_sample_cnt_q <= '0;
     end else begin
       np_sample_cnt_q <= np_sample_cnt_d;
@@ -133,7 +119,7 @@ module adc_ctrl_fsm
     if (!rst_aon_ni) begin
       wakeup_timer_cnt_q    <= '0;
     end
-    else if (wakeup_timer_cnt_clr || cfg_fsm_rst_i) begin
+    else if (wakeup_timer_cnt_clr || cfg_fsm_rst_i || trigger_h2l) begin
       wakeup_timer_cnt_q <= '0;
     end else begin
       wakeup_timer_cnt_q <= wakeup_timer_cnt_d;
@@ -168,13 +154,7 @@ module adc_ctrl_fsm
     end
   end
 
-  for (genvar k = 0 ; k < NumAdcFilter ; k++) begin : gen_fst_lp_match
-    assign fst_lp_match[k] =
-    ((lp_sample_cnt_q == 8'd1) && (fsm_state_q == LP_EVAL)) ? adc_ctrl_match_i[k] : 1'b0;
-  end
-
-  assign any_fst_lp_match = |fst_lp_match;
-
+  logic ld_match;
   always_ff @(posedge clk_aon_i or negedge rst_aon_ni) begin
     if (!rst_aon_ni) begin
         adc_ctrl_match_q  <= '0;
@@ -182,12 +162,17 @@ module adc_ctrl_fsm
     else if (cfg_fsm_rst_i) begin
         adc_ctrl_match_q  <= '0;
     end
-    else if ((fsm_state_q == LP_EVAL) || (fsm_state_q == NP_EVAL)) begin
+    else if (ld_match) begin
         adc_ctrl_match_q  <= adc_ctrl_match_i;
     end
   end
 
-  assign stay_match = any_fst_lp_match || (adc_ctrl_match_i == adc_ctrl_match_q);
+  logic np_match;
+  assign np_match = |adc_ctrl_match_i &                       // if current match is non-zero
+                    ((adc_ctrl_match_i == adc_ctrl_match_q) | // match if same as previous match
+                    ~|adc_ctrl_match_q);                      // or match if previous match was zero
+
+  assign stay_match = np_match;
 
   always_ff @(posedge clk_aon_i or negedge rst_aon_ni) begin
     if (!rst_aon_ni) begin
@@ -200,11 +185,14 @@ module adc_ctrl_fsm
     end
   end
 
+  assign lp_sample_cnt_thresh = cfg_lp_sample_cnt_i - 1'b1;
+  assign np_sample_cnt_thresh = cfg_np_sample_cnt_i - 1'b1;
+
   always_comb begin: adc_fsm
     fsm_state_d = fsm_state_q;
     //outputs
     adc_chn_sel_o = 2'b0;
-    adc_pd_o = 1'b1;//default value
+    adc_pd_o = 1'b0;//default value
     pwrup_timer_cnt_clr = 1'b0;
     pwrup_timer_cnt_en = 1'b0;
     lp_sample_cnt_clr = 1'b0;
@@ -215,94 +203,97 @@ module adc_ctrl_fsm
     np_sample_cnt_en = 1'b0;
     adc_ctrl_done_o = 1'b0;
     oneshot_done_o = 1'b0;
+    ld_match = 1'b0;
+    aon_fsm_trans_o = 1'b0;
 
     unique case (fsm_state_q)
       PWRDN: begin
+        adc_pd_o = 1'b1;
         if (trigger_l2h) begin
           fsm_state_d = PWRUP;
         end
       end
 
       PWRUP: begin
-        adc_pd_o = 1'b0;
         if (pwrup_timer_cnt_q != cfg_pwrup_time_i) begin
           pwrup_timer_cnt_en = 1'b1;
         end
         else if (pwrup_timer_cnt_q == cfg_pwrup_time_i) begin
           pwrup_timer_cnt_clr = 1'b1;
-          fsm_state_d = IDLE;
-        end
-      end
-
-      IDLE: begin
-        adc_pd_o = 1'b0;
-        if (cfg_oneshot_mode_i) begin
-          fsm_state_d = ONEST_0;
-        end
-        else if (cfg_lp_mode_i) begin
-          fsm_state_d = LP_0;
-        end
-        else if (!cfg_lp_mode_i) begin
-          fsm_state_d = NP_0;
+          if (cfg_oneshot_mode_i) begin
+            fsm_state_d = ONEST_0;
+          end
+          else if (cfg_lp_mode_i) begin
+            fsm_state_d = LP_0;
+          end
+          else if (!cfg_lp_mode_i) begin
+            fsm_state_d = NP_0;
+          end
         end
       end
 
       ONEST_0: begin
-        adc_pd_o = 1'b0;
         adc_chn_sel_o = 2'b01;
         if (adc_d_val_i) begin//sample chn0 value
           fsm_state_d = ONEST_021;
         end
       end
 
-      ONEST_021: begin//transition betwenn chn0 and chn1; adc_chn_sel_o=2'b0
-        adc_pd_o = 1'b0;
-        fsm_state_d = ONEST_1;
-      end
-
-      ONEST_1: begin
-        adc_pd_o = 1'b0;
-        adc_chn_sel_o = 2'b10;
-        if (adc_d_val_i) begin//sample chn1 value
-          oneshot_done_o = 1'b1;
-          fsm_state_d = PWRDN;
+      ONEST_021: begin//transition between chn0 and chn1; adc_chn_sel_o=2'b0
+        if (!adc_d_val_i) begin
+          fsm_state_d = ONEST_1;
         end
       end
 
+      ONEST_1: begin
+        adc_chn_sel_o = 2'b10;
+        if (adc_d_val_i) begin//sample chn1 value
+          fsm_state_d = ONEST_DONE;
+        end
+      end
+
+      // delay done assertion by one cycle to match
+      // adc capture register timing
+      ONEST_DONE: begin
+        oneshot_done_o = 1'b1;
+        fsm_state_d = PWRDN;
+      end
+
       LP_0: begin
-        adc_pd_o = 1'b0;
         adc_chn_sel_o = 2'b01;
         if (adc_d_val_i) begin//sample chn0 value
           fsm_state_d = LP_021;
         end
       end
 
-      LP_021: begin//transition betwenn chn0 and chn1; adc_chn_sel_o=2'b0
-        adc_pd_o = 1'b0;
-        fsm_state_d = LP_1;
+      LP_021: begin//transition between chn0 and chn1; adc_chn_sel_o=2'b0
+        if (!adc_d_val_i) begin
+          fsm_state_d = LP_1;
+        end
       end
 
       LP_1: begin
-        adc_pd_o = 1'b0;
         adc_chn_sel_o = 2'b10;
         if (adc_d_val_i) begin//sample chn1 value
           fsm_state_d = LP_EVAL;
-          lp_sample_cnt_en = 1'b1;
         end
       end
 
       LP_EVAL: begin
-        adc_pd_o = 1'b0;
-        if ((lp_sample_cnt_q != cfg_lp_sample_cnt_i) && (stay_match == 1'b1)) begin
-          fsm_state_d = LP_SLP;
-        end
-        else if ((lp_sample_cnt_q != cfg_lp_sample_cnt_i) && (stay_match != 1'b1)) begin
-          fsm_state_d = LP_SLP;
-          lp_sample_cnt_clr = 1'b1;
-        end
-        else if ((lp_sample_cnt_q == cfg_lp_sample_cnt_i) && (stay_match == 1'b1)) begin
-          fsm_state_d = NP_0;
-          lp_sample_cnt_clr = 1'b1;
+        // do not transition forward until handshake with ADC is complete
+        if (!adc_d_val_i) begin
+          ld_match = 1'b1;
+          if (!stay_match) begin
+            fsm_state_d = LP_SLP;
+            lp_sample_cnt_clr = 1'b1;
+          end else if (lp_sample_cnt_q < lp_sample_cnt_thresh) begin
+            fsm_state_d = LP_SLP;
+            lp_sample_cnt_en = 1'b1;
+          end else if (lp_sample_cnt_q == lp_sample_cnt_thresh) begin
+            fsm_state_d = NP_0;
+            lp_sample_cnt_clr = 1'b1;
+            aon_fsm_trans_o = 1'b1;
+          end
         end
       end
 
@@ -318,7 +309,6 @@ module adc_ctrl_fsm
       end
 
       LP_PWRUP: begin
-        adc_pd_o = 1'b0;
         if (pwrup_timer_cnt_q != cfg_pwrup_time_i) begin
           pwrup_timer_cnt_en = 1'b1;
         end
@@ -329,46 +319,75 @@ module adc_ctrl_fsm
       end
 
       NP_0: begin
-        adc_pd_o = 1'b0;
         adc_chn_sel_o = 2'b01;
         if (adc_d_val_i) begin//sample chn0 value
           fsm_state_d = NP_021;
         end
       end
 
-      NP_021: begin//transition betwenn chn0 and chn1; adc_chn_sel_o=2'b0
-        adc_pd_o = 1'b0;
-        fsm_state_d = NP_1;
+      NP_021: begin//transition between chn0 and chn1; adc_chn_sel_o=2'b0
+        if (!adc_d_val_i) begin
+          fsm_state_d = NP_1;
+        end
       end
 
       NP_1: begin
-        adc_pd_o = 1'b0;
         adc_chn_sel_o = 2'b10;
         if (adc_d_val_i) begin//sample chn1 value
           fsm_state_d = NP_EVAL;
-          np_sample_cnt_en = 1'b1;
         end
       end
 
       NP_EVAL: begin
-        adc_pd_o = 1'b0;
-        if ((np_sample_cnt_q != cfg_np_sample_cnt_i) && (stay_match == 1'b1)) begin
-          fsm_state_d = NP_0;
+        // do not transition forward until handshake with ADC is complete
+        if (!adc_d_val_i) begin
+          ld_match = 1'b1;
+          // if there is no match in normal power mode, clear counter and begin sampling again.
+          // if there is no match and low power mode is enabled, clear counter and go back to LP_0.
+          //
+          // if there is a match, there are 3 conditions:
+          // 1. the sample count is less than the threshold -> still attempting to make a new match,
+          //    keep sampling.
+          // 2. the sample count is equal to the threshold -> a new match has just been made, go to
+          //    DONE.
+          // 3, the sample count is greater than the threshold -> this is a continued stable match,
+          //    keep sampling.
+          if (!stay_match) begin
+            if (cfg_lp_mode_i) begin
+              fsm_state_d = LP_0;
+            end else begin
+              fsm_state_d = NP_0;
+            end
+            np_sample_cnt_clr = 1'b1;
+          end else if (np_sample_cnt_q < np_sample_cnt_thresh) begin
+            fsm_state_d = NP_0;
+            np_sample_cnt_en = 1'b1;
+          end else if (np_sample_cnt_q == np_sample_cnt_thresh) begin
+            fsm_state_d = NP_DONE;
+            np_sample_cnt_en = 1'b1;
+          end else if (np_sample_cnt_q > np_sample_cnt_thresh) begin
+            fsm_state_d = NP_0;
+          end
         end
-        else if ((np_sample_cnt_q != cfg_np_sample_cnt_i) && (stay_match != 1'b1)) begin
-          fsm_state_d = NP_0;
-          np_sample_cnt_clr = 1'b1;
-        end
-        else if ((np_sample_cnt_q == cfg_np_sample_cnt_i) && (stay_match == 1'b1)) begin
-          fsm_state_d = NP_0;
-          np_sample_cnt_clr = 1'b1;
-          adc_ctrl_done_o = 1'b1;
-        end
+      end
+
+      // delay done assertion by one cycle to match with channel register timing
+      NP_DONE: begin
+        adc_ctrl_done_o = 1'b1;
+        fsm_state_d = NP_0;
       end
 
       default: fsm_state_d = PWRDN;
     endcase
   end
 
+   `ASSUME(LpSampleCntCfg_M, cfg_lp_sample_cnt_i > '0, clk_aon_i, !rst_aon_ni)
+   `ASSUME(NpSampleCntCfg_M, cfg_np_sample_cnt_i > '0, clk_aon_i, !rst_aon_ni)
+   `ASSERT(NpCntClrPwrDn_A, fsm_state_q == PWRDN |-> (np_sample_cnt_q == '0),
+           clk_aon_i, !rst_aon_ni)
+
+   // This statement should hold true even during low power scanning
+   `ASSERT(NpCntClrMisMatch_A, ld_match & !stay_match |=>
+           (np_sample_cnt_q == '0), clk_aon_i, !rst_aon_ni)
 
 endmodule

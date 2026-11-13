@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -6,7 +6,7 @@ import os
 import random
 from typing import Dict, List, Optional, Set, Tuple
 
-from shared.yaml_parse_helpers import check_str, check_keys, load_yaml
+from serialize.parse_helpers import check_str, check_keys, load_yaml
 
 
 class Weights:
@@ -17,7 +17,7 @@ class Weights:
                              'but was actually a {}.'
                              .format(what, type(yml).__name__))
 
-        self.values = {}  # type: Dict[str, float]
+        self.values: Dict[str, float] = {}
         for key, value in yml.items():
             if not isinstance(key, str):
                 raise ValueError('{} had key {!r}, which is not a string.'
@@ -58,8 +58,8 @@ class MinMaxes:
                              'but was actually a {}.'
                              .format(what, type(yml).__name__))
 
-        self.min_values = {}  # type: Dict[str, int]
-        self.max_values = {}  # type: Dict[str, int]
+        self.min_values: Dict[str, int] = {}
+        self.max_values: Dict[str, int] = {}
 
         for key, value in yml.items():
             if not isinstance(key, str):
@@ -84,11 +84,15 @@ class MinMaxes:
             else:
                 self.max_values[key[4:]] = ival
 
-    def get_min(self, key: str, default: Optional[int] = None) -> Optional[int]:
+    def get_min(self,
+                key: str,
+                default: Optional[int] = None) -> Optional[int]:
         '''Get a minimum from the dictionary'''
         return self.min_values.get(key, default)
 
-    def get_max(self, key: str, default: Optional[int] = None) -> Optional[int]:
+    def get_max(self,
+                key: str,
+                default: Optional[int] = None) -> Optional[int]:
         '''Get a maximum from the dictionary'''
         return self.max_values.get(key, default)
 

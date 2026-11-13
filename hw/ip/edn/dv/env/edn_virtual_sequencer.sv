@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,7 @@ class edn_virtual_sequencer extends cip_base_virtual_sequencer #(
   `uvm_component_utils(edn_virtual_sequencer)
 
   push_pull_sequencer#(.HostDataWidth(edn_pkg::FIPS_ENDPOINT_BUS_WIDTH))
-       endpoint_sequencer_h[NUM_ENDPOINTS-1:0];
+       endpoint_sequencer_h[`NUM_END_POINTS];
 
   csrng_sequencer   csrng_sequencer_h;
 

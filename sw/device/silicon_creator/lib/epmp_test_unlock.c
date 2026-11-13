@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,7 +10,7 @@
 #include "sw/device/lib/arch/device.h"
 #include "sw/device/lib/base/csr.h"
 
-bool epmp_unlock_test_status(epmp_state_t *state) {
+bool epmp_unlock_test_status(void) {
   // PMP entry dedicated to test status (DV).
   enum {
     kEntry = 6,
@@ -20,25 +20,24 @@ bool epmp_unlock_test_status(epmp_state_t *state) {
   const epmp_perm_t kPerm = kEpmpPermLockedReadWrite;
 
   // Check that address space is word aligned.
-  if (kDeviceTestStatusAddress % sizeof(uint32_t) != 0) {
+  uintptr_t status_addr = device_test_status_address();
+  if (status_addr % sizeof(uint32_t) != 0) {
     return false;
   }
 
-  // Update the shadow register values (if provided).
-  if (state != NULL) {
-    epmp_region_t region = {.start = kDeviceTestStatusAddress,
-                            .end = kDeviceTestStatusAddress + sizeof(uint32_t)};
-    epmp_state_configure_na4(state, kEntry, region, kPerm);
-  }
+  // Update the shadow register values.
+  epmp_region_t region = {.start = status_addr,
+                          .end = status_addr + sizeof(uint32_t)};
+  epmp_state_configure_na4(kEntry, region, kPerm);
 
   // Update the hardware registers.
   static_assert(kEntry == 6, "PMP entry has changed, update CSR operations.");
-  CSR_WRITE(CSR_REG_PMPADDR6, kDeviceTestStatusAddress / sizeof(uint32_t));
-  CSR_SET_BITS(CSR_REG_PMPCFG1, (kEpmpModeNa4 | kPerm)
+  CSR_WRITE(CSR_REG_PMPADDR6, status_addr / sizeof(uint32_t));
+  CSR_SET_BITS(CSR_REG_PMPCFG1, (kEpmpModeNa4 | (uint32_t)kPerm)
                                     << ((kEntry % sizeof(uint32_t)) * 8));
 
   // Double check that the shadow registers match.
-  if (state != NULL && !epmp_state_check(state)) {
+  if (!epmp_state_check()) {
     return false;
   }
 

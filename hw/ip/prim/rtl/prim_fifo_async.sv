@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -10,6 +10,7 @@ module prim_fifo_async #(
   parameter  int unsigned Width  = 16,
   parameter  int unsigned Depth  = 4,
   parameter  bit OutputZeroIfEmpty = 1'b0, // if == 1 always output 0 when FIFO is empty
+  parameter  bit OutputZeroIfInvalid = 1'b0, // if == 1 always output 0 when rvalid_o is low
   localparam int unsigned DepthW = $clog2(Depth+1) // derived parameter representing [0..Depth]
 ) (
   // write port
@@ -197,10 +198,21 @@ module prim_fifo_async #(
 
   end
 
+  // rdata_o is qualified with rvalid_o to avoid CDC error
   if (OutputZeroIfEmpty == 1'b1) begin : gen_output_zero
-    assign rdata_o = empty_rclk ? '0 : rdata_int;
+    if (OutputZeroIfInvalid  == 1'b1) begin : gen_invalid_zero
+      assign rdata_o = empty_rclk ? '0 : (rvalid_o ? rdata_int : '0);
+    end
+    else begin : gen_invalid_non_zero
+      assign rdata_o = empty_rclk ? '0 : rdata_int;
+    end
   end else begin : gen_no_output_zero
-    assign rdata_o = rdata_int;
+    if (OutputZeroIfInvalid  == 1'b1) begin : gen_invalid_zero
+        assign rdata_o = rvalid_o ? rdata_int : '0;
+    end
+    else begin : gen_invalid_non_zero
+        assign rdata_o = rdata_int;
+    end
   end
 
   //////////////////////////////////////
@@ -237,8 +249,8 @@ module prim_fifo_async #(
       logic                 unused_decsub_msb;
 
       dec_tmp = '0;
-      for (int i = PTR_WIDTH-2; i >= 0; i--) begin
-        dec_tmp[i] = dec_tmp[i+1] ^ grayval[i];
+      for (int unsigned i = PTR_WIDTH-1; i > 0; i--) begin
+        dec_tmp[i-1] = dec_tmp[i] ^ grayval[i-1];
       end
       dec_tmp_sub = (PTR_WIDTH)'(Depth) - dec_tmp - 1'b1;
       if (grayval[PTR_WIDTH-1]) begin

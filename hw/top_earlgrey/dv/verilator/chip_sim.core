@@ -1,18 +1,25 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: "lowrisc:dv:chip_verilator_sim:0.1"
+name: "lowrisc:dv:top_earlgrey_chip_verilator_sim:0.1"
 description: "Earl Grey toplevel for simulation with Verilator"
+
 filesets:
   files_sim_verilator:
     depend:
-      - lowrisc:dv_dpi:uartdpi
-      - lowrisc:dv_dpi:gpiodpi
-      - lowrisc:dv_dpi:jtagdpi
-      - lowrisc:dv_dpi:dmidpi
-      - lowrisc:dv_dpi:spidpi
-      - lowrisc:dv_dpi:usbdpi
+      - lowrisc:dv_dpi_c:uartdpi
+      - lowrisc:dv_dpi_sv:uartdpi
+      - lowrisc:dv_dpi_c:gpiodpi
+      - lowrisc:dv_dpi_sv:gpiodpi
+      - lowrisc:dv_dpi_c:jtagdpi
+      - lowrisc:dv_dpi_sv:jtagdpi
+      - lowrisc:dv_dpi_c:dmidpi
+      - lowrisc:dv_dpi_sv:dmidpi
+      - lowrisc:dv_dpi_c:spidpi
+      - lowrisc:dv_dpi_sv:spidpi
+      - lowrisc:dv_dpi_c:usbdpi
+      - lowrisc:dv_dpi_sv:usbdpi
       - lowrisc:dv_verilator:memutil_verilator
       - lowrisc:dv_verilator:simutil_verilator
       - lowrisc:dv:sim_sram
@@ -24,11 +31,6 @@ filesets:
       - chip_sim_tb.cc: { file_type: cppSource }
 
 parameters:
-  # For value definition, please see ip/prim/rtl/prim_pkg.sv
-  PRIM_DEFAULT_IMPL:
-    datatype: str
-    paramtype: vlogdefine
-    description: Primitives implementation to use, e.g. "prim_pkg::ImplGeneric".
   RVFI:
     datatype: bool
     paramtype: vlogdefine
@@ -59,7 +61,7 @@ parameters:
     default: true
     description: Replace JTAG TAP with an OpenOCD direct connection
   UART_LOG_uart0:
-    datatype: string
+    datatype: str
     paramtype: plusarg
     description: Write a log of output from uart0 to the given log file. Use "-" for stdout.
   RV_CORE_IBEX_SIM_SRAM:
@@ -68,24 +70,20 @@ parameters:
     description: Disconnect the TL data output of rv_core_ibex so that we can attach the simulation SRAM.
 
 targets:
-  default: &default_target
+  default:
     filesets:
       - files_sim_verilator
     toplevel: chip_sim_tb
 
   sim:
     parameters:
-      - PRIM_DEFAULT_IMPL=prim_pkg::ImplGeneric
       - RVFI=true
       - VERILATOR_MEM_BASE=0x10000000
-      - VERILATOR_TEST_STATUS_ADDR=0x30000000
+      - VERILATOR_TEST_STATUS_ADDR=0x411f0080
       - flashinit
       - rominit
       - otpinit
       - DMIDirectTAP
-      # Always build OTBN with model and RTL. Switch between the two at runtime
-      # by passing "+OTBN_USE_MODEL=1" to the simulation.
-      - OTBN_BUILD_MODEL=true
       - RV_CORE_IBEX_SIM_SRAM=true
     default_tool: verilator
     filesets:
@@ -106,7 +104,7 @@ targets:
           - '--unroll-count 512'
           # TODO: Variable expansion depends on edalize internals. Find better solution.
           #       (Applies to LDFLAGS expansion below as well)
-          - '-CFLAGS "$(CFLAGS_FOR_BUILD) -std=c++11 -Wall -DVM_TRACE_FMT_FST -DVL_USER_STOP -DTOPLEVEL_NAME=chip_sim_tb"'
+          - '-CFLAGS "$(CFLAGS_FOR_BUILD) -std=c++17 -Wall -DVM_TRACE_FMT_FST -DVL_USER_STOP -DTOPLEVEL_NAME=chip_sim_tb"'
           - '-LDFLAGS "$(LDFLAGS_FOR_BUILD) -pthread -lutil -lelf"'
           - '-Wall'
           # Execute simulation with four threads by default, which works best
@@ -118,12 +116,15 @@ targets:
           # XXX: Cleanup all warnings and remove this option
           # (or make it more fine-grained at least)
           - '-Wno-fatal'
-
-  lint:
-    <<: *default_target
-    default_tool: verilator
-    tools:
-      verilator:
-        mode: lint-only
-        verilator_options:
-          - "-Wall"
+          # The behavioral models of the AST power good detectors (`vio_pgd`
+          # and `vcc_pgd`) drive their outputs through delays.  Verilator 5
+          # refuses to compile a design with delays unless told what to do
+          # with them, whereas Verilator 4 ignored them.  Keep ignoring them,
+          # as the simulation does not model analog ramp times.  The same
+          # holds for the oscillator models, which `AST_BYPASS_CLK` excludes
+          # today.  Those two models are waived in `ip/ast/lint/ast.vlt`;
+          # `-Werror-` turns a delay anywhere else into an error, which
+          # `-Wno-fatal` above would otherwise demote to a report.
+          - '--no-timing'
+          - '-Werror-STMTDLY'
+          - '-Werror-ASSIGNDLY'

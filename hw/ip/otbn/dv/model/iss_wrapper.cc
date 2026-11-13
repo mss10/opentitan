@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +10,9 @@
 #include <ftw.h>
 #include <iomanip>
 #include <iostream>
+#ifdef __MACH__
+#include <libproc.h>
+#endif
 #include <memory>
 #include <regex>
 #include <signal.h>
@@ -113,11 +116,26 @@ static std::string find_repo_top() {
   if (from_env)
     return std::string(from_env);
 
-  // No environment variable. Work from /proc/self/exe.
-  c_str_ptr self_path(realpath("/proc/self/exe", NULL));
+  // No environment variable. Work from current executable path.
+  const char *real_self_path;
+
+#ifndef __MACH__
+  real_self_path = "/proc/self/exe";
+#else
+  char pathbuf[PROC_PIDPATHINFO_MAXSIZE];
+
+  if (proc_pidpath(getpid(), pathbuf, sizeof(pathbuf)) <= 0) {
+    std::ostringstream oss;
+    oss << "Cannot resolve path: " << strerror(errno);
+    throw std::runtime_error(oss.str());
+  }
+  real_self_path = pathbuf;
+#endif
+
+  c_str_ptr self_path(realpath(real_self_path, NULL));
   if (!self_path) {
     std::ostringstream oss;
-    oss << "Cannot resolve /proc/self/exe: " << strerror(errno);
+    oss << "Cannot resolve executable path: " << strerror(errno);
     throw std::runtime_error(oss.str());
   }
 
@@ -193,8 +211,7 @@ static uint32_t read_hex_32(const char *str) {
 }
 
 // Read through trace output (in the lines argument) to pick up any write to
-// the named CSR register, updating *dest. If there is no such write and
-// required is true, returns false. Otherwise returns true.
+// the named CSR register, updating *dest.
 static void read_ext_reg(const std::string &reg_name,
                          const std::vector<std::string> &lines,
                          uint32_t *dest) {
@@ -207,8 +224,6 @@ static void read_ext_reg(const std::string &reg_name,
   std::regex re("! otbn\\." + reg_name + ": 0x([0-9a-f]{8})");
   std::smatch match;
 
-  uint32_t val = 0;
-
   for (const auto &line : lines) {
     if (std::regex_match(line, match, re)) {
       // Ahah! We have a match. We have captured exactly 8 hex digits, so know
@@ -220,6 +235,37 @@ static void read_ext_reg(const std::string &reg_name,
   }
 }
 
+// A specialized version of read_ext_reg that updates a boolean flag
+// (assuming that the ISS will always signal the register as having
+// value 0 or 1). Prints a message to stderr and returns false on
+// error.
+static bool read_ext_flag(const std::string &reg_name,
+                          const std::vector<std::string> &lines, bool *dest) {
+  assert(dest);
+
+  uint32_t dest32 = *dest ? 1 : 0;
+  read_ext_reg(reg_name, lines, &dest32);
+
+  if (dest32 > 1) {
+    std::cerr << "ERROR: Unexpected update to " << reg_name << " with value 0x"
+              << std::hex << dest32 << std::dec
+              << " when we expected a boolean flag.";
+    return false;
+  }
+
+  *dest = dest32 != 0;
+  return true;
+}
+
+void MirroredRegs::reset() {
+  status = 0x04;
+  insn_cnt = 0;
+  err_bits = 0;
+  stop_pc = 0;
+  rnd_req = false;
+  wipe_start = false;
+}
+
 ISSWrapper::ISSWrapper() : tmpdir(new TmpDir()) {
   std::string model_path(find_otbn_model());
 
@@ -228,11 +274,15 @@ ISSWrapper::ISSWrapper() : tmpdir(new TmpDir()) {
   // drop all the fds when it execs.
   int fds[4];
   for (int i = 0; i < 2; ++i) {
-    if (pipe2(fds + 2 * i, O_CLOEXEC)) {
+    // We are using pipe and fcntl instead of pipe2 to support both MacOS and
+    // Linux
+    if (pipe(fds + 2 * i)) {
       std::ostringstream oss;
       oss << "Failed to open pipe " << i << " for ISS: " << strerror(errno);
       throw std::runtime_error(oss.str());
     }
+    fcntl(fds[2 * i], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[2 * i + 1], F_SETFD, FD_CLOEXEC);
   }
 
   // fds[0] and fds[2] are the read ends of two pipes, with write ends at
@@ -265,7 +315,8 @@ ISSWrapper::ISSWrapper() : tmpdir(new TmpDir()) {
       abort();
     }
     // Finally, exec the ISS
-    execl(model_path.c_str(), model_path.c_str(), NULL);
+    execl("/usr/bin/env", "/usr/bin/env", "python3", "-u", model_path.c_str(),
+          NULL);
   }
 
   // We are the parent process and pid is the PID of the child. Close the pipe
@@ -330,28 +381,80 @@ void ISSWrapper::dump_d(const std::string &path) const {
   run_command(oss.str(), nullptr);
 }
 
-void ISSWrapper::start() { run_command("start\n", nullptr); }
+void ISSWrapper::start_operation(command_t command) {
+  std::ostringstream cmd_stream;
+
+  cmd_stream << "start_operation ";
+
+  switch (command) {
+    case Execute:
+      cmd_stream << "Execute\n";
+      break;
+
+    case DmemWipe:
+      cmd_stream << "DmemWipe\n";
+      break;
+
+    case ImemWipe:
+      cmd_stream << "ImemWipe\n";
+      break;
+    default:
+      assert(0);
+  }
+
+  run_command(cmd_stream.str(), nullptr);
+}
+
+void ISSWrapper::otp_key_cdc_done() {
+  run_command("otp_key_cdc_done\n", nullptr);
+}
 
 void ISSWrapper::edn_rnd_cdc_done() {
   run_command("edn_rnd_cdc_done\n", nullptr);
 }
 
-void ISSWrapper::edn_step(uint32_t edn_rnd_data) {
+void ISSWrapper::edn_urnd_cdc_done() {
+  run_command("edn_urnd_cdc_done\n", nullptr);
+}
+
+void ISSWrapper::edn_flush() { run_command("edn_flush\n", nullptr); }
+
+void ISSWrapper::edn_rnd_step(uint32_t edn_rnd_data, bool fips_err) {
   std::ostringstream oss;
-  oss << "edn_step " << std::hex << "0x" << edn_rnd_data << "\n";
+  oss << "edn_rnd_step " << std::hex << "0x" << edn_rnd_data;
+  oss << " " << fips_err << "\n";
   run_command(oss.str(), nullptr);
 }
 
-void ISSWrapper::edn_urnd_reseed_complete() {
-  run_command("edn_urnd_reseed_complete\n", nullptr);
+void ISSWrapper::edn_urnd_step(uint32_t edn_urnd_data) {
+  std::ostringstream oss;
+  oss << "edn_urnd_step " << std::hex << "0x" << edn_urnd_data << "\n";
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::set_keymgr_value(const std::array<uint32_t, 16> &key0_arr,
+                                  const std::array<uint32_t, 16> &key1_arr,
+                                  bool valid) {
+  std::ostringstream oss;
+
+  oss << "set_keymgr_value 0x" << std::hex << std::setfill('0');
+  for (int i = 0; i < 16; ++i) {
+    oss << std::setw(8) << key0_arr[15 - i];
+  }
+  oss << " 0x";
+  for (int i = 0; i < 16; ++i) {
+    oss << std::setw(8) << key1_arr[15 - i];
+  }
+  oss << " " << valid << "\n";
+
+  run_command(oss.str(), nullptr);
 }
 
 int ISSWrapper::step(bool gen_trace) {
   std::vector<std::string> lines;
-  bool error = false;
 
   run_command("step\n", &lines);
-  if (gen_trace) {
+  if (gen_trace && lines.size()) {
     if (!OtbnTraceChecker::get().OnIssTrace(lines)) {
       return -1;
     }
@@ -364,12 +467,18 @@ int ISSWrapper::step(bool gen_trace) {
   bool is_stopped = mirrored_.stopped();
   bool done = is_stopped && !was_stopped;
 
-  // Also try to read INSN_CNT, ERR_BITS and STOP_PC. The latter two only get
-  // updated around the end of an operation but the precise timing is slightly
-  // in flux, so it's easiest to just allow updates whenever they arrive.
+  // Also try to read INSN_CNT, ERR_BITS and STOP_PC plus some associated
+  // flags. Some of these flags only get updated around the end of an operation
+  // but the precise timing is slightly fiddly, so it's easiest to just allow
+  // updates whenever they arrive.
   read_ext_reg("INSN_CNT", lines, &mirrored_.insn_cnt);
   read_ext_reg("ERR_BITS", lines, &mirrored_.err_bits);
   read_ext_reg("STOP_PC", lines, &mirrored_.stop_pc);
+
+  if (!read_ext_flag("RND_REQ", lines, &mirrored_.rnd_req))
+    return -1;
+  if (!read_ext_flag("WIPE_START", lines, &mirrored_.wipe_start))
+    return -1;
 
   return done ? 1 : 0;
 }
@@ -378,20 +487,83 @@ void ISSWrapper::invalidate_imem() {
   run_command("invalidate_imem\n", nullptr);
 }
 
+void ISSWrapper::invalidate_dmem() {
+  run_command("invalidate_dmem\n", nullptr);
+}
+
+void ISSWrapper::set_software_errs_fatal(bool new_val) {
+  std::ostringstream oss;
+
+  oss << "set_software_errs_fatal " << new_val << "\n";
+
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::set_wfi_enabled(bool new_val) {
+  std::ostringstream oss;
+
+  oss << "set_wfi_enabled " << new_val << "\n";
+
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::set_urnd_ctrl_enabled(bool new_val) {
+  std::ostringstream oss;
+
+  oss << "set_urnd_ctrl_enabled " << new_val << "\n";
+
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::wfi_resume() { run_command("wfi_resume\n", nullptr); }
+
+void ISSWrapper::initial_secure_wipe() {
+  run_command("initial_secure_wipe\n", nullptr);
+}
+
+uint32_t ISSWrapper::step_crc(const std::array<uint8_t, 6> &item,
+                              uint32_t state) const {
+  std::vector<std::string> lines;
+
+  std::ostringstream oss;
+  oss << std::hex << "step_crc 0x" << std::setfill('0');
+  for (size_t i = 0; i < item.size(); ++i) {
+    oss << std::setw(2) << (int)item[5 - i];
+  }
+  oss << " 0x" << std::setw(8) << state << "\n";
+  run_command(oss.str(), &lines);
+
+  read_ext_reg("LOAD_CHECKSUM", lines, &state);
+  return state;
+}
+
 void ISSWrapper::reset(bool gen_trace) {
   if (gen_trace)
     OtbnTraceChecker::get().Flush();
 
   run_command("reset\n", nullptr);
 
-  // Zero our mirror of INSN_CNT. We'll get the corresponding zero value from
-  // the ISS one cycle *after* start, but clearing it here avoids a glitch
-  // before that.
-  mirrored_.insn_cnt = 0;
+  // Reset all mirrored registers.
+  mirrored_.reset();
+}
 
-  // Zero our mirror of STATUS: the initial zero value for the next run doesn't
-  // get reported by the ISS.
-  mirrored_.status = 0;
+void ISSWrapper::send_err_escalation(uint32_t err_val, bool lock_immediately) {
+  std::ostringstream oss;
+  oss << "send_err_escalation " << std::hex << "0x" << err_val << " "
+      << lock_immediately << "\n";
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::send_stall_request(bool enforced) {
+  std::ostringstream oss;
+  oss << "send_stall_request " << enforced << "\n";
+  run_command(oss.str(), nullptr);
+}
+
+void ISSWrapper::set_rma_req(uint8_t rma_req) {
+  std::ostringstream oss;
+  oss << "set_rma_req " << std::hex << "0x" << (int)rma_req << "\n";
+  run_command(oss.str(), nullptr);
 }
 
 void ISSWrapper::get_regs(std::array<uint32_t, 32> *gprs,

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -41,7 +41,6 @@ module timer_core #(
   assign mtime_d = mtime + 64'(step);
 
   // interrupt is generated if mtime is greater than or equal to mtimecmp
-  // TODO: Check if it must consider overflow case
   for (genvar t = 0 ; t < N ; t++) begin : gen_intr
     assign intr[t] = active & (mtime >= mtimecmp[t]);
   end

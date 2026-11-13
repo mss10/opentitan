@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 #ifndef OPENTITAN_HW_IP_OTBN_DV_MODEL_ISS_WRAPPER_H_
@@ -20,7 +20,7 @@ struct TmpDir;
 // versions of these registers in this structure.
 class MirroredRegs {
  public:
-  MirroredRegs() : status(0), insn_cnt(0), err_bits(0), stop_pc(0) {}
+  MirroredRegs() { reset(); }
 
   uint32_t status;
   uint32_t insn_cnt;
@@ -28,6 +28,17 @@ class MirroredRegs {
 
   // The final PC from the most recent run
   uint32_t stop_pc;
+
+  // We are issuing an EDN request for RND
+  bool rnd_req;
+
+  // This goes high for a single cycle when we start the internal secure wipe
+  // (and can be used as a trigger to check internal state before it gets
+  // trashed)
+  bool wipe_start;
+
+  // Reset the mirrored registers.
+  void reset();
 
   // Execution is stopped if status is either 0 (IDLE) or 0xff (LOCKED)
   bool stopped() const { return status == 0 || status == 0xff; }
@@ -40,6 +51,8 @@ struct ISSWrapper {
   struct u256_t {
     uint32_t words[256 / 32];
   };
+
+  enum command_t { Execute, DmemWipe, ImemWipe };
 
   ISSWrapper();
   ~ISSWrapper();
@@ -57,19 +70,34 @@ struct ISSWrapper {
   // Dump the contents of DMEM to a file
   void dump_d(const std::string &path) const;
 
-  // Jump to address zero and start running
-  void start();
+  // Start an operation (execute, dmem wipe or imem wipe)
+  void start_operation(command_t command);
+
+  // Flush EDN related content in model because of edn_rst_n
+  void edn_flush();
 
   // Provide data for RND. ISS will stall when RND is read and RND data isn't
   // available. RND data is available only when 8 32b packages are sent and
   // also RTL signals CDC is done.
-  void edn_step(uint32_t edn_rnd_data);
+  void edn_rnd_step(uint32_t edn_rnd_data, bool fips_err);
 
-  // Signals 256b EDN random number is valid in the RTL.
+  // Provide data for URND seed. ISS will stall until reseeding of URND is
+  // complete. URND seed data is available only when 8 32b packages are sent and
+  // also RTL signals CDC is done.
+  void edn_urnd_step(uint32_t edn_urnd_data);
+
+  // Provide keymgr values to model
+  void set_keymgr_value(const std::array<uint32_t, 16> &key0_arr,
+                        const std::array<uint32_t, 16> &key1_arr, bool valid);
+
+  // Signals that the received OTP key is valid in the RTL.
+  void otp_key_cdc_done();
+
+  // Signals 256b EDN random number for RND is valid in the RTL.
   void edn_rnd_cdc_done();
 
-  // Signal URND reseed at beginning of execution is complete
-  void edn_urnd_reseed_complete();
+  // Signals 256b EDN random number for URND seed is valid in the RTL.
+  void edn_urnd_cdc_done();
 
   // Run simulation for a single cycle.
   //
@@ -89,12 +117,43 @@ struct ISSWrapper {
   // Mark all of IMEM as invalid so that any fetch causes an integrity error.
   void invalidate_imem();
 
+  // Mark all of DMEM as invalid so that any load causes an integrity error.
+  void invalidate_dmem();
+
+  // Set software_errs_fatal bit in ISS model.
+  void set_software_errs_fatal(bool new_val);
+
+  // Set wfi_enabled bit in ISS model.
+  void set_wfi_enabled(bool new_val);
+
+  // Set urnd_ctrl_enabled bit in ISS model.
+  void set_urnd_ctrl_enabled(bool new_val);
+
+  // Resume a paused wfi instruction (host issued the RESUME command).
+  void wfi_resume();
+
+  void initial_secure_wipe();
+
+  // Step a CRC calculation with 48 bits of data
+  uint32_t step_crc(const std::array<uint8_t, 6> &item, uint32_t state) const;
+
   // Reset simulation
   //
   // This doesn't actually send anything to the ISS, but instead tells the
   // OtbnTraceChecker to clear out any partial instructions. It also resets
   // mirrored registers to their initial states.
   void reset(bool gen_trace);
+
+  // Send an error escalation
+  void send_err_escalation(uint32_t err_val, bool lock_immediately);
+
+  // Stall for one cycle instead of retiring the next instruction.
+  // In case there is a pending halt, the stall request is ignored except if
+  // enforced is True.
+  void send_stall_request(bool enforced);
+
+  // Set the RMA request input
+  void set_rma_req(uint8_t rma_req);
 
   const MirroredRegs &get_mirrored() const { return mirrored_; }
 

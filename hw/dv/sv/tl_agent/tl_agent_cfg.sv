@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -16,7 +16,7 @@ class tl_agent_cfg extends dv_base_agent_cfg;
   // Maximum number of outstanding transactions supported by the DUT.
   // 0: Unlimited from the host perspective, might be back-pressured by the device
   // 1: Only single transaction at a time
-  // n: Number of maximum oustanding requests
+  // n: Number of maximum outstanding requests
 
   // This is initialized to an arbitrary value. The DUT may actually support higher or lower than
   // this number. Calculating exactly how many outstanding transactions the DUT supports is hard to
@@ -108,11 +108,8 @@ class tl_agent_cfg extends dv_base_agent_cfg;
 
   // Sets the randomization dist weight for a new a_source value to be constrained to the last
   // a_source released. This only ATTEMPTS to set the a_source to the last_a_source_released value -
-  // it is not always guaranteed even at 100%, especially if the test does non-blocking accessses.
+  // it is not always guaranteed even at 100%, especially if the test does non-blocking accesses.
   rand int unsigned use_last_a_source_released_pct = 20;
-
-  // The monitor detects reset and maintains the value below.
-  bit reset_asserted;
 
   constraint a_source_eq_last_a_source_released_pct_c {
     use_last_a_source_released_pct <= 100;
@@ -129,6 +126,24 @@ class tl_agent_cfg extends dv_base_agent_cfg;
   // Note: below set the chance to abort after a_valid_len in tl_reg_adapter. if > 0, csr access may
   // return UVM_NOT_OK when the item is aborted without accepted.
   int unsigned csr_access_abort_pct_in_adapter = 0;
+
+  // Indicate whether to check TLUL errors.
+  // Added to allow some TLUL checks to be ignored on certain scenarios.
+  bit check_tl_errs = 1'b1;
+
+  // Invalidate drive option
+  // Setting these to '1', make driver send 'x' during invalidate cycle.
+  // Setting these to '0', make driver send 'random value' during invalidate cycle.
+  rand bit invalidate_a_x;
+  rand bit invalidate_d_x;
+
+  constraint invalidate_a_channel_op_c {
+    invalidate_a_x dist { 1 := 7, 0 := 3};
+  }
+  constraint invalidate_d_channel_op_c {
+    invalidate_d_x dist { 1 := 7, 0 := 3};
+  }
+
 
   `uvm_object_utils_begin(tl_agent_cfg)
     `uvm_field_int(max_outstanding_req,   UVM_DEFAULT)
@@ -157,16 +172,27 @@ class tl_agent_cfg extends dv_base_agent_cfg;
   //
   // This function takes the tl_seq_item object to specifically randomize the a_source such that it
   // does not match an existing one in the a_source_q. This randomization also takes into account
-  // any existing constriants on a_source that may exist in the class definition. The new a_source
+  // any existing constraints on a_source that may exist in the class definition. The new a_source
   // value is randomized to be equal to the last a_source released from the a_source_pend_q
   // 20% of the time (weight is configurable).
   //
   // For actual reqs made out to the DUT, use randomize_a_source_in_req().
   protected function void randomize_a_source_in_item(tl_seq_item item,
                                                      bit use_last_a_source_released);
-    `DV_CHECK_MEMBER_RANDOMIZE_WITH_FATAL(a_source,
+    bit [SourceWidth - 1 : 0] a_source;
+
+    // Use std::randomize instead of calling item.randomize(a_source). item.randomize will invoke
+    // post_randomize. If user does sth after post_randomize before calling finish_item, invoking
+    // post_randomize may override that.
+    // For example, if we use item.randomize(a_source)
+    // item.randomize(); // in post_randomize, instr_type is set to False
+    // item.instr_type = True;
+    // finish_item(item); // finish_item will call randomize_a_source_in_item.
+    //                    // item.randomize(a_source) will invoke post_randomize, instr_type is set
+    //                    // to False again.
+    `DV_CHECK_STD_RANDOMIZE_WITH_FATAL(a_source,
         // use soft constraint as seq may still send req when all the valid a_source are used
-        (!reset_asserted) -> soft !(a_source inside {a_source_pend_q});
+        (!in_reset) -> soft !(a_source inside {a_source_pend_q});
         // Set the upper a_source bits that are unused to 0.
         (a_source >> valid_a_source_width) == 0;
         // We cannot guarantee that last_a_source_released is not in a_source_pend_q,
@@ -176,8 +202,8 @@ class tl_agent_cfg extends dv_base_agent_cfg;
         // that the new a_source == last_a_source_released is to ensure the test only does blocking
         // accesses.
         use_last_a_source_released && !(last_a_source_released inside {a_source_pend_q})
-            -> soft (a_source == last_a_source_released);,
-        item)
+            -> soft (a_source == last_a_source_released);)
+    item.a_source = a_source;
     `uvm_info(`gfn, $sformatf("a_source_pend_q: %p a_source: %0h", a_source_pend_q, item.a_source), UVM_DEBUG)
   endfunction
 
@@ -196,7 +222,7 @@ class tl_agent_cfg extends dv_base_agent_cfg;
   // Ensures that the queue does not exceed the max outstanding req size. Pops the oldest a_source
   // used to last_a_source_released.
   virtual function void add_to_a_source_pend_q(bit [SourceWidth-1:0] a_source);
-    if (reset_asserted) return;
+    if (in_reset) return;
     if (a_source_pend_q.size() == max_outstanding_req) begin
       last_a_source_released = a_source_pend_q.pop_front();
     end

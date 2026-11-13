@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-r""" TileLink-Uncached Lightweight Xbar generator
-"""
+"""TileLink Uncached Lightweight crossbar generator."""
 
 import argparse
 import logging as log
@@ -16,6 +15,7 @@ import tlgen
 
 
 def main():
+    """Run tlgen as a script."""
     parser = argparse.ArgumentParser(prog="tlgen")
     parser.add_argument('--topcfg',
                         '-t',
@@ -26,12 +26,11 @@ def main():
                         '-d',
                         action='store_true',
                         help='Generate self HTML document in stdout')
-    parser.add_argument(
-        '--outdir',
-        '-o',
-        help=
-        "Target directory. tlgen needs 'rtl/' and 'dv/' directory under the target dir"
-    )
+    parser.add_argument('--outdir',
+                        '-o',
+                        help=("Target directory. tlgen needs 'rtl/' and 'dv/' "
+                              "directory under the target dir"),
+                        required=True)
     parser.add_argument('--ip-path',
                         default="",
                         help='''
@@ -52,12 +51,14 @@ def main():
         return
 
     # Check if topcfg defined
-    if not args.topcfg or not args.outdir:
+    if not args.topcfg:
         log.error("--topcfg option is mandatory to generate codes.")
+        sys.exit(1)
 
     # Check if outdir exists. If not, show error and exit
-    if not Path(args.outdir).is_dir():
+    if not (args.outdir and Path(args.outdir).is_dir()):
         log.error("'--outdir' should point to writable directory")
+        sys.exit(1)
 
     # Load contents of top_cfg
     # Skip this part and use internal structure at this time
@@ -69,6 +70,10 @@ def main():
     log.info(obj)
 
     xbar = tlgen.validate(obj)
+    if xbar is None:
+        log.error("Validation failed for crossbar.")
+        exit(1)
+
     xbar.ip_path = args.ip_path
 
     if not tlgen.elaborate(xbar):

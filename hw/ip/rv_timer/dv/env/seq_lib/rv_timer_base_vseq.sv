@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -112,26 +112,9 @@ class rv_timer_base_vseq extends cip_base_vseq #(
     timer_intr_en_fld.set(enable);
     csr_update(.csr(intr_en_rg));
     // also check intr output, if disabled
-    if (!enable) begin
+    if (!enable && !cfg.under_reset) begin
       `DV_CHECK_EQ(cfg.intr_vif.sample_pin(.idx(intr_pin_idx)), 1'b0)
     end
-  endtask
-
-  // check if interrupt fired
-  virtual task check_interrupt(int hart = 0, int timer = 0, bit exp_intr_state, bit exp_intr_pin);
-    uvm_reg       intr_state_rg;
-    uvm_reg_field timer_intr_state_fld;
-    int           intr_pin_idx = hart * NUM_TIMERS + timer;
-    `DV_CHECK_LT_FATAL(hart, NUM_HARTS)
-    `DV_CHECK_LT_FATAL(timer, NUM_TIMERS)
-    intr_state_rg = ral.get_reg_by_name($sformatf("intr_state%0d", hart));
-    `DV_CHECK_NE_FATAL(intr_state_rg, null)
-    timer_intr_state_fld = intr_state_rg.get_field_by_name($sformatf("is_%0d", timer));
-    `DV_CHECK_NE_FATAL(timer_intr_state_fld, null)
-    void'(timer_intr_state_fld.predict(.value(exp_intr_state), .kind(UVM_PREDICT_DIRECT)));
-    csr_rd_check(.ptr(intr_state_rg), .compare_vs_ral(1));
-    // also check intr output
-    `DV_CHECK_EQ(cfg.intr_vif.sample_pin(.idx(intr_pin_idx)), exp_intr_pin)
   endtask
 
   // task to write 1 to clear and read the interrupt status register
@@ -153,47 +136,62 @@ class rv_timer_base_vseq extends cip_base_vseq #(
       wr_value = $urandom();
       set_compare_val(hart, timer, wr_value);
       // wait one clk cycle then check intr, to ensure get the sticky interrupt value
-      cfg.clk_rst_vif.wait_clks(1);
+      cfg.clk_rst_vif.wait_clks_or_rst(1);
     end
     csr_rd(.ptr(intr_state_rg), .value(status));
   endtask
 
-  // poll a intr_status continuously until it reads the expected value.
+  // Wait the given number of nanoseconds, exiting early on reset.
+  task wait_ns_or_reset(int unsigned delay_ns);
+    if (!delay_ns) return;
+    fork : isolation_fork begin
+      fork
+        #(delay_ns * 1ns);
+        wait(cfg.under_reset);
+      join_any
+      disable fork;
+    end join
+  endtask
+
+  // Poll the intr_state register for the given hart until it reads the expected value.
+  //
+  // There is a gap of spinwait_delay_ns between each read and a timeout of timeout_ns.
   virtual task intr_state_spinwait(input int  hart              = 0,
                                    input uint exp_data          = 0,
                                    input uint spinwait_delay_ns = 0,
                                    input uint timeout_ns        = 10_000_000); // 10ms
-    bit [TL_DW-1:0] read_data;
-    bit reset_asserted;
-    uvm_reg intr_state_rg;
-    intr_state_rg = ral.get_reg_by_name($sformatf("intr_state%0d", hart));
-    `DV_CHECK_NE_FATAL(intr_state_rg, null)
-    fork
-      begin : isolation_fork
-        fork
-          begin
-            wait(cfg.clk_rst_vif.rst_n == 0);
-            reset_asserted = 1'b1;
-          end
-        join_none
-        fork
-          while (1) begin
-            csr_rd(.ptr(intr_state_rg), .value(read_data));
-            if (spinwait_delay_ns) #(spinwait_delay_ns * 1ns);
-            if ((read_data == exp_data) | (reset_asserted == 1)) break;
-          end
-          begin
-            wait_timeout(timeout_ns, "intr_state_spinwait",
+    uvm_reg intr_state_rg = ral.get_reg_by_name($sformatf("intr_state%0d", hart));
+    bit     seen_exp_data = 0;
+
+    if (intr_state_rg == null)
+      `uvm_fatal(get_full_name(),
+                 $sformatf("Cannot find intr_state register for hart %0d", hart))
+
+    fork : isolation_fork begin
+      fork
+        while (!seen_exp_data && !cfg.under_reset) begin
+          bit [TL_DW-1:0] read_data;
+
+          csr_rd(.ptr(intr_state_rg), .value(read_data));
+          seen_exp_data = (read_data == exp_data);
+          if (!seen_exp_data) wait_ns_or_reset(spinwait_delay_ns);
+        end
+        `DV_WAIT_TIMEOUT(timeout_ns, "intr_state_spinwait",
                          $sformatf("timeout %0s (addr=0x%0h) == 0x%0h",
-                         intr_state_rg.get_full_name(), intr_state_rg.get_address(), exp_data));
-          end
-        join_any
-        disable fork;
-      end : isolation_fork
-    join
+                                   intr_state_rg.get_full_name(),
+                                   intr_state_rg.get_address(),
+                                   exp_data))
+      join_any
+
+      // If we get here then the spinwait has seen a reset or the value it expected or we have timed
+      // out. In the former case, we should just disable the timeout thread. In the latter case, we
+      // can safely disable the spinwait thread. It doesn't really matter if we mess up a TL driver:
+      // we've reported an error already.
+      disable fork;
+    end join
   endtask
 
-  // task to read interrup status reg for given Hart
+  // task to read interrupt status reg for given Hart
   virtual task read_intr_status_reg(input  int  hart = 0,
                                     output uint status_val);
     uvm_reg intr_state_rg;
@@ -223,7 +221,7 @@ class rv_timer_base_vseq extends cip_base_vseq #(
     bit stop_reading;
     fork
       begin
-        cfg.clk_rst_vif.wait_clks(clks);
+        cfg.clk_rst_vif.wait_clks_or_rst(clks);
         stop_reading = 1'b1;
       end
       begin
@@ -231,6 +229,8 @@ class rv_timer_base_vseq extends cip_base_vseq #(
           // read will trigger check in scoreboard
           uint rd_data;
           read_intr_status_reg(.hart(hart), .status_val(rd_data));
+          if (cfg.under_reset) break;
+
           fork
             begin : isolation_fork
               fork
@@ -238,6 +238,7 @@ class rv_timer_base_vseq extends cip_base_vseq #(
                   delay = $urandom_range(1, 10000);
                   #(delay * 1ns);
                 end
+                wait(cfg.under_reset);
                 wait(stop_reading == 1);
               join_any
               disable fork;

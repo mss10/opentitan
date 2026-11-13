@@ -1,13 +1,15 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """Generate JSON/compact JSON/Hjson from register JSON tree
 """
 
-import hjson
+from typing import Any, TextIO
+
+import hjson  # type: ignore
 
 
-def gen_json(obj, outfile, format):
+def gen_json(obj: Any, outfile: TextIO, format: str) -> None:
     if format == 'json':
         hjson.dumpJSON(obj,
                        outfile,
@@ -30,5 +32,3 @@ def gen_json(obj, outfile, format):
                    use_decimal=True)
     else:
         raise ValueError('Invalid JSON format ' + format)
-
-    return 0

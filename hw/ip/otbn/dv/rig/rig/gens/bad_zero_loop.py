@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -58,7 +58,7 @@ class BadZeroLoop(Loop):
         if pieces is None:
             return None
 
-        bodysize, good_hd_insn, body_snippet, model, warp = pieces
+        bodysize, _good_hd_insn, body_snippet, model, _warp = pieces
 
         # If we successfully generated a loop, generate a new head instruction
         # with the same body size but with zero iterations.
@@ -66,8 +66,8 @@ class BadZeroLoop(Loop):
         op0_type = insn.operands[0].op_type
         op1_type = insn.operands[1].op_type
 
-        iter_opval, num_iters = self._bad_iterations(op0_type,
-                                                     bodysize, model_before)
+        iter_opval, _num_iters = self._bad_iterations(op0_type,
+                                                      bodysize, model_before)
 
         # Generate a new head instruction
         enc_bodysize = op1_type.op_val_to_enc_val(bodysize, model_before.pc)
@@ -79,4 +79,4 @@ class BadZeroLoop(Loop):
 
         # Return with the initial model (because the head instruction is bad,
         # we'll stop at it)
-        return (snippet, True, model_before)
+        return (snippet, model_before)

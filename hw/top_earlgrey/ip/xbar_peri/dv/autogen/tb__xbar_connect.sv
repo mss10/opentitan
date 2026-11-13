@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,17 +7,11 @@
 xbar_peri dut();
 
 `DRIVE_CLK(clk_peri_i)
-`DRIVE_CLK(clk_spi_host0_i)
-`DRIVE_CLK(clk_spi_host1_i)
 
 initial force dut.clk_peri_i = clk_peri_i;
-initial force dut.clk_spi_host0_i = clk_spi_host0_i;
-initial force dut.clk_spi_host1_i = clk_spi_host1_i;
 
 // TODO, all resets tie together
 initial force dut.rst_peri_ni = rst_n;
-initial force dut.rst_spi_host0_ni = rst_n;
-initial force dut.rst_spi_host1_ni = rst_n;
 
 // Host TileLink interface connections
 `CONNECT_TL_HOST_IF(main, dut, clk_peri_i, rst_n)
@@ -30,26 +24,21 @@ initial force dut.rst_spi_host1_ni = rst_n;
 `CONNECT_TL_DEVICE_IF(i2c0, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(i2c1, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(i2c2, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(pattgen, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(pwm_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(gpio, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(gpio0, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(gpio1, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(spi_device, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(spi_host0, dut, clk_spi_host0_i, rst_n)
-`CONNECT_TL_DEVICE_IF(spi_host1, dut, clk_spi_host1_i, rst_n)
 `CONNECT_TL_DEVICE_IF(rv_timer, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(usbdev, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(pwrmgr_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(rstmgr_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(clkmgr_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(pinmux_aon, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(pwrmgr, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(rstmgr, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(clkmgr, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(pinmux, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(otp_ctrl__core, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(otp_ctrl__prim, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(lc_ctrl, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(lc_ctrl__regs, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(sensor_ctrl, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(alert_handler, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(sram_ctrl_ret_aon__regs, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(sram_ctrl_ret_aon__ram, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(aon_timer_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(sysrst_ctrl_aon, dut, clk_peri_i, rst_n)
-`CONNECT_TL_DEVICE_IF(adc_ctrl_aon, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(sram_ctrl_ret__regs, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(sram_ctrl_ret__ram, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(aon_timer, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(sysrst_ctrl, dut, clk_peri_i, rst_n)
+`CONNECT_TL_DEVICE_IF(adc_ctrl, dut, clk_peri_i, rst_n)
 `CONNECT_TL_DEVICE_IF(ast, dut, clk_peri_i, rst_n)

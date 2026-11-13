@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,6 +17,16 @@ const uint8_t *HMAC_SHA(const void *key, size_t key_len, const void *msg,
 // Compute HMAC using arbitrary length key and msg with SHA256. Returns digest
 // address.
 const uint8_t *HMAC_SHA256(const void *key, size_t key_len, const void *msg,
+                           size_t msg_len, uint8_t *hmac);
+
+// Compute HMAC using arbitrary length key and msg with SHA384. Returns digest
+// address.
+const uint8_t *HMAC_SHA384(const void *key, size_t key_len, const void *msg,
+                           size_t msg_len, uint8_t *hmac);
+
+// Compute HMAC using arbitrary length key and msg with SHA512. Returns digest
+// address.
+const uint8_t *HMAC_SHA512(const void *key, size_t key_len, const void *msg,
                            size_t msg_len, uint8_t *hmac);
 
 #ifdef __cplusplus

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 #ifndef OPENTITAN_HW_DV_VERILATOR_CPP_DPI_MEMUTIL_H_
@@ -20,6 +20,7 @@ enum MemImageType {
   kMemImageUnknown = 0,
   kMemImageElf,
   kMemImageVmem,
+  kMemImageBin,
 };
 
 // Staged data for a given memory area.

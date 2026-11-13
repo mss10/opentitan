@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,11 +16,19 @@ class kmac_stress_all_vseq extends kmac_base_vseq;
     // plusarg - excluding them does not detract much from the stress_all test
     "kmac_test_vectors_kmac_vseq",
     "kmac_test_vectors_kmac_xof_vseq",
-    "kmac_app_vseq"
+    "kmac_app_vseq",
+    "kmac_mubi_vseq",
+    "kmac_entropy_refresh_vseq"
   };
 
   virtual task pre_start();
+    `DV_CHECK_FATAL(cfg.enable_full_kmac, "This sequence requires EnFullKmac == 1")
     do_kmac_init = 0;
+    // If a random reset is expected, limit the maximum message size to avoid timeouts.
+    // The reset waits until all message writes complete.
+    if (common_seq_type == "stress_all_with_rand_reset") begin
+      cfg.max_msg_size = 5_000;
+    end
     super.pre_start();
   endtask
 

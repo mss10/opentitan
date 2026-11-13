@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -34,7 +34,9 @@ module prim_alert_receiver
   import prim_mubi_pkg::mubi4_t;
 #(
   // enables additional synchronization logic
-  parameter bit AsyncOn = 1'b0
+  parameter bit AsyncOn = 1'b0,
+  // Number of cycles a differential skew is tolerated on the differential alert signal.
+  parameter int unsigned SkewCycles = 1
 ) (
   input             clk_i,
   input             rst_ni,
@@ -57,7 +59,6 @@ module prim_alert_receiver
 );
 
   import prim_mubi_pkg::mubi4_test_true_strict;
-  import prim_mubi_pkg::mubi4_test_false_loose;
 
   /////////////////////////////////
   // decode differential signals //
@@ -75,7 +76,8 @@ module prim_alert_receiver
   );
 
   prim_diff_decode #(
-    .AsyncOn(AsyncOn)
+    .AsyncOn(AsyncOn),
+    .SkewCycles(SkewCycles)
   ) u_decode_alert (
     .clk_i,
     .rst_ni,
@@ -99,17 +101,18 @@ module prim_alert_receiver
   logic ping_req_d, ping_req_q;
   logic ping_pending_d, ping_pending_q;
   logic send_init;
+  logic send_ping;
 
   // signal ping request upon positive transition on ping_req_i
   // signalling is performed by a level change event on the diff output
   assign ping_req_d  = ping_req_i;
-  assign ping_rise   = ping_req_i && !ping_req_q;
+  assign ping_rise   = ping_req_d && !ping_req_q;
   assign ping_tog_pd = (send_init) ? 1'b0         :
-                       (ping_rise) ? ~ping_tog_pq : ping_tog_pq;
+                       (send_ping) ? ~ping_tog_pq : ping_tog_pq;
 
   // in-band reset is performed by sending out an integrity error on purpose.
-  assign ack_dn      = (send_init) ? ack_pd      : ~ack_pd;
-  assign ping_tog_dn = (send_init) ? ping_tog_pd : ~ping_tog_pd;
+  assign ack_dn      = (send_init) ? ack_pd : ~ack_pd;
+  assign ping_tog_dn = ~ping_tog_pd;
 
   // This prevents further tool optimizations of the differential signal.
   prim_sec_anchor_flop #(
@@ -136,7 +139,7 @@ module prim_alert_receiver
           ping_tog_pq})
   );
 
-  // the ping pending signal is used to in the FSM to distinguish whether the
+  // the ping pending signal is used in the FSM to distinguish whether the
   // incoming handshake shall be treated as an alert or a ping response.
   // it is important that this is only set on a rising ping_en level change, since
   // otherwise the ping enable signal could be abused to "mask" all native alerts
@@ -162,6 +165,8 @@ module prim_alert_receiver
     integ_fail_o = 1'b0;
     alert_o      = 1'b0;
     send_init    = 1'b0;
+    // by default, a ping request leads to a toggle on the differential ping pair
+    send_ping    = ping_rise;
 
     unique case (state_q)
       Idle: begin
@@ -193,6 +198,8 @@ module prim_alert_receiver
       InitReq: begin
         // we deliberately place a sigint error on the ack and ping lines in this case.
         send_init = 1'b1;
+        // suppress any toggles on the ping line while we are in the init phase.
+        send_ping = 1'b0;
         // As long as init req is asserted, we remain in this state and acknowledge all incoming
         // ping requests. As soon as the init request is dropped however, ping requests are not
         // acked anymore such that the ping mechanism can also flag alert channels that got stuck
@@ -209,8 +216,14 @@ module prim_alert_receiver
       // has been deasserted. At this point, we need to wait for the alert_sigint to drop again
       // before resuming normal operation.
       InitAckWait: begin
+        // suppress any toggles on the ping line while we are in the init phase.
+        send_ping = 1'b0;
         if (!alert_sigint) begin
           state_d = Pause0;
+          // If we get a ping request in this cycle, or if we realize that there is an unhandled
+          // ping request that came in during initialization (but after init_trig_i has been
+          // deasserted), we signal this to the alert sender by toggling the request line.
+          send_ping = ping_rise || ping_pending_q;
         end
       end
       default: state_d = Idle;
@@ -258,6 +271,10 @@ module prim_alert_receiver
   // assertions //
   ////////////////
 
+`ifdef INC_ASSERT
+  import prim_mubi_pkg::mubi4_test_false_loose;
+`endif
+
   // check whether all outputs have a good known state after reset
   `ASSERT_KNOWN(PingOkKnownO_A, ping_ok_o)
   `ASSERT_KNOWN(IntegFailKnownO_A, integ_fail_o)
@@ -267,10 +284,18 @@ module prim_alert_receiver
   // check encoding of outgoing diffpairs. note that during init, the outgoing diffpairs are
   // supposed to be incorrectly encoded on purpose.
   // shift sequence two cycles to the right to avoid reset effects.
-  `ASSERT(PingDiffOk_A, ##2 $past(send_init) ^ alert_rx_o.ping_p ^ alert_rx_o.ping_n)
+  `ASSERT(PingDiffOk_A, alert_rx_o.ping_p ^ alert_rx_o.ping_n)
   `ASSERT(AckDiffOk_A, ##2 $past(send_init) ^ alert_rx_o.ack_p ^ alert_rx_o.ack_n)
-  // ping request at input -> need to see encoded ping request
-  `ASSERT(PingRequest0_A, ##1 $rose(ping_req_i) && !send_init |=> $changed(alert_rx_o.ping_p))
+  `ASSERT(InitReq_A, mubi4_test_true_strict(init_trig_i) &&
+          !(state_q inside {InitReq, InitAckWait}) |=> send_init)
+
+  // If there is a ping request on the input then we should see an encoded ping request. This is
+  // squashed if we are in state InitReq or InitAckWait (because we are still initialising), or if
+  // we see the init_trig_i signal go high (because it will start an initialisation).
+  `ASSERT(PingRequest0_A,
+          $rose(ping_req_i) |=> $changed(alert_rx_o.ping_p),
+          clk_i, !rst_ni || init_trig_i || state_q inside {InitReq, InitAckWait})
+
   // ping response implies it has been requested
   `ASSERT(PingResponse0_A, ping_ok_o |-> ping_pending_q)
   // correctly latch ping request
@@ -283,15 +308,13 @@ module prim_alert_receiver
         !(state_q inside {InitReq, InitAckWait}) &&
         mubi4_test_false_loose(init_trig_i)
         |->
-        integ_fail_o)
-    // TODO: need to add skewed cases as well, the assertions below assume no skew at the moment
-    // ping response
+        ##[0:SkewCycles] integ_fail_o)
     `ASSERT(PingResponse1_A,
         ##1 $rose(alert_tx_i.alert_p) &&
         (alert_tx_i.alert_p ^ alert_tx_i.alert_n) ##2
         state_q == Idle && ping_pending_q
         |->
-        ping_ok_o,
+        ##[0:SkewCycles] ping_ok_o,
         clk_i, !rst_ni || integ_fail_o || mubi4_test_true_strict(init_trig_i))
     // alert
     `ASSERT(Alert_A,
@@ -300,7 +323,7 @@ module prim_alert_receiver
         state_q == Idle &&
         !ping_pending_q
         |->
-        alert_o,
+        ##[0:SkewCycles] alert_o,
         clk_i, !rst_ni || integ_fail_o || mubi4_test_true_strict(init_trig_i))
   end else begin : gen_sync_assert
     // signal integrity check propagation
@@ -337,7 +360,7 @@ module prim_alert_receiver
   // check in-band init sequence moves FSM into IDLE state
   `ASSERT(InBandInitSequence_A,
       (state_q == InitReq &&
-      mubi4_test_true_strict(init_trig_i) [*1:$]) ##1
+      mubi4_test_true_strict(init_trig_i)) ##1
       (alert_sigint &&
       mubi4_test_false_loose(init_trig_i)) [*1:$] ##1
       (!alert_sigint &&

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -26,8 +26,8 @@
  */
 interface otbn_trace_if
 #(
-  parameter int ImemAddrWidth = 12,
-  parameter int DmemAddrWidth = 12,
+  parameter int ImemAddrWidth = 14,
+  parameter int DmemAddrWidth = 15,
   parameter otbn_pkg::regfile_e RegFile = otbn_pkg::RegFileFF
 )(
   input logic clk_i,
@@ -48,6 +48,15 @@ interface otbn_trace_if
 
   input logic                      rf_bignum_rd_en_a,
   input logic                      rf_bignum_rd_en_b,
+
+  input logic [1:0]                   rf_bignum_wr_en,
+  input logic                         rf_bignum_wr_commit,
+  input logic [otbn_pkg::WLEN-1:0]    rf_bignum_wr_data_no_intg,
+  input logic [otbn_pkg::ExtWLEN-1:0] rf_bignum_wr_data_intg,
+  input logic                         rf_bignum_wr_data_intg_sel,
+
+  input logic [otbn_pkg::ExtWLEN-1:0] rf_bignum_rd_data_a_intg,
+  input logic [otbn_pkg::ExtWLEN-1:0] rf_bignum_rd_data_b_intg,
 
   input logic [31:0]              insn_fetch_resp_data,
   input logic [ImemAddrWidth-1:0] insn_fetch_resp_addr,
@@ -72,9 +81,42 @@ interface otbn_trace_if
   input logic                      rnd_req,
   input logic                      rnd_valid,
 
-  input logic [otbn_pkg::WLEN-1:0] urnd_data
+  input logic [otbn_pkg::UrndLen-1:0]                 urnd_data,
+  input logic                                         ispr_urnd_state_wr,
+  input logic [otbn_pkg::WLEN-1:0]                    ispr_urnd_state_rdata,
+  input logic [otbn_pkg::UrndPartialSeedWidth-1:0]    ispr_urnd_state_wdata,
+  input logic [31:0]                                  ispr_urnd_status_rdata,
+  input logic                                         ispr_urnd_ctrl_wr,
+  input logic [31:0]                                  ispr_urnd_ctrl_wdata,
+
+
+  input logic [31:0] insn_cnt,
+
+  input logic [1:0][otbn_pkg::SideloadKeyWidth-1:0] sideload_key_shares_i,
+
+  input logic secure_wipe_req,
+  input logic secure_wipe_ack,
+  input logic sec_wipe_zero,
+
+  input logic locking_o,
+  input logic urnd_all_zero,
+  input logic insn_addr_err,
+  input logic alu_bignum_predec_error,
+  input logic mac_bignum_predec_error,
+  input logic ispr_predec_error,
+  input logic controller_predec_error,
+  input logic rf_bignum_predec_error,
+  input logic rd_predec_error,
+  input logic rf_base_spurious_we_err,
+  input logic rf_bignum_spurious_we_err,
+
+  input logic rf_base_intg_err,
+  input logic rf_bignum_intg_err,
+  input logic alu_bignum_reg_intg_violation_err,
+  input logic mac_bignum_reg_intg_violation_err
 );
   import otbn_pkg::*;
+  import prim_mubi_pkg::*;
 
   localparam int DmemSubWordAddrWidth = prim_util_pkg::vbits(WLEN/8);
 
@@ -98,7 +140,6 @@ interface otbn_trace_if
 
   logic [WLEN-1:0] rf_bignum_rd_data_a;
   logic [WLEN-1:0] rf_bignum_rd_data_b;
-  logic [WLEN-1:0] rf_bignum_wr_data_no_intg;
 
   assign rf_base_rd_data_a = u_otbn_controller.rf_base_rd_data_a_no_intg;
   assign rf_base_rd_data_b = u_otbn_controller.rf_base_rd_data_b_no_intg;
@@ -108,16 +149,17 @@ interface otbn_trace_if
   assign rf_bignum_rd_data_b = u_otbn_controller.rf_bignum_rd_data_b_no_intg;
 
   // The bignum register file is capable of half register writes. To avoid the tracer having to deal
-  // with this, slightly modified rf_bignum_wr_en and rf_bignum_wr_data signals are provided here.
-  // If there is a half-word write the other half of the register is taken directly from the
-  // register file and both halves are presented as the write data to the tracer. `rf_bignum_wr_en`
-  // becomes a single bit signal because of this.
-  logic            rf_bignum_wr_en;
+  // with this, it should just OR together the bits of rf_bignum_wr_en to get a single "there was a
+  // write" signal.
+  //
+  // We also clean up the (complicated) write data signals here and present them as
+  // rf_bignum_wr_data. Integrity is stripped. If there is a half-word write then the other half of
+  // the register is taken directly from the register file and both halves are presented as the
+  // write data to the tracer.
   logic [WLEN-1:0] rf_bignum_wr_data;
-
-  assign rf_bignum_wr_en = |u_otbn_controller.rf_bignum_wr_en_o;
-
-  logic [WLEN-1:0] rf_bignum_wr_old_data;
+  logic [WLEN-1:0] rf_bignum_wr_data_stripped_intg, rf_bignum_wr_new_data, rf_bignum_wr_old_data;
+  logic [BaseWordsPerWLEN-1:0] unused_bignum_intg_data;
+  logic [ExtWLEN-1:0] unused_bignum_rd_data;
 
   logic [ExtWLEN-1:0] bignum_rf [NWdr];
 
@@ -130,21 +172,36 @@ interface otbn_trace_if
   end
 
   for (genvar i = 0; i < BaseWordsPerWLEN; ++i) begin : g_bignum_rf_strip_intg
-    // u_otbn_rf_bignum.wr_data_no_intg is final write data heading to the register file, which
-    // includes the integrity, this needs to be stripped off for tracing.
-    assign rf_bignum_wr_data_no_intg[i*32 +: 32] =
-        u_otbn_rf_bignum.wr_data_intg_mux_out[i * BaseIntgWidth +: 32];
+    // Strip out integrity bits from rf_bignum_wr_data_intg so that we can use this as a source for
+    // rf_bignum_wr_data_for_trace when rf_bignum_wr_data_intg_sel is set.
+    assign rf_bignum_wr_data_stripped_intg[i*32 +: 32] =
+        rf_bignum_wr_data_intg[i * BaseIntgWidth +: 32];
+
     // Extract data currently in the register file for the current write address, stripping off
     // integrity. This is used to determine the final value for the whole register when doing half
     // register writes.
     assign rf_bignum_wr_old_data[i*32 +: 32] =
         bignum_rf[rf_bignum_wr_addr][i * BaseIntgWidth +: 32];
+
+    // Explicitly ignore the integrity bits
+    assign unused_bignum_intg_data[i] =
+        ^rf_bignum_wr_data_intg[i*BaseIntgWidth+32 +: (BaseIntgWidth - 32)];
   end
 
+  // Ignore integrity included rdata as it is only used when probing RTL to inject errors in a
+  // UVM sequence.
+  assign unused_bignum_rd_data = rf_bignum_rd_data_a_intg ^ rf_bignum_rd_data_b_intg;
+
+  // Use the intg_sel signal to pick where the new write data should come from
+  assign rf_bignum_wr_new_data =
+      rf_bignum_wr_data_intg_sel ? rf_bignum_wr_data_stripped_intg : rf_bignum_wr_data_no_intg;
+
   for (genvar i = 0; i < 2; i++) begin : g_rf_bignum_wr_data
-    assign rf_bignum_wr_data[(WLEN/2)*i +: WLEN/2] = u_otbn_controller.rf_bignum_wr_en_o[i] ?
-      rf_bignum_wr_data_no_intg[(WLEN/2)*i +: WLEN/2] :
-      rf_bignum_wr_old_data[(WLEN/2)*i +: WLEN/2];
+    // Use the write-enable signal to pick whether to use new data or old.
+    assign rf_bignum_wr_data[(WLEN/2)*i +: WLEN/2] =
+        rf_bignum_wr_en[i] ?
+        rf_bignum_wr_new_data[(WLEN/2)*i +: WLEN/2] :
+        rf_bignum_wr_old_data[(WLEN/2)*i +: WLEN/2];
   end
 
   // Take Dmem interface and present it as two separate read and write sets of signals. To ease
@@ -208,25 +265,27 @@ interface otbn_trace_if
 
   assign ispr_write[IsprMod] = |u_otbn_alu_bignum.mod_wr_en & ~ispr_init;
 
-  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : g_mod_words
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : g_mod_and_acc_words
     assign ispr_write_data[IsprMod][i_word*32+:32] =
-      u_otbn_alu_bignum.mod_wr_en[i_word] ? u_otbn_alu_bignum.mod_d[i_word*32+:32] :
-                                            u_otbn_alu_bignum.mod_q[i_word*32+:32];
+      u_otbn_alu_bignum.mod_wr_en[i_word] ? u_otbn_alu_bignum.mod_intg_d[i_word*39+:32] :
+                                            u_otbn_alu_bignum.mod_intg_q[i_word*39+:32];
+    assign ispr_read_data[IsprMod][i_word*32+:32] = u_otbn_alu_bignum.mod_intg_q[i_word*39+:32];
+    assign ispr_write_data[IsprAcc][i_word*32+:32] = u_otbn_mac_bignum.acc_intg_d[i_word*39+:32];
   end
 
-  assign ispr_read[IsprMod] = (any_ispr_read & (ispr_addr == IsprMod)) |
-    (alu_bignum_operation.op inside {AluOpBignumAddm, AluOpBignumSubm});
+  assign ispr_read[IsprMod] =
+    (any_ispr_read & (ispr_addr == IsprMod)) |
+    (insn_fetch_resp_valid &
+     (alu_bignum_operation.op inside {AluOpBignumAddm, AluOpBignumSubm}));
 
-  assign ispr_read_data[IsprMod] = u_otbn_alu_bignum.mod_q;
-
-  assign ispr_write[IsprAcc] = u_otbn_mac_bignum.acc_en & ~ispr_init;
-  assign ispr_write_data[IsprAcc] = u_otbn_mac_bignum.acc_d;
+  assign ispr_write[IsprAcc] = u_otbn_mac_bignum.acc_wr_en & ~ispr_init;
 
   assign ispr_read[IsprAcc] = (any_ispr_read & (ispr_addr == IsprAcc)) | mac_bignum_en;
-  // For ISPR reads look at the ACC flops directly. For other ACC reads look at the `acc` signal in
-  // order to read ACC as 0 for the BN.MULQACC.Z instruction variant.
+  // For ISPR reads look at the ACC flops directly. For other ACC reads look at the `acc_blanked`
+  // signal in order to read ACC as 0 for the BN.MULQACC.Z instruction variant.
   assign ispr_read_data[IsprAcc] =
-      (any_ispr_read & (ispr_addr == IsprAcc)) ? u_otbn_mac_bignum.acc_q : u_otbn_mac_bignum.acc;
+      (any_ispr_read & (ispr_addr == IsprAcc)) ? u_otbn_mac_bignum.acc_no_intg_q  :
+                                                 u_otbn_mac_bignum.acc_add_blanked;
 
   assign ispr_write[IsprRnd] = 1'b0;
   assign ispr_write_data[IsprRnd] = '0;
@@ -237,7 +296,238 @@ interface otbn_trace_if
   assign ispr_read_data[IsprRnd] = rnd_data;
 
   assign ispr_read[IsprUrnd] = any_ispr_read & (ispr_addr == IsprUrnd);
-  assign ispr_read_data[IsprUrnd] = urnd_data;
+  assign ispr_read_data[IsprUrnd] = urnd_data[WLEN-1:0];
+
+  // Upper bits of URND are currently unused in the tracer interface
+  logic unused_urnd;
+  assign unused_urnd = ^urnd_data[UrndLen-1:WLEN];
+
+  assign ispr_read[IsprUrndState] = any_ispr_read & (ispr_addr == IsprUrndState);
+  assign ispr_read_data[IsprUrndState] = ispr_urnd_state_rdata;
+  assign ispr_read[IsprUrndCtrl] = any_ispr_read & (ispr_addr == IsprUrndCtrl);
+  assign ispr_read_data[IsprUrndCtrl] = '0;
+  assign ispr_read[IsprUrndStatus] = any_ispr_read & (ispr_addr == IsprUrndStatus);
+  assign ispr_read_data[IsprUrndStatus] = {{(WLEN - 32){1'b0}}, ispr_urnd_status_rdata};
+
+  assign ispr_write[IsprUrndState] = ispr_urnd_state_wr;
+  // SW can write a full WDR to the state. But only the lower UrndPartialSeedWidth bits are
+  // considered. So we also only trace the actual register value.
+  assign ispr_write_data[IsprUrndState] = {{{WLEN - UrndPartialSeedWidth}{1'b0}},
+                                           ispr_urnd_state_wdata};
+
+  assign ispr_write[IsprUrndCtrl] = ispr_urnd_ctrl_wr;
+  assign ispr_write_data[IsprUrndCtrl] = {{(WLEN - 32){1'b0}}, ispr_urnd_ctrl_wdata};
+  assign ispr_write[IsprUrndStatus] = '0;
+  assign ispr_write_data[IsprUrndStatus] = '0;
+
+  assign ispr_write[IsprKeyS0L] = 1'b0;
+  assign ispr_write_data[IsprKeyS0L] = '0;
+  assign ispr_write[IsprKeyS0H] = 1'b0;
+  assign ispr_write_data[IsprKeyS0H] = '0;
+  assign ispr_write[IsprKeyS1L] = 1'b0;
+  assign ispr_write_data[IsprKeyS1L] = '0;
+  assign ispr_write[IsprKeyS1H] = 1'b0;
+  assign ispr_write_data[IsprKeyS1H] = '0;
+
+  assign ispr_read[IsprKeyS0L] = any_ispr_read & (ispr_addr == IsprKeyS0L);
+  assign ispr_read_data[IsprKeyS0L] = sideload_key_shares_i[0][255:0];
+
+  assign ispr_read[IsprKeyS0H] = any_ispr_read & (ispr_addr == IsprKeyS0H);
+  assign ispr_read_data[IsprKeyS0H] = sideload_key_shares_i[0][SideloadKeyWidth-1:256];
+
+  assign ispr_read[IsprKeyS1L] = any_ispr_read & (ispr_addr == IsprKeyS1L);
+  assign ispr_read_data[IsprKeyS1L] = sideload_key_shares_i[1][255:0];
+
+  assign ispr_read[IsprKeyS1H] = any_ispr_read & (ispr_addr == IsprKeyS1H);
+  assign ispr_read_data[IsprKeyS1H] = sideload_key_shares_i[1][SideloadKeyWidth-1:256];
+
+
+  assign ispr_read[IsprMaiResS0]  = any_ispr_read & (ispr_addr == IsprMaiResS0);
+  assign ispr_read[IsprMaiResS1]  = any_ispr_read & (ispr_addr == IsprMaiResS1);
+  assign ispr_read[IsprMaiIn0S0]  = any_ispr_read & (ispr_addr == IsprMaiIn0S0);
+  assign ispr_read[IsprMaiIn0S1]  = any_ispr_read & (ispr_addr == IsprMaiIn0S1);
+  assign ispr_read[IsprMaiIn1S0]  = any_ispr_read & (ispr_addr == IsprMaiIn1S0);
+  assign ispr_read[IsprMaiIn1S1]  = any_ispr_read & (ispr_addr == IsprMaiIn1S1);
+
+  assign ispr_read[IsprMaiCtrl]   = any_ispr_read & (ispr_addr == IsprMaiCtrl);
+  assign ispr_read[IsprMaiStatus] = any_ispr_read & (ispr_addr == IsprMaiStatus);
+
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_mai_ispr_read_words
+    assign ispr_read_data[IsprMaiResS0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_res_s0_q[i_word].word;
+    assign ispr_read_data[IsprMaiResS1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_res_s1_q[i_word].word;
+    assign ispr_read_data[IsprMaiIn0S0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in0_s0_q[i_word].word;
+    assign ispr_read_data[IsprMaiIn0S1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in0_s1_q[i_word].word;
+    assign ispr_read_data[IsprMaiIn1S0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in1_s0_q[i_word].word;
+    assign ispr_read_data[IsprMaiIn1S1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in1_s1_q[i_word].word;
+  end
+
+
+  assign ispr_read_data[IsprMaiCtrl]   = {{(WLEN - 32){1'b0}}, gen_mai.u_otbn_mai.ispr_mai_ctrl_r};
+  assign ispr_read_data[IsprMaiStatus] = {{(WLEN - 32){1'b0}}, gen_mai.u_otbn_mai.ispr_mai_status};
+
+  assign ispr_write[IsprMaiResS0]  = gen_mai.u_otbn_mai.ispr_mai_res_s0_wr_i |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_res_s0_i;
+  assign ispr_write[IsprMaiResS1]  = gen_mai.u_otbn_mai.ispr_mai_res_s1_wr_i |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_res_s1_i;
+  assign ispr_write[IsprMaiIn0S0]  = (gen_mai.u_otbn_mai.ispr_mai_in0_s0_wr_i &
+                                      gen_mai.u_otbn_mai.ma_wsr_wr_en) |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_in0_s0_i;
+  assign ispr_write[IsprMaiIn0S1]  = (gen_mai.u_otbn_mai.ispr_mai_in0_s1_wr_i &
+                                      gen_mai.u_otbn_mai.ma_wsr_wr_en) |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_in0_s1_i;
+  assign ispr_write[IsprMaiIn1S0]  = (gen_mai.u_otbn_mai.ispr_mai_in1_s0_wr_i &
+                                      gen_mai.u_otbn_mai.ma_wsr_wr_en) |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_in1_s0_i;
+  assign ispr_write[IsprMaiIn1S1]  = (gen_mai.u_otbn_mai.ispr_mai_in1_s1_wr_i &
+                                      gen_mai.u_otbn_mai.ma_wsr_wr_en) |
+                                     gen_mai.u_otbn_mai.sec_wipe_ispr_mai_in1_s1_i;
+
+  assign ispr_write[IsprMaiCtrl]   = gen_mai.u_otbn_mai.ma_ctrl_wr;
+  assign ispr_write[IsprMaiStatus] = 1'b0;
+
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_mai_ispr_write_words
+    assign ispr_write_data[IsprMaiResS0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_res_s0_d[i_word].word;
+    assign ispr_write_data[IsprMaiResS1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_res_s1_d[i_word].word;
+    assign ispr_write_data[IsprMaiIn0S0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in0_s0_d[i_word].word;
+    assign ispr_write_data[IsprMaiIn0S1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in0_s1_d[i_word].word;
+    assign ispr_write_data[IsprMaiIn1S0][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in1_s0_d[i_word].word;
+    assign ispr_write_data[IsprMaiIn1S1][i_word*32+:32] =
+        gen_mai.u_otbn_mai.ispr_mai_in1_s1_d[i_word].word;
+  end
+
+  assign ispr_write_data[IsprMaiCtrl]   = {{(WLEN - 32'd32){1'b0}},
+                                          gen_mai.u_otbn_mai.ispr_mai_ctrl_wdata_i};
+  assign ispr_write_data[IsprMaiStatus] = '0;
+
+  assign ispr_read[IsprKmacDataS0] = any_ispr_read & (ispr_addr == IsprKmacDataS0);
+  assign ispr_read[IsprKmacDataS1] = any_ispr_read & (ispr_addr == IsprKmacDataS1);
+  assign ispr_read[IsprKmacStatus] = any_ispr_read & (ispr_addr == IsprKmacStatus);
+  assign ispr_read[IsprKmacCtrl]   = any_ispr_read & (ispr_addr == IsprKmacCtrl);
+  assign ispr_read[IsprKmacCfg]    = any_ispr_read & (ispr_addr == IsprKmacCfg);
+  assign ispr_read[IsprKmacStrb]   = any_ispr_read & (ispr_addr == IsprKmacStrb);
+
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_kmac_ispr_read_words
+    assign ispr_read_data[IsprKmacDataS0][i_word*32+:32] =
+          u_otbn_kmac_if.ispr_kmac_data_s0_rdata_o[i_word*39+:32];
+    assign ispr_read_data[IsprKmacDataS1][i_word*32+:32] =
+          u_otbn_kmac_if.ispr_kmac_data_s1_rdata_o[i_word*39+:32];
+  end
+
+  assign ispr_read_data[IsprKmacStatus] = {{(WLEN - 32'd32){1'b0}},
+                                           u_otbn_kmac_if.ispr_kmac_status_rdata_o};
+  assign ispr_read_data[IsprKmacCtrl]   = '0;
+  assign ispr_read_data[IsprKmacCfg]    = {{(WLEN - 32'd32){1'b0}},
+                                           u_otbn_kmac_if.ispr_kmac_cfg_rdata_o};
+  assign ispr_read_data[IsprKmacStrb]   = {{(WLEN - 32'd32){1'b0}},
+                                           u_otbn_kmac_if.ispr_kmac_strb_rdata_o};
+
+  // TODO: The response update is not considered. Do we need to model this?
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_kmac_ispr_write_words
+    assign ispr_write_data[IsprKmacDataS0][i_word*32+:32] =
+        u_otbn_kmac_if.ispr_kmac_data_s0_d[i_word].word;
+    assign ispr_write_data[IsprKmacDataS1][i_word*32+:32] =
+        u_otbn_kmac_if.ispr_kmac_data_s1_d[i_word].word;
+
+  end
+
+  assign ispr_write[IsprKmacDataS0] = u_otbn_kmac_if.ispr_kmac_data_s0_wr_i ||
+                                      u_otbn_kmac_if.sec_wipe_ispr_kmac_data_s0_i;
+  assign ispr_write[IsprKmacDataS1] = u_otbn_kmac_if.ispr_kmac_data_s1_wr_i ||
+                                      u_otbn_kmac_if.sec_wipe_ispr_kmac_data_s1_i;
+
+  // A write can clear certain bits.
+  assign ispr_write[IsprKmacStatus]      = u_otbn_kmac_if.ispr_kmac_status_wr_i;
+  assign ispr_write_data[IsprKmacStatus] = {{(WLEN - 32'd32){1'b0}},
+                                            u_otbn_kmac_if.ispr_kmac_status_wdata_i};
+
+  // There is no direct secure wipe.
+  assign ispr_write[IsprKmacCtrl]      = u_otbn_kmac_if.ispr_kmac_ctrl_wr_i;
+  assign ispr_write_data[IsprKmacCtrl] = {{(WLEN - 32'd32){1'b0}},
+                                          u_otbn_kmac_if.ispr_kmac_ctrl_wdata_i};
+
+  // There is no direct secure wipe.
+  assign ispr_write[IsprKmacCfg]       = u_otbn_kmac_if.ispr_kmac_cfg_wr_i;
+  assign ispr_write_data[IsprKmacCfg]  = {{(WLEN - 32'd32){1'b0}},
+                                          u_otbn_kmac_if.ispr_kmac_cfg_wdata_i};
+
+  // There is no direct secure wipe.
+  assign ispr_write[IsprKmacStrb]      = u_otbn_kmac_if.ispr_kmac_strb_wr_i;
+  assign ispr_write_data[IsprKmacStrb] = {{(WLEN - 32'd32){1'b0}},
+                                          u_otbn_kmac_if.ispr_kmac_strb_wdata_i};
+
+  // Keymgr interface
+  // TODO: These ISPRs are not traced until there is a simulator implementation
+  assign ispr_read[IsprKeymgrMsgS0L] = '0; // any_ispr_read & (ispr_addr == IsprKeymgrMsgS0L);
+  assign ispr_read[IsprKeymgrMsgS0H] = '0; // any_ispr_read & (ispr_addr == IsprKeymgrMsgS0H);
+  assign ispr_read[IsprKeymgrMsgS1L] = '0; // any_ispr_read & (ispr_addr == IsprKeymgrMsgS1L);
+  assign ispr_read[IsprKeymgrMsgS1H] = '0; // any_ispr_read & (ispr_addr == IsprKeymgrMsgS1H);
+  assign ispr_read[IsprKeymgrStatus] = '0; // any_ispr_read & (ispr_addr == IsprKeymgrStatus);
+  assign ispr_read[IsprKeymgrCtrl]   = '0; // any_ispr_read & (ispr_addr == IsprKeymgrCtrl);
+
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_keymgr_ispr_read_words
+    assign ispr_read_data[IsprKeymgrMsgS0L][i_word*32+:32] =
+          u_otbn_keymgr_if.ispr_keymgr_msg_s0_l_rdata_o[i_word*39+:32];
+    assign ispr_read_data[IsprKeymgrMsgS0H][i_word*32+:32] =
+          u_otbn_keymgr_if.ispr_keymgr_msg_s0_h_rdata_o[i_word*39+:32];
+    assign ispr_read_data[IsprKeymgrMsgS1L][i_word*32+:32] =
+          u_otbn_keymgr_if.ispr_keymgr_msg_s1_l_rdata_o[i_word*39+:32];
+    assign ispr_read_data[IsprKeymgrMsgS1H][i_word*32+:32] =
+          u_otbn_keymgr_if.ispr_keymgr_msg_s1_h_rdata_o[i_word*39+:32];
+  end
+
+  assign ispr_read_data[IsprKeymgrStatus] = {{(WLEN - 32'd32){1'b0}},
+                                             u_otbn_keymgr_if.ispr_keymgr_status_rdata_o};
+  assign ispr_read_data[IsprKeymgrCtrl]   = '0;
+
+  // TODO: The request update is not considered as write. Do we need to model this?
+  for (genvar i_word = 0; i_word < BaseWordsPerWLEN; i_word++) begin : gen_keymgr_ispr_write_words
+    assign ispr_write_data[IsprKeymgrMsgS0L][i_word*32+:32] =
+        u_otbn_keymgr_if.ispr_keymgr_msg_s0_l_d[i_word].word;
+    assign ispr_write_data[IsprKeymgrMsgS0H][i_word*32+:32] =
+        u_otbn_keymgr_if.ispr_keymgr_msg_s0_h_d[i_word].word;
+    assign ispr_write_data[IsprKeymgrMsgS1L][i_word*32+:32] =
+        u_otbn_keymgr_if.ispr_keymgr_msg_s1_l_d[i_word].word;
+    assign ispr_write_data[IsprKeymgrMsgS1H][i_word*32+:32] =
+        u_otbn_keymgr_if.ispr_keymgr_msg_s1_h_d[i_word].word;
+  end
+
+  // TODO: These ISPRs are not traced until there is a simulator implementation
+  assign ispr_write[IsprKeymgrMsgS0L] = '0; // u_otbn_keymgr_if.ispr_keymgr_msg_s0_l_wr_i ||
+                                        // u_otbn_keymgr_if.sec_wipe_ispr_keymgr_msg_s0_l_i;
+  assign ispr_write[IsprKeymgrMsgS0H] = '0; // u_otbn_keymgr_if.ispr_keymgr_msg_s0_h_wr_i ||
+                                        // u_otbn_keymgr_if.sec_wipe_ispr_keymgr_msg_s0_h_i;
+  assign ispr_write[IsprKeymgrMsgS1L] = '0; // u_otbn_keymgr_if.ispr_keymgr_msg_s1_l_wr_i ||
+                                        // u_otbn_keymgr_if.sec_wipe_ispr_keymgr_msg_s1_l_i;
+  assign ispr_write[IsprKeymgrMsgS1H] = '0; // u_otbn_keymgr_if.ispr_keymgr_msg_s1_h_wr_i ||
+                                        // u_otbn_keymgr_if.sec_wipe_ispr_keymgr_msg_s1_h_i;
+
+  // This is read only
+  assign ispr_write[IsprKeymgrStatus]      = '0;
+  assign ispr_write_data[IsprKeymgrStatus] = '0;
+
+  // There is no direct secure wipe.
+  // TODO: This ISPR is not traced until there is a simulator implementation
+  assign ispr_write[IsprKeymgrCtrl]      = '0; // u_otbn_keymgr_if.ispr_keymgr_ctrl_wr_i;
+  assign ispr_write_data[IsprKeymgrCtrl] = {{(WLEN - 32'd32){1'b0}},
+                                            u_otbn_keymgr_if.ispr_keymgr_ctrl_wdata_i};
+
+  // Instruction counter
+  assign ispr_write[IsprInsnCnt] = 1'b0;
+  assign ispr_write_data[IsprInsnCnt] = '0;
+
+  assign ispr_read[IsprInsnCnt] = any_ispr_read & (ispr_addr == IsprInsnCnt);
+  assign ispr_read_data[IsprInsnCnt] = {{(WLEN - 32){1'b0}}, insn_cnt};
 
   // Separate per flag group tracking using the flags_t struct so tracer can cleanly present flag
   // accesses.
@@ -255,7 +545,12 @@ interface otbn_trace_if
                                        AluOpBignumOr, AluOpBignumAnd, AluOpBignumNot});
 
   for (genvar i_fg = 0; i_fg < NFlagGroups; i_fg++) begin : g_flag_group_acceses
-    assign flags_write[i_fg] = u_otbn_alu_bignum.flags_en[i_fg] & ~ispr_init;
+    assign flags_write[i_fg] = (sec_wipe_zero |
+        ((u_otbn_alu_bignum.alu_bignum_predec_i.flags_adder_update[i_fg] |
+          u_otbn_alu_bignum.alu_bignum_predec_i.flags_logic_update[i_fg] |
+          u_otbn_alu_bignum.alu_bignum_predec_i.flags_mac_update[i_fg] |
+          (|u_otbn_alu_bignum.alu_bignum_predec_i.flags_ispr_wr)) &
+          u_otbn_alu_bignum.operation_commit_i)) & ~ispr_init;
     assign flags_write_data[i_fg] = u_otbn_alu_bignum.flags_d[i_fg];
 
     assign flags_read[i_fg] = (any_ispr_read & (ispr_addr == IsprFlags)) |
@@ -263,6 +558,182 @@ interface otbn_trace_if
 
     assign flags_read_data[i_fg] = u_otbn_alu_bignum.flags_q[i_fg];
   end
+
+  logic initial_secure_wipe_done;
+  logic secure_wipe_ack_r;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      initial_secure_wipe_done <= 1'b0;
+      secure_wipe_ack_r <= 1'b0;
+    end else begin
+      secure_wipe_ack_r <= secure_wipe_ack;
+      if (secure_wipe_ack) begin
+        initial_secure_wipe_done <= 1'b1;
+      end
+    end
+  end
+
+  // Internal Integrity Check Probes
+  internal_intg_err_t internal_intg_err_i, internal_intg_err_d, internal_intg_err_q;
+
+  assign internal_intg_err_d = (locking_o) ? '0 : (internal_intg_err_q | internal_intg_err_i);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      internal_intg_err_q <= '0;
+    end else begin
+      internal_intg_err_q <= internal_intg_err_d;
+    end
+  end
+
+  // Register integrity check signals to model the registering of the escalation signal.
+  logic rf_base_intg_err_q;
+  logic rf_bignum_intg_err_q;
+  logic alu_bignum_reg_intg_violation_err_q;
+  logic mac_bignum_reg_intg_violation_err_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      rf_base_intg_err_q                  <= '0;
+      rf_bignum_intg_err_q                <= '0;
+      alu_bignum_reg_intg_violation_err_q <= '0;
+      mac_bignum_reg_intg_violation_err_q <= '0;
+    end else begin
+      rf_base_intg_err_q                  <= rf_base_intg_err;
+      rf_bignum_intg_err_q                <= rf_bignum_intg_err;
+      alu_bignum_reg_intg_violation_err_q <= alu_bignum_reg_intg_violation_err;
+      mac_bignum_reg_intg_violation_err_q <= mac_bignum_reg_intg_violation_err;
+    end
+  end
+
+  assign internal_intg_err_i.rf_base_intg_err = rf_base_intg_err_q;
+  assign internal_intg_err_i.rf_bignum_intg_err = rf_bignum_intg_err_q;
+  assign internal_intg_err_i.mod_ispr_intg_err = alu_bignum_reg_intg_violation_err_q;
+  assign internal_intg_err_i.mac_ispr_intg_err = mac_bignum_reg_intg_violation_err_q;
+  assign internal_intg_err_i.loop_stack_addr_intg_err = controller_bad_int_i.loop_hw_intg_err;
+  assign internal_intg_err_i.insn_fetch_intg_err = insn_fetch_err;
+
+  // Bad Internal State Probes
+  // We need to capture them until we are actually locking to sample them in the correct instance.
+  predec_err_t predec_err_i, predec_err_d, predec_err_q;
+  start_stop_bad_int_t start_stop_bad_int_i, start_stop_bad_int_d, start_stop_bad_int_q;
+  controller_bad_int_t controller_bad_int_i, controller_bad_int_d, controller_bad_int_q;
+  missed_gnt_t missed_gnt_i, missed_gnt_d, missed_gnt_q;
+  logic scramble_state_err_i, scramble_state_err_d, scramble_state_err_q;
+  logic urnd_all_zero_d, urnd_all_zero_q;
+  logic insn_addr_err_d, insn_addr_err_q;
+  logic rf_base_spurious_we_err_d, rf_base_spurious_we_err_q;
+  logic rf_bignum_spurious_we_err_d, rf_bignum_spurious_we_err_q;
+
+  assign missed_gnt_d = (locking_o) ? '0 : (missed_gnt_q | missed_gnt_i);
+  assign predec_err_d = (locking_o) ? '0 : (predec_err_q | predec_err_i);
+  assign urnd_all_zero_d = (locking_o) ? '0 : (urnd_all_zero_q | urnd_all_zero);
+  assign insn_addr_err_d = (locking_o) ? '0 : (insn_addr_err_q | insn_addr_err);
+  assign start_stop_bad_int_d = (locking_o) ? '0 : (start_stop_bad_int_q | start_stop_bad_int_i);
+  assign controller_bad_int_d = (locking_o) ? '0 : (controller_bad_int_q | controller_bad_int_i);
+  assign scramble_state_err_d = (locking_o) ? '0 : (scramble_state_err_q | scramble_state_err_i);
+  assign rf_base_spurious_we_err_d = (locking_o) ? '0 :
+   (rf_base_spurious_we_err_q | rf_base_spurious_we_err);
+  assign rf_bignum_spurious_we_err_d = (locking_o) ? '0 :
+   (rf_bignum_spurious_we_err_q | rf_bignum_spurious_we_err);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      missed_gnt_q <= '0;
+      predec_err_q <= '0;
+      urnd_all_zero_q <= '0;
+      insn_addr_err_q <= '0;
+      start_stop_bad_int_q <= '0;
+      controller_bad_int_q <= '0;
+      scramble_state_err_q <= '0;
+      rf_bignum_spurious_we_err_q <= '0;
+      rf_base_spurious_we_err_q <= '0;
+    end else begin
+      missed_gnt_q <= missed_gnt_d;
+      predec_err_q <= predec_err_d;
+      urnd_all_zero_q <= urnd_all_zero_d;
+      insn_addr_err_q <= insn_addr_err_d;
+      scramble_state_err_q <= scramble_state_err_d;
+      start_stop_bad_int_q <= start_stop_bad_int_d;
+      controller_bad_int_q <= controller_bad_int_d;
+      rf_base_spurious_we_err_q <= rf_base_spurious_we_err_d;
+      rf_bignum_spurious_we_err_q <= rf_bignum_spurious_we_err_d;
+    end
+  end
+
+  assign predec_err_i.alu_bignum_err = alu_bignum_predec_error && insn_fetch_resp_valid;
+  assign predec_err_i.mac_bignum_err = mac_bignum_predec_error && insn_fetch_resp_valid;
+  assign predec_err_i.ispr_bignum_err = ispr_predec_error;
+  assign predec_err_i.controller_err = controller_predec_error;
+  assign predec_err_i.rf_err = rf_bignum_predec_error;
+  assign predec_err_i.rd_err = rd_predec_error;
+
+  assign start_stop_bad_int_i.state_err = u_otbn_start_stop_control.state_error_d;
+  assign start_stop_bad_int_i.spr_urnd_acks = u_otbn_rnd.edn_urnd_i.edn_ack &&
+    (!u_otbn_rnd.edn_urnd_o.edn_req);
+  assign start_stop_bad_int_i.spr_rnd_acks = u_otbn_rnd.edn_rnd_ack_i &&
+    (!u_otbn_rnd.edn_rnd_req_o);
+  assign start_stop_bad_int_i.spr_secwipe_reqs = u_otbn_start_stop_control.secure_wipe_error_q;
+
+  assign start_stop_bad_int_i.mubi_rma_err = u_otbn_start_stop_control.mubi_err_d &&
+    prim_mubi_pkg::mubi4_test_invalid(u_otbn_start_stop_control.rma_ack_q);
+  assign start_stop_bad_int_i.mubi_urnd_err = u_otbn_start_stop_control.mubi_err_d &&
+    prim_mubi_pkg::mubi4_test_invalid(u_otbn_start_stop_control.wipe_after_urnd_refresh_q);
+
+  assign controller_bad_int_i.loop_hw_cnt_err =
+    (|u_otbn_controller.u_otbn_loop_controller.loop_counter_err);
+
+  assign controller_bad_int_i.loop_hw_stack_cnt_err =
+    u_otbn_controller.u_otbn_loop_controller.loop_stack_cnt_err;
+
+  assign controller_bad_int_i.loop_hw_intg_err =
+    ((|u_otbn_controller.u_otbn_loop_controller.current_loop_intg_err) &&
+     u_otbn_controller.u_otbn_loop_controller.current_loop_valid);
+
+  assign controller_bad_int_i.rf_base_call_stack_err =
+    u_otbn_controller.rf_base_call_stack_hw_err_i;
+  assign controller_bad_int_i.spr_secwipe_acks = u_otbn_controller.spurious_secure_wipe_ack_q;
+  assign controller_bad_int_i.state_err = u_otbn_controller.state_error;
+  assign controller_bad_int_i.controller_mubi_err = u_otbn_controller.mubi_err_q;
+
+  // Probe Start Stop Control module FSM to inject escalate signals in specific states.
+  otbn_start_stop_state_e otbn_start_stop_state;
+  // Use this to mute Verilator unused errors.
+  otbn_start_stop_state_e unused_start_stop_state;
+
+  assign otbn_start_stop_state = u_otbn_start_stop_control.state_q;
+  assign unused_start_stop_state = otbn_start_stop_state;
+
+  // Only define force/release functions if we're not running Verilator. This is because the version
+  // we currently use does not support force/release.
+  `ifndef VERILATOR
+
+  // Force the `rd_data_a_intg_o` signal to `should_val`.  This function needs to be static because
+  // its argument must live as least as long as the `force` statement is in effect.
+  function static void force_rf_bignum_rd_data_a_intg(
+      input logic [otbn_pkg::ExtWLEN-1:0] should_val
+    );
+    force u_otbn_rf_bignum.rd_data_a_intg_o = should_val;
+  endfunction
+
+  // Force the `rd_data_b_intg_o` signal to `should_val`.  This function needs to be static because
+  // its argument must live as least as long as the `force` statement is in effect.
+  function static void force_rf_bignum_rd_data_b_intg(
+      input logic [otbn_pkg::ExtWLEN-1:0] should_val
+    );
+    force u_otbn_rf_bignum.rd_data_b_intg_o = should_val;
+  endfunction
+
+  // Release the forcing of the `rd_data_a_intg_o` signal.
+  function automatic void release_rf_bignum_rd_data_a_intg();
+    release u_otbn_rf_bignum.rd_data_a_intg_o;
+  endfunction
+
+  // Release the forcing of the `rd_data_b_intg_o` signal.
+  function automatic void release_rf_bignum_rd_data_b_intg();
+    release u_otbn_rf_bignum.rd_data_b_intg_o;
+  endfunction
+  `endif // VERILATOR
+
 endinterface
 
 `endif // SYNTHESIS

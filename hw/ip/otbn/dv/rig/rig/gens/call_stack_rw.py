@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -54,7 +54,8 @@ class CallStackRW(SnippetGen):
                 weight = cfg.insn_weights.get(insn.mnemonic)
                 if weight > 0:
                     self.insns.append(insn)
-                    self.indices.append((gpr_dsts[0], gpr_srcs[0], gpr_srcs[1]))
+                    self.indices.append((gpr_dsts[0],
+                                         gpr_srcs[0], gpr_srcs[1]))
                     self.weights.append(weight)
 
         if not self.insns:
@@ -81,7 +82,8 @@ class CallStackRW(SnippetGen):
         '''
 
         # Pick an instruction
-        insn_idx = random.choices(range(len(self.weights)), weights=self.weights)[0]
+        insn_idx = random.choices(range(len(self.weights)),
+                                  weights=self.weights)[0]
 
         grd_idx, grs1_idx, grs2_idx = self.indices[insn_idx]
         insn = self.insns[insn_idx]
@@ -150,7 +152,7 @@ class CallStackRW(SnippetGen):
         model.update_for_insn(prog_insn)
         model.pc += 4
 
-        return (snippet, False, model)
+        return (snippet, model)
 
 
 class BadCallStackRW(CallStackRW):
@@ -232,4 +234,4 @@ class BadCallStackRW(CallStackRW):
         # instruction.
         model.pc += 4 * (len(prog_insns) - 1)
 
-        return (snippet, True, model)
+        return (snippet, model)

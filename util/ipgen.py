@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""IP Generator: Produce IP blocks from IP templates
@@ -15,11 +15,11 @@ from ipgen import (IpBlockRenderer, IpConfig, IpTemplate, TemplateParseError,
 
 def init_logging(verbose: bool) -> None:
     """ Initialize the logging system """
+    log_format = "%(filename)s:%(lineno)d: %(levelname)s: %(message)s"
     if verbose:
-        logging.basicConfig(format="%(levelname)s: %(message)s",
-                            level=logging.DEBUG)
+        logging.basicConfig(format=log_format, level=logging.DEBUG)
     else:
-        logging.basicConfig(format="%(levelname)s: %(message)s")
+        logging.basicConfig(format=log_format)
 
 
 def action_generate(ip_template: IpTemplate, args: argparse.Namespace) -> None:
@@ -31,7 +31,8 @@ def action_generate(ip_template: IpTemplate, args: argparse.Namespace) -> None:
     config_fp = args.config_file
     config_text = config_fp.read()
     config_fp.close()
-    ip_config = IpConfig.from_text(config_text, "the file passed to --config")
+    ip_config = IpConfig.from_text(ip_template.params, config_text,
+                                   "the file passed to --config")
 
     # Render the IP template into an IP block.
     renderer = IpBlockRenderer(ip_template, ip_config)
@@ -119,7 +120,7 @@ def main() -> int:
     parser_generate.add_argument(
         "--config-file",
         "-c",
-        required=False,
+        required=True,
         type=argparse.FileType('r'),
         help="path to a configuration file",
     )

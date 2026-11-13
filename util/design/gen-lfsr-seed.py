@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""This script generates random seeds and state permutations for LFSRs
@@ -15,7 +15,7 @@ from lib import common as common
 SV_INSTRUCTIONS = """
 ------------------------------------------------
 | COPY PASTE THE CODE TEMPLATE BELOW INTO YOUR |
-| RTL CODE, INLUDING THE COMMENT IN ORDER TO   |
+| RTL CODE, INCLUDING THE COMMENT IN ORDER TO  |
 | EASE AUDITABILITY AND REPRODUCIBILITY.       |
 ------------------------------------------------
 """
@@ -71,7 +71,9 @@ def main():
 parameter int {}LfsrWidth = {};
 typedef logic [{}LfsrWidth-1:0] {}lfsr_seed_t;
 typedef logic [{}LfsrWidth-1:0][$clog2({}LfsrWidth)-1:0] {}lfsr_perm_t;
-parameter {}lfsr_seed_t RndCnst{}LfsrSeedDefault = {};
+parameter {}lfsr_seed_t RndCnst{}LfsrSeedDefault = {{
+  {}
+}};
 parameter {}lfsr_perm_t RndCnst{}LfsrPermDefault = {{
   {}
 }};

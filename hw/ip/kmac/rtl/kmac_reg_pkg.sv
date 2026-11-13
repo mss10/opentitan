@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,11 +9,23 @@ package kmac_reg_pkg;
   // Param list
   parameter int NumWordsKey = 16;
   parameter int NumWordsPrefix = 11;
+  parameter int NumEntriesMsgFifo = 10;
+  parameter int NumBytesMsgFifoEntry = 8;
   parameter int unsigned HashCntW = 10;
-  parameter int NumAlerts = 1;
+  parameter int NumSeedsEntropy = 6;
+  parameter int NumAlerts = 2;
 
   // Address widths within the block
   parameter int BlockAw = 12;
+
+  // Number of registers for every interface
+  parameter int NumRegs = 57;
+
+  // Alert indices
+  typedef enum int {
+    AlertRecovOperationErrIdx = 0,
+    AlertFatalFaultErrIdx = 1
+  } kmac_alert_idx_t;
 
   ////////////////////////////
   // Typedefs for registers //
@@ -22,32 +34,32 @@ package kmac_reg_pkg;
   typedef struct packed {
     struct packed {
       logic        q;
-    } kmac_done;
+    } kmac_err;
     struct packed {
       logic        q;
     } fifo_empty;
     struct packed {
       logic        q;
-    } kmac_err;
+    } kmac_done;
   } kmac_reg2hw_intr_state_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        q;
-    } kmac_done;
+    } kmac_err;
     struct packed {
       logic        q;
     } fifo_empty;
     struct packed {
       logic        q;
-    } kmac_err;
+    } kmac_done;
   } kmac_reg2hw_intr_enable_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        q;
       logic        qe;
-    } kmac_done;
+    } kmac_err;
     struct packed {
       logic        q;
       logic        qe;
@@ -55,86 +67,103 @@ package kmac_reg_pkg;
     struct packed {
       logic        q;
       logic        qe;
-    } kmac_err;
+    } kmac_done;
   } kmac_reg2hw_intr_test_reg_t;
 
   typedef struct packed {
-    logic        q;
-    logic        qe;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } fatal_fault_err;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } recov_operation_err;
   } kmac_reg2hw_alert_test_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        q;
-    } kmac_en;
-    struct packed {
-      logic [2:0]  q;
-    } kstrength;
-    struct packed {
-      logic [1:0]  q;
-    } mode;
+      logic        qe;
+    } en_unsupported_modestrength;
     struct packed {
       logic        q;
-    } msg_endianness;
-    struct packed {
-      logic        q;
-    } state_endianness;
-    struct packed {
-      logic        q;
-    } sideload;
-    struct packed {
-      logic [1:0]  q;
-    } entropy_mode;
-    struct packed {
-      logic        q;
-    } entropy_fast_process;
-    struct packed {
-      logic        q;
+      logic        qe;
     } entropy_ready;
     struct packed {
       logic        q;
-    } err_processed;
-  } kmac_reg2hw_cfg_reg_t;
+      logic        qe;
+    } msg_mask;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } entropy_fast_process;
+    struct packed {
+      logic [1:0]  q;
+      logic        qe;
+    } entropy_mode;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } sideload;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } state_endianness;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } msg_endianness;
+    struct packed {
+      logic [1:0]  q;
+      logic        qe;
+    } mode;
+    struct packed {
+      logic [2:0]  q;
+      logic        qe;
+    } kstrength;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } kmac_en;
+  } kmac_reg2hw_cfg_shadowed_reg_t;
 
   typedef struct packed {
     struct packed {
-      logic [3:0]  q;
+      logic        q;
       logic        qe;
-    } cmd;
+    } err_processed;
+    struct packed {
+      logic        q;
+      logic        qe;
+    } hash_cnt_clr;
     struct packed {
       logic        q;
       logic        qe;
     } entropy_req;
     struct packed {
-      logic        q;
+      logic [5:0]  q;
       logic        qe;
-    } hash_cnt_clr;
+    } cmd;
   } kmac_reg2hw_cmd_reg_t;
 
   typedef struct packed {
     struct packed {
-      logic [9:0] q;
-    } prescaler;
-    struct packed {
       logic [15:0] q;
     } wait_timer;
+    struct packed {
+      logic [9:0] q;
+    } prescaler;
   } kmac_reg2hw_entropy_period_reg_t;
 
   typedef struct packed {
-    struct packed {
-      logic [9:0] q;
-    } threshold;
-  } kmac_reg2hw_entropy_refresh_reg_t;
+    logic [9:0] q;
+  } kmac_reg2hw_entropy_refresh_threshold_shadowed_reg_t;
 
   typedef struct packed {
     logic [31:0] q;
     logic        qe;
-  } kmac_reg2hw_entropy_seed_lower_reg_t;
-
-  typedef struct packed {
-    logic [31:0] q;
-    logic        qe;
-  } kmac_reg2hw_entropy_seed_upper_reg_t;
+  } kmac_reg2hw_entropy_seed_reg_t;
 
   typedef struct packed {
     logic [31:0] q;
@@ -158,7 +187,7 @@ package kmac_reg_pkg;
     struct packed {
       logic        d;
       logic        de;
-    } kmac_done;
+    } kmac_err;
     struct packed {
       logic        d;
       logic        de;
@@ -166,7 +195,7 @@ package kmac_reg_pkg;
     struct packed {
       logic        d;
       logic        de;
-    } kmac_err;
+    } kmac_done;
   } kmac_hw2reg_intr_state_reg_t;
 
   typedef struct packed {
@@ -176,41 +205,46 @@ package kmac_reg_pkg;
   typedef struct packed {
     struct packed {
       logic        d;
-      logic        de;
+    } alert_recov_ctrl_update_err;
+    struct packed {
+      logic        d;
+    } alert_fatal_fault;
+    struct packed {
+      logic        d;
+    } entropy_reseeding;
+    struct packed {
+      logic        d;
     } entropy_ready;
     struct packed {
       logic        d;
-      logic        de;
-    } err_processed;
-  } kmac_hw2reg_cfg_reg_t;
-
-  typedef struct packed {
+    } fifo_full;
     struct packed {
       logic        d;
-    } sha3_idle;
-    struct packed {
-      logic        d;
-    } sha3_absorb;
-    struct packed {
-      logic        d;
-    } sha3_squeeze;
+    } fifo_empty;
     struct packed {
       logic [4:0]  d;
     } fifo_depth;
     struct packed {
       logic        d;
-    } fifo_empty;
+    } state_write;
     struct packed {
       logic        d;
-    } fifo_full;
+    } sha3_stopped;
+    struct packed {
+      logic        d;
+    } sha3_squeeze;
+    struct packed {
+      logic        d;
+    } sha3_absorb;
+    struct packed {
+      logic        d;
+    } sha3_idle;
   } kmac_hw2reg_status_reg_t;
 
   typedef struct packed {
-    struct packed {
-      logic [9:0] d;
-      logic        de;
-    } hash_cnt;
-  } kmac_hw2reg_entropy_refresh_reg_t;
+    logic [9:0] d;
+    logic        de;
+  } kmac_hw2reg_entropy_refresh_hash_cnt_reg_t;
 
   typedef struct packed {
     logic [31:0] d;
@@ -219,16 +253,16 @@ package kmac_reg_pkg;
 
   // Register -> HW type
   typedef struct packed {
-    kmac_reg2hw_intr_state_reg_t intr_state; // [1549:1547]
-    kmac_reg2hw_intr_enable_reg_t intr_enable; // [1546:1544]
-    kmac_reg2hw_intr_test_reg_t intr_test; // [1543:1538]
-    kmac_reg2hw_alert_test_reg_t alert_test; // [1537:1536]
-    kmac_reg2hw_cfg_reg_t cfg; // [1535:1522]
-    kmac_reg2hw_cmd_reg_t cmd; // [1521:1513]
-    kmac_reg2hw_entropy_period_reg_t entropy_period; // [1512:1487]
-    kmac_reg2hw_entropy_refresh_reg_t entropy_refresh; // [1486:1477]
-    kmac_reg2hw_entropy_seed_lower_reg_t entropy_seed_lower; // [1476:1444]
-    kmac_reg2hw_entropy_seed_upper_reg_t entropy_seed_upper; // [1443:1411]
+    kmac_reg2hw_intr_state_reg_t intr_state; // [1534:1532]
+    kmac_reg2hw_intr_enable_reg_t intr_enable; // [1531:1529]
+    kmac_reg2hw_intr_test_reg_t intr_test; // [1528:1523]
+    kmac_reg2hw_alert_test_reg_t alert_test; // [1522:1519]
+    kmac_reg2hw_cfg_shadowed_reg_t cfg_shadowed; // [1518:1493]
+    kmac_reg2hw_cmd_reg_t cmd; // [1492:1480]
+    kmac_reg2hw_entropy_period_reg_t entropy_period; // [1479:1454]
+    kmac_reg2hw_entropy_refresh_threshold_shadowed_reg_t
+        entropy_refresh_threshold_shadowed; // [1453:1444]
+    kmac_reg2hw_entropy_seed_reg_t entropy_seed; // [1443:1411]
     kmac_reg2hw_key_share0_mreg_t [15:0] key_share0; // [1410:883]
     kmac_reg2hw_key_share1_mreg_t [15:0] key_share1; // [882:355]
     kmac_reg2hw_key_len_reg_t key_len; // [354:352]
@@ -237,11 +271,10 @@ package kmac_reg_pkg;
 
   // HW -> register type
   typedef struct packed {
-    kmac_hw2reg_intr_state_reg_t intr_state; // [64:59]
-    kmac_hw2reg_cfg_regwen_reg_t cfg_regwen; // [58:58]
-    kmac_hw2reg_cfg_reg_t cfg; // [57:54]
-    kmac_hw2reg_status_reg_t status; // [53:44]
-    kmac_hw2reg_entropy_refresh_reg_t entropy_refresh; // [43:33]
+    kmac_hw2reg_intr_state_reg_t intr_state; // [66:61]
+    kmac_hw2reg_cfg_regwen_reg_t cfg_regwen; // [60:60]
+    kmac_hw2reg_status_reg_t status; // [59:44]
+    kmac_hw2reg_entropy_refresh_hash_cnt_reg_t entropy_refresh_hash_cnt; // [43:33]
     kmac_hw2reg_err_code_reg_t err_code; // [32:0]
   } kmac_hw2reg_t;
 
@@ -251,13 +284,13 @@ package kmac_reg_pkg;
   parameter logic [BlockAw-1:0] KMAC_INTR_TEST_OFFSET = 12'h 8;
   parameter logic [BlockAw-1:0] KMAC_ALERT_TEST_OFFSET = 12'h c;
   parameter logic [BlockAw-1:0] KMAC_CFG_REGWEN_OFFSET = 12'h 10;
-  parameter logic [BlockAw-1:0] KMAC_CFG_OFFSET = 12'h 14;
+  parameter logic [BlockAw-1:0] KMAC_CFG_SHADOWED_OFFSET = 12'h 14;
   parameter logic [BlockAw-1:0] KMAC_CMD_OFFSET = 12'h 18;
   parameter logic [BlockAw-1:0] KMAC_STATUS_OFFSET = 12'h 1c;
   parameter logic [BlockAw-1:0] KMAC_ENTROPY_PERIOD_OFFSET = 12'h 20;
-  parameter logic [BlockAw-1:0] KMAC_ENTROPY_REFRESH_OFFSET = 12'h 24;
-  parameter logic [BlockAw-1:0] KMAC_ENTROPY_SEED_LOWER_OFFSET = 12'h 28;
-  parameter logic [BlockAw-1:0] KMAC_ENTROPY_SEED_UPPER_OFFSET = 12'h 2c;
+  parameter logic [BlockAw-1:0] KMAC_ENTROPY_REFRESH_HASH_CNT_OFFSET = 12'h 24;
+  parameter logic [BlockAw-1:0] KMAC_ENTROPY_REFRESH_THRESHOLD_SHADOWED_OFFSET = 12'h 28;
+  parameter logic [BlockAw-1:0] KMAC_ENTROPY_SEED_OFFSET = 12'h 2c;
   parameter logic [BlockAw-1:0] KMAC_KEY_SHARE0_0_OFFSET = 12'h 30;
   parameter logic [BlockAw-1:0] KMAC_KEY_SHARE0_1_OFFSET = 12'h 34;
   parameter logic [BlockAw-1:0] KMAC_KEY_SHARE0_2_OFFSET = 12'h 38;
@@ -309,14 +342,21 @@ package kmac_reg_pkg;
   parameter logic [0:0] KMAC_INTR_TEST_KMAC_DONE_RESVAL = 1'h 0;
   parameter logic [0:0] KMAC_INTR_TEST_FIFO_EMPTY_RESVAL = 1'h 0;
   parameter logic [0:0] KMAC_INTR_TEST_KMAC_ERR_RESVAL = 1'h 0;
-  parameter logic [0:0] KMAC_ALERT_TEST_RESVAL = 1'h 0;
-  parameter logic [0:0] KMAC_ALERT_TEST_FATAL_FAULT_RESVAL = 1'h 0;
+  parameter logic [31:0] KMAC_ALERT_TEST_RESVAL = 32'h 80000000;
+  parameter logic [0:0] KMAC_ALERT_TEST_RECOV_OPERATION_ERR_RESVAL = 1'h 0;
+  parameter logic [0:0] KMAC_ALERT_TEST_FATAL_FAULT_ERR_RESVAL = 1'h 0;
+  parameter logic [0:0] KMAC_ALERT_TEST_REGWEN_RESVAL = 1'h 1;
   parameter logic [0:0] KMAC_CFG_REGWEN_RESVAL = 1'h 1;
   parameter logic [0:0] KMAC_CFG_REGWEN_EN_RESVAL = 1'h 1;
-  parameter logic [9:0] KMAC_CMD_RESVAL = 10'h 0;
-  parameter logic [15:0] KMAC_STATUS_RESVAL = 16'h 4001;
+  parameter logic [10:0] KMAC_CMD_RESVAL = 11'h 0;
+  parameter logic [29:0] KMAC_STATUS_RESVAL = 30'h 4001;
   parameter logic [0:0] KMAC_STATUS_SHA3_IDLE_RESVAL = 1'h 1;
   parameter logic [0:0] KMAC_STATUS_FIFO_EMPTY_RESVAL = 1'h 1;
+  parameter logic [0:0] KMAC_STATUS_ENTROPY_READY_RESVAL = 1'h 0;
+  parameter logic [0:0] KMAC_STATUS_ENTROPY_RESEEDING_RESVAL = 1'h 0;
+  parameter logic [0:0] KMAC_STATUS_ALERT_FATAL_FAULT_RESVAL = 1'h 0;
+  parameter logic [0:0] KMAC_STATUS_ALERT_RECOV_CTRL_UPDATE_ERR_RESVAL = 1'h 0;
+  parameter logic [31:0] KMAC_ENTROPY_SEED_RESVAL = 32'h 0;
   parameter logic [31:0] KMAC_KEY_SHARE0_0_RESVAL = 32'h 0;
   parameter logic [31:0] KMAC_KEY_SHARE0_1_RESVAL = 32'h 0;
   parameter logic [31:0] KMAC_KEY_SHARE0_2_RESVAL = 32'h 0;
@@ -353,8 +393,10 @@ package kmac_reg_pkg;
   // Window parameters
   parameter logic [BlockAw-1:0] KMAC_STATE_OFFSET = 12'h 400;
   parameter int unsigned        KMAC_STATE_SIZE   = 'h 200;
+  parameter int unsigned        KMAC_STATE_IDX    = 0;
   parameter logic [BlockAw-1:0] KMAC_MSG_FIFO_OFFSET = 12'h 800;
   parameter int unsigned        KMAC_MSG_FIFO_SIZE   = 'h 800;
+  parameter int unsigned        KMAC_MSG_FIFO_IDX    = 1;
 
   // Register index
   typedef enum int {
@@ -363,13 +405,13 @@ package kmac_reg_pkg;
     KMAC_INTR_TEST,
     KMAC_ALERT_TEST,
     KMAC_CFG_REGWEN,
-    KMAC_CFG,
+    KMAC_CFG_SHADOWED,
     KMAC_CMD,
     KMAC_STATUS,
     KMAC_ENTROPY_PERIOD,
-    KMAC_ENTROPY_REFRESH,
-    KMAC_ENTROPY_SEED_LOWER,
-    KMAC_ENTROPY_SEED_UPPER,
+    KMAC_ENTROPY_REFRESH_HASH_CNT,
+    KMAC_ENTROPY_REFRESH_THRESHOLD_SHADOWED,
+    KMAC_ENTROPY_SEED,
     KMAC_KEY_SHARE0_0,
     KMAC_KEY_SHARE0_1,
     KMAC_KEY_SHARE0_2,
@@ -422,15 +464,15 @@ package kmac_reg_pkg;
     4'b 0001, // index[ 0] KMAC_INTR_STATE
     4'b 0001, // index[ 1] KMAC_INTR_ENABLE
     4'b 0001, // index[ 2] KMAC_INTR_TEST
-    4'b 0001, // index[ 3] KMAC_ALERT_TEST
+    4'b 1111, // index[ 3] KMAC_ALERT_TEST
     4'b 0001, // index[ 4] KMAC_CFG_REGWEN
-    4'b 1111, // index[ 5] KMAC_CFG
+    4'b 1111, // index[ 5] KMAC_CFG_SHADOWED
     4'b 0011, // index[ 6] KMAC_CMD
-    4'b 0011, // index[ 7] KMAC_STATUS
+    4'b 1111, // index[ 7] KMAC_STATUS
     4'b 1111, // index[ 8] KMAC_ENTROPY_PERIOD
-    4'b 1111, // index[ 9] KMAC_ENTROPY_REFRESH
-    4'b 1111, // index[10] KMAC_ENTROPY_SEED_LOWER
-    4'b 1111, // index[11] KMAC_ENTROPY_SEED_UPPER
+    4'b 0011, // index[ 9] KMAC_ENTROPY_REFRESH_HASH_CNT
+    4'b 0011, // index[10] KMAC_ENTROPY_REFRESH_THRESHOLD_SHADOWED
+    4'b 1111, // index[11] KMAC_ENTROPY_SEED
     4'b 1111, // index[12] KMAC_KEY_SHARE0_0
     4'b 1111, // index[13] KMAC_KEY_SHARE0_1
     4'b 1111, // index[14] KMAC_KEY_SHARE0_2
@@ -479,4 +521,3 @@ package kmac_reg_pkg;
   };
 
 endpackage
-

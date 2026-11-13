@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,41 +7,48 @@
 `include "prim_assert.sv"
 
 module alert_handler
-  import alert_pkg::*;
+  import alert_handler_pkg::*;
   import prim_alert_pkg::*;
   import prim_esc_pkg::*;
 #(
-  // Compile time random constants, to be overriden by topgen.
+  // Number of cycles a differential skew is tolerated on the alert and escalation signal
+  parameter int unsigned AlertSkewCycles = 1,
+  parameter int EscNumSeverities = 4,
+  parameter int EscPingCountWidth = 16,
+  // Compile time random constants, to be overridden by topgen.
   parameter lfsr_seed_t RndCnstLfsrSeed = RndCnstLfsrSeedDefault,
   parameter lfsr_perm_t RndCnstLfsrPerm = RndCnstLfsrPermDefault
 ) (
-  input                                    clk_i,
-  input                                    rst_ni,
-  input                                    rst_shadowed_ni,
-  input                                    clk_edn_i,
-  input                                    rst_edn_ni,
+  input                                           clk_i,
+  input                                           rst_ni,
+  input                                           rst_shadowed_ni,
+  input                                           clk_edn_i,
+  input                                           rst_edn_ni,
   // Bus Interface (device)
-  input  tlul_pkg::tl_h2d_t                tl_i,
-  output tlul_pkg::tl_d2h_t                tl_o,
+  input  tlul_pkg::tl_h2d_t                       tl_i,
+  output tlul_pkg::tl_d2h_t                       tl_o,
   // Interrupt Requests
-  output logic                             intr_classa_o,
-  output logic                             intr_classb_o,
-  output logic                             intr_classc_o,
-  output logic                             intr_classd_o,
+  output logic                                    intr_classa_o,
+  output logic                                    intr_classb_o,
+  output logic                                    intr_classc_o,
+  output logic                                    intr_classd_o,
   // Clock gating and reset info from rstmgr and clkmgr
-  input  prim_mubi_pkg::mubi4_t [NLpg-1:0] lpg_cg_en_i,
-  input  prim_mubi_pkg::mubi4_t [NLpg-1:0] lpg_rst_en_i,
+  // SEC_CM: LPG.INTERSIG.MUBI
+  input  prim_mubi_pkg::mubi4_t [NLpg-1:0]        lpg_cg_en_i,
+  input  prim_mubi_pkg::mubi4_t [NLpg-1:0]        lpg_rst_en_i,
   // State information for HW crashdump
-  output alert_crashdump_t                 crashdump_o,
+  output alert_crashdump_t                        crashdump_o,
   // Entropy Input
-  output edn_pkg::edn_req_t                edn_o,
-  input  edn_pkg::edn_rsp_t                edn_i,
+  output edn_pkg::edn_req_t                       edn_o,
+  input  edn_pkg::edn_rsp_t                       edn_i,
   // Alert Sources
-  input  alert_tx_t [NAlerts-1:0]          alert_tx_i,
-  output alert_rx_t [NAlerts-1:0]          alert_rx_o,
+  // SEC_CM: ALERT.INTERSIG.DIFF
+  input  prim_alert_pkg::alert_tx_t [NAlerts-1:0] alert_tx_i,
+  output prim_alert_pkg::alert_rx_t [NAlerts-1:0] alert_rx_o,
   // Escalation outputs
-  input  esc_rx_t [N_ESC_SEV-1:0]          esc_rx_i,
-  output esc_tx_t [N_ESC_SEV-1:0]          esc_tx_o
+  // SEC_CM: ESC.INTERSIG.DIFF
+  input  prim_esc_pkg::esc_rx_t [N_ESC_SEV-1:0]   esc_rx_i,
+  output prim_esc_pkg::esc_tx_t [N_ESC_SEV-1:0]   esc_tx_o
 );
 
   //////////////////////////////////
@@ -59,6 +66,11 @@ module alert_handler
           intr_classb_o,
           intr_classa_o} = irq;
 
+  // SEC_CM: CONFIG.SHADOW
+  // SEC_CM: PING_TIMER.CONFIG.REGWEN
+  // SEC_CM: ALERT.CONFIG.REGWEN
+  // SEC_CM: ALERT_LOC.CONFIG.REGWEN
+  // SEC_CM: CLASS.CONFIG.REGWEN
   alert_handler_reg_wrap u_reg_wrap (
     .clk_i,
     .rst_ni,
@@ -66,13 +78,15 @@ module alert_handler
     .tl_i,
     .tl_o,
     .irq_o ( irq ),
-    .latch_crashdump_i ( |latch_crashdump ),
+    .latch_crashdump_i ( latch_crashdump ),
     .crashdump_o,
     .hw2reg_wrap,
     .reg2hw_wrap,
+    // SEC_CM: BUS.INTEGRITY
     .fatal_integ_alert_o(loc_alert_trig[4])
   );
 
+  // SEC_CM: CONFIG.SHADOW
   assign loc_alert_trig[5] = reg2hw_wrap.shadowed_err_update;
   assign loc_alert_trig[6] = reg2hw_wrap.shadowed_err_storage;
 
@@ -99,6 +113,7 @@ module alert_handler
     .ack_o       ( edn_ack  ),
     .data_o      ( edn_data ),
     .fips_o      (          ),
+    .err_o       (          ),
     // EDN side
     .clk_edn_i,
     .rst_edn_ni,
@@ -120,14 +135,35 @@ module alert_handler
     .ping_timeout_cyc_i ( reg2hw_wrap.ping_timeout_cyc   ),
     // set this to the maximum width in the design.
     // can be overridden in DV and FPV to shorten the wait periods.
+    // note however that this needs to be a right-aligned mask.
+    // also, do not set this to a value lower than 0x7.
     .wait_cyc_mask_i    ( {PING_CNT_DW{1'b1}}            ),
+    // SEC_CM: ALERT_RX.INTERSIG.BKGN_CHK
     .alert_ping_req_o   ( alert_ping_req                 ),
+    // SEC_CM: ESC_TX.INTERSIG.BKGN_CHK
     .esc_ping_req_o     ( esc_ping_req                   ),
     .alert_ping_ok_i    ( alert_ping_ok                  ),
     .esc_ping_ok_i      ( esc_ping_ok                    ),
     .alert_ping_fail_o  ( loc_alert_trig[0]              ),
     .esc_ping_fail_o    ( loc_alert_trig[1]              )
   );
+
+  `ASSERT_PRIM_COUNT_ERROR_TRIGGER_ERR(PingTimerEscCnterCheck_A,
+      u_ping_timer.u_prim_count_esc_cnt,
+      loc_alert_trig[0] & loc_alert_trig[1],
+      (reg2hw_wrap.ping_enable == 0))
+  `ASSERT_PRIM_COUNT_ERROR_TRIGGER_ERR(PingTimerCnterCheck_A,
+      u_ping_timer.u_prim_count_cnt,
+      loc_alert_trig[0] & loc_alert_trig[1],
+      (reg2hw_wrap.ping_enable == 0))
+  `ASSERT_PRIM_DOUBLE_LFSR_ERROR_TRIGGER_ERR(PingTimerDoubleLfsrCheck_A,
+      u_ping_timer.u_prim_double_lfsr,
+      loc_alert_trig[0] & loc_alert_trig[1],
+      (reg2hw_wrap.ping_enable == 0))
+  `ASSERT_PRIM_FSM_ERROR_TRIGGER_ERR(PingTimerFsmCheck_A,
+      u_ping_timer.u_state_regs,
+      loc_alert_trig[0] & loc_alert_trig[1],
+      (reg2hw_wrap.ping_enable == 0))
 
   /////////////////////////////
   // Low-power group control //
@@ -137,6 +173,7 @@ module alert_handler
   alert_handler_lpg_ctrl u_alert_handler_lpg_ctrl (
     .clk_i,
     .rst_ni,
+    // SEC_CM: LPG.INTERSIG.MUBI
     .lpg_cg_en_i,
     .lpg_rst_en_i,
     .alert_init_trig_o ( alert_init_trig )
@@ -152,7 +189,8 @@ module alert_handler
   // Target interrupt notification
   for (genvar k = 0 ; k < NAlerts ; k++) begin : gen_alerts
     prim_alert_receiver #(
-      .AsyncOn(AsyncOn[k])
+      .AsyncOn(AsyncOn[k]),
+      .SkewCycles(AlertSkewCycles)
     ) u_alert_receiver (
       .clk_i,
       .rst_ni,
@@ -161,6 +199,7 @@ module alert_handler
       .ping_ok_o    ( alert_ping_ok[k]   ),
       .integ_fail_o ( alert_integfail[k] ),
       .alert_o      ( alert_trig[k]      ),
+      // SEC_CM: ALERT.INTERSIG.DIFF
       .alert_rx_o   ( alert_rx_o[k]      ),
       .alert_tx_i   ( alert_tx_i[k]      )
     );
@@ -203,6 +242,9 @@ module alert_handler
       .accu_trig_o   ( class_accu_trig                   ),
       .accu_fail_o   ( class_accu_fail                   )
     );
+    `ASSERT_PRIM_COUNT_ERROR_TRIGGER_ERR(AccuCnterCheck_A,
+        u_accu.u_prim_count,
+        esc_tx_o[0].esc_p & esc_tx_o[1].esc_p & esc_tx_o[2].esc_p & esc_tx_o[3].esc_p)
 
     alert_handler_esc_timer u_esc_timer (
       .clk_i,
@@ -225,6 +267,13 @@ module alert_handler
       .esc_state_o       ( hw2reg_wrap.class_esc_state[k]       ),
       .esc_sig_req_o     ( class_esc_sig_req[k]                 )
     );
+
+    `ASSERT_PRIM_COUNT_ERROR_TRIGGER_ERR(EscTimerCnterCheck_A,
+        u_esc_timer.u_prim_count,
+        esc_tx_o[0].esc_p & esc_tx_o[1].esc_p & esc_tx_o[2].esc_p & esc_tx_o[3].esc_p)
+    `ASSERT_PRIM_FSM_ERROR_TRIGGER_ERR(EscTimerFsmCheck_A,
+        u_esc_timer.u_state_regs,
+        esc_tx_o[0].esc_p & esc_tx_o[1].esc_p & esc_tx_o[2].esc_p & esc_tx_o[3].esc_p)
   end
 
   ////////////////////////
@@ -241,20 +290,30 @@ module alert_handler
     end
 
     assign esc_sig_req[k] = |esc_sig_req_trsp[k];
-
-    prim_esc_sender u_esc_sender (
+    // SEC_CM: ESC_RX.INTERSIG.BKGN_CHK
+    // Note: This countermeasure is actually implemented on the receiver side. We currently cannot
+    // put this RTL label inside that module due to the way our countermeasure annotation check
+    // script discovers the RTL files. The label is thus put here. Please refer to
+    // prim_esc_receiver.sv for the actual implementation of this mechanism.
+    prim_esc_sender # (
+      .SkewCycles(AlertSkewCycles)
+    ) u_esc_sender (
       .clk_i,
       .rst_ni,
       .ping_req_i   ( esc_ping_req[k]  ),
       .ping_ok_o    ( esc_ping_ok[k]   ),
       .integ_fail_o ( esc_integfail[k] ),
       .esc_req_i    ( esc_sig_req[k]   ),
+      // SEC_CM: ESC.INTERSIG.DIFF
       .esc_rx_i     ( esc_rx_i[k]      ),
       .esc_tx_o     ( esc_tx_o[k]      )
     );
   end
 
   assign loc_alert_trig[3] = |esc_integfail;
+
+  logic unused_params;
+  assign unused_params = ^{EscNumSeverities, EscPingCountWidth};
 
   ////////////////
   // Assertions //
@@ -279,4 +338,7 @@ module alert_handler
   `ASSERT_INIT(CheckNClasses,  N_CLASSES <= 8)
   `ASSERT_INIT(CheckNEscSev,   N_ESC_SEV <= 8)
 
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ERR(RegWeOnehotCheck_A,
+      u_reg_wrap.u_reg, loc_alert_trig[4])
 endmodule

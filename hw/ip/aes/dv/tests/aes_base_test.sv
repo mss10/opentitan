@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -35,6 +35,8 @@ class aes_base_test extends cip_base_test #(
     cfg.num_messages_max            = 31;
     cfg.message_len_min             = 1;
     cfg.message_len_max             = 599;
+    cfg.aad_len_min                 = 0;
+    cfg.aad_len_max                 = 599;
     cfg.use_key_mask                = 0;
     cfg.use_c_model_pct             = 0;
     cfg.error_types                 = '0;
@@ -45,13 +47,14 @@ class aes_base_test extends cip_base_test #(
 
   // Mode distribution //
   // chance of selection ecb_mode
-  // ecb_mode /(ecb_mode + cbc_mode + ctr_mode + cfb_mode + ofb_mode)
-  // with the defaults 10/50 = 1/5 (20%)
+  // ecb_mode /(ecb_mode + cbc_mode + ctr_mode + cfb_mode + ofb_mode + gcm_mode)
+  // with the defaults 10/60 = 1/6 (16.66%)
     cfg.ecb_weight                 = 10;
     cfg.cbc_weight                 = 10;
     cfg.ofb_weight                 = 10;
     cfg.cfb_weight                 = 10;
     cfg.ctr_weight                 = 10;
+    cfg.gcm_weight                 = `EN_GCM ? 10 : 0;
 
   // KEYLEN weights
   // change of selecting 128b key
@@ -70,7 +73,7 @@ class aes_base_test extends cip_base_test #(
     cfg.fixed_data_en               = 0;
   // fixed operation (enc or dec)
     cfg.fixed_operation_en          = 0;
-    cfg.fixed_operation             = 1'b0;
+    cfg.fixed_operation             = aes_pkg::AES_ENC;
   // fixed iv (will set all to 0)
     cfg.fixed_iv_en                 = 0;
     cfg.fixed_keylen_en             = 0;
@@ -78,10 +81,11 @@ class aes_base_test extends cip_base_test #(
 
   //    1: error type enabled, 0: error type disabled
   //  001: configuration errors
-  //  010: malicous injection
+  //  010: malicious injection
   //  100: random resets
-    cfg.error_types                 = 3'b111;
+  // 1000: pull lc_escalate
+    cfg.error_types                 = 4'b1111;
     cfg.config_error_pct            = 0;           // percentage of configuration errors
-    cfg.flip_rst_split_pct           = 60;
+    cfg.sideload_pct                = 0;
   endfunction
 endclass : aes_base_test

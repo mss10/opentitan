@@ -1,0 +1,9 @@
+# Copyright lowRISC contributors (OpenTitan project).
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@lowrisc_opentitan//third_party/lowrisc:toolchain.bzl", "lowrisc_toolchain_targets")
+
+package(default_visibility = ["//visibility:public"])
+
+lowrisc_toolchain_targets(clang_version = 21)

@@ -1,11 +1,13 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
 use std::num::ParseFloatError;
 use std::str::FromStr;
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Voltage(pub f64);
 
 impl FromStr for Voltage {
@@ -15,6 +17,12 @@ impl FromStr for Voltage {
         // Allow voltages to be specified as they are in schematics: "3v3", "1v8", etc.
         let voltage = s.to_lowercase().replace('v', ".");
         Ok(Voltage(f64::from_str(&voltage)?))
+    }
+}
+
+impl Display for Voltage {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -45,7 +53,7 @@ mod tests {
     fn test_conversions() -> Result<()> {
         assert_eq!(Voltage(2.5).as_volts(), 2.5);
         assert_eq!(Voltage(2.5).as_millivolts(), 2500);
-        assert_eq!(Voltage(3.141592654).as_millivolts(), 3141);
+        assert_eq!(Voltage(3.1173).as_millivolts(), 3117);
         Ok(())
     }
 }

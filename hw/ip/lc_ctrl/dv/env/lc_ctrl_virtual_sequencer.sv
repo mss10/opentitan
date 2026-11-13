@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,8 +12,8 @@ class lc_ctrl_virtual_sequencer extends cip_base_virtual_sequencer #(
                        .DeviceDataWidth(OTP_PROG_DDATA_WIDTH))    otp_prog_pull_sequencer_h;
   push_pull_sequencer#(.HostDataWidth(lc_ctrl_state_pkg::LcTokenWidth)) otp_token_pull_sequencer_h;
 
-  alert_esc_sequencer esc_wipe_secrets_sequencer_h;
-  alert_esc_sequencer esc_scrap_state_sequencer_h;
+  esc_sequencer esc_wipe_secrets_sequencer_h;
+  esc_sequencer esc_scrap_state_sequencer_h;
 
   jtag_riscv_sequencer jtag_riscv_sequencer_h;
 

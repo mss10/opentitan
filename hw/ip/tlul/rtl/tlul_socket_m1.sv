@@ -1,8 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // TL-UL socket M:1 module
+//
+// cheriot_socket_m1 is a copy of this module with a CHERIoT sideband; keep the two in sync.
 //
 // Verilog parameters
 //   M:             Number of host ports.
@@ -26,12 +28,12 @@ module tlul_socket_m1 #(
   parameter int unsigned  M         = 4,
   parameter bit [M-1:0]   HReqPass  = {M{1'b1}},
   parameter bit [M-1:0]   HRspPass  = {M{1'b1}},
-  parameter bit [M*4-1:0] HReqDepth = {M{4'h2}},
-  parameter bit [M*4-1:0] HRspDepth = {M{4'h2}},
+  parameter bit [M*4-1:0] HReqDepth = {M{4'h1}},
+  parameter bit [M*4-1:0] HRspDepth = {M{4'h1}},
   parameter bit           DReqPass  = 1'b1,
   parameter bit           DRspPass  = 1'b1,
-  parameter bit [3:0]     DReqDepth = 4'h2,
-  parameter bit [3:0]     DRspDepth = 4'h2
+  parameter bit [3:0]     DReqDepth = 4'h1,
+  parameter bit [3:0]     DRspDepth = 4'h1
 ) (
   input                     clk_i,
   input                     rst_ni,

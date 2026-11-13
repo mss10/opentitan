@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,13 +8,13 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "sw/device/lib/base/csr.h"
-#include "sw/device/silicon_creator/testing/mask_rom_test.h"
+#include "sw/device/lib/base/global_mock.h"
 
 namespace mock_csr {
 
 namespace internal {
 
-class MockCsr : public ::mask_rom_test::GlobalMock<MockCsr> {
+class MockCsr : public ::global_mock::GlobalMock<MockCsr> {
  public:
   MOCK_METHOD(uint32_t, Read, (uint32_t csr));
   MOCK_METHOD(void, Write, (uint32_t csr, uint32_t value));

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -287,6 +287,9 @@
     type: mem-load
     target: [offset, grs1]
     bytes: 4
+  iflow:
+    - to: [grd]
+      from: [dmem]
 
 - mnemonic: sw
   rv32i: true
@@ -316,6 +319,9 @@
     type: mem-store
     target: [offset, grs1]
     bytes: 4
+  iflow:
+    - to: [dmem]
+      from: [grs2]
 
 - mnemonic: beq
   rv32i: true
@@ -386,13 +392,13 @@
   operands: [grd, grs1, offset]
   straight-line: false
   doc: |
-    The JALR instruction has the same behavior as in RV32I, jumping by `<grs1> + <offset>` and writing `PC+4` as a link address to the destination register.
+    The JALR instruction has the same behavior as in RV32I, jumping by `grs1 + offset` and writing `PC+4` as a link address to the destination register.
 
     OTBN has a hardware managed call stack, accessed through `x1`, which should be used when calling and returning from subroutines.
     To return from a subroutine, use `jalr x0, x1, 0`.
     This pops a link address from the call stack and branches to it.
     To call a subroutine through a function pointer, use `jalr x1, <grs1>, 0`.
-    This jumps to the address in `<grs1>` and pushes the link address onto the call stack.
+    This jumps to the address in `grs1` and pushes the link address onto the call stack.
   errs:
     - *grs1-call-stack
     - *grd1-call-stack
@@ -406,9 +412,13 @@
       funct3: b000
       rd: grd
       opcode: b11001
+  iflow:
+    - to: [grd]
+      from: []
 
 - mnemonic: csrrs
   rv32i: true
+  uses_isr: true
   synopsis: Atomic Read and Set bits in CSR
   operands: [grd, csr, grs1]
   doc: |
@@ -432,9 +442,47 @@
   lsu:
     type: csr
     target: [csr]
+  iflow:
+    - to: [grd]
+      from: []
+    - test:
+        - csr == 0x7c0
+      to: [fg0-all]
+      from: [fg0-all, grs1]
+    - test:
+        - csr == 0x7c0
+      to: [grd]
+      from: [fg0-all]
+    - test:
+        - csr == 0x7c1
+      to: [fg1-all]
+      from: [fg1-all, grs1]
+    - test:
+        - csr == 0x7c1
+      to: [grd]
+      from: [fg1-all]
+    - test:
+        - csr == 0x7c8
+      to: [fg0-all, fg1-all]
+      from: [fg0-all, fg1-all, grs1]
+    - test:
+        - csr == 0x7c8
+      to: [grd]
+      from: [fg0-all, fg1-all]
+    - test:
+        - csr >= 0x7d0
+        - csr <= 0x7d8
+      to: [mod]
+      from: [mod, grs1]
+    - test:
+        - csr >= 0x7d0
+        - csr <= 0x7d8
+      to: [grd]
+      from: [mod]
 
 - mnemonic: csrrw
   rv32i: true
+  uses_isr: true
   synopsis: Atomic Read/Write CSR
   operands: [grd, csr, grs1]
   doc: |
@@ -459,6 +507,51 @@
   lsu:
     type: csr
     target: [csr]
+  iflow:
+    - to: [grd]
+      from: []
+    - test:
+        - grd != 0
+        - csr == 0x7c0
+      to: [fg0-all]
+      from: [grs1]
+    - test:
+        - grd != 0
+        - csr == 0x7c0
+      to: [grd]
+      from: [fg0-all]
+    - test:
+        - grd != 0
+        - csr == 0x7c1
+      to: [fg1-all]
+      from: [grs1]
+    - test:
+        - grd != 0
+        - csr == 0x7c1
+      to: [grd]
+      from: [fg1-all]
+    - test:
+        - grd != 0
+        - csr == 0x7c8
+      to: [fg0-all, fg1-all]
+      from: [grs1]
+    - test:
+        - grd != 0
+        - csr == 0x7c8
+      to: [grd]
+      from: [fg0-all, fg1-all]
+    - test:
+        - grd != 0
+        - csr >= 0x7d0
+        - csr <= 0x7d8
+      to: [mod]
+      from: [mod, grs1]
+    - test:
+        - grd != 0
+        - csr >= 0x7d0
+        - csr <= 0x7d8
+      to: [grd]
+      from: [mod]
 
 - mnemonic: ecall
   rv32i: true
@@ -472,6 +565,28 @@
     scheme: I
     mapping:
       imm: b000000000000
+      rs1: b00000
+      funct3: b000
+      rd: b00000
+      opcode: b11100
+
+- mnemonic: wfi
+  synopsis: Wait For Interrupt
+  operands: []
+  straight-line: false
+  doc: |
+    Stalls an OTBN program until a host issues the RESUME command in the CMD register.
+    Once the RESUME command is issued, OTBN will continue executing the next instruction (PC + 4).
+    Triggers the `done` interrupt to indicate that OTBN is now paused.
+
+    This instruction is only valid when CTRL.wfi_enabled is set to 1.
+    Otherwise an invalid instruction error is raised.
+  errs:
+    - An `ILLEGAL_INSN` error if CTRL.wfi_enabled is 0.
+  encoding:
+    scheme: I
+    mapping:
+      imm: b000100000101
       rs1: b00000
       funct3: b000
       rd: b00000
@@ -501,7 +616,7 @@
     `LOOP`, `LOOPI`, jump and branch instructions are all permitted inside a loop but may not appear as the last instruction in a loop.
     OTBN will stop on that instruction, setting bit `loop` in `ERR_BITS`.
 
-    For more information on how to correctly use `LOOP` see [loop nesting](../#loop-nesting).
+    For more information on how to correctly use `LOOP` see [loop nesting](developers_guide.md#loop-nesting).
   errs:
     - &grs-call-stack A `CALL_STACK` error from using `x1` as `grs` when the call stack is empty.
     - A `LOOP` error if the value in `grs` is zero.
@@ -533,7 +648,7 @@
     `LOOP`, `LOOPI`, jump and branch instructions are all permitted inside a loop but may not appear as the last instruction in a loop.
     OTBN will stop on that instruction, setting bit `loop` in `ERR_BITS`.
 
-    For more information on how to correctly use `LOOPI` see [loop nesting](../#loop-nesting).
+    For more information on how to correctly use `LOOPI` see [loop nesting](developers_guide.md#loop-nesting).
   encoding:
     scheme: loopi
     mapping:

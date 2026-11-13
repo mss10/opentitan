@@ -1,23 +1,30 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "external/freertos/include/FreeRTOS.h"
+#include "external/freertos/include/task.h"
+#include "external/freertos/portable/GCC/RISC-V/portmacro.h"
+#include "hw/top/dt/rv_timer.h"
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/dif/dif_rv_timer.h"
-#include "sw/device/lib/irq.h"
-#include "sw/device/lib/runtime/hart.h"
+#include "sw/device/lib/runtime/irq.h"
 #include "sw/device/lib/runtime/log.h"
-#include "sw/device/lib/testing/check.h"
 #include "sw/device/lib/testing/test_framework/FreeRTOSConfig.h"
-#include "sw/vendor/freertos_freertos_kernel/include/FreeRTOS.h"
-#include "sw/vendor/freertos_freertos_kernel/include/task.h"
-#include "sw/vendor/freertos_freertos_kernel/portable/GCC/RISC-V/portmacro.h"
-
-// TODO: make this toplevel agnostic.
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"  // Generated.
+#include "sw/device/lib/testing/test_framework/check.h"
 
 // NOTE: some of the function names below do NOT, and cannot, conform to the
 // style guide, since they are specific implementations of FreeRTOS defined
 // functions.
+
+// ----------------------------------------------------------------------------
+// Heap Setup
+//
+// We allocate the heap here and mark it so the linker can make a
+// NOLOAD section. Otherwise, it will end up in the `.bss` section, which gets
+// zeroed during boot initializations which wastes simulation cycles.
+// ----------------------------------------------------------------------------
+OT_SET_BSS_SECTION(".freertos.heap", uint8_t ucHeap[configTOTAL_HEAP_SIZE];)
 
 // ----------------------------------------------------------------------------
 // Timer Setup (for use when preemptive scheduling is enabled)
@@ -25,13 +32,13 @@
 #if configUSE_PREEMPTION
 
 static dif_rv_timer_t timer;
-static const uint32_t kTimerHartId = (uint32_t)kTopEarlgreyPlicTargetIbex0;
+static const uint32_t kTimerHartId = (uint32_t)0;
 static const uint32_t kTimerComparatorId = 0;
 static const uint64_t kTimerDeadline =
     100;  // Counter must reach 100 for an IRQ to be triggered.
 
 // Override the timer ISR to support preemptive context switching.
-void ottf_timer_isr(void) {
+void ottf_timer_isr(uint32_t *exc_info) {
   LOG_INFO("Handling timer IQR ...");
   dif_rv_timer_irq_enable_snapshot_t irq_enable_snapshot;
   CHECK_DIF_OK(
@@ -49,8 +56,7 @@ void vPortSetupTimerInterrupt(void) {
   LOG_INFO("Configuring timer interrupt ...");
 
   // Initialize and reset the timer.
-  CHECK_DIF_OK(dif_rv_timer_init(
-      mmio_region_from_addr(TOP_EARLGREY_RV_TIMER_BASE_ADDR), &timer));
+  CHECK_DIF_OK(dif_rv_timer_init_from_dt(kDtRvTimer, &timer));
   CHECK_DIF_OK(dif_rv_timer_reset(&timer));
 
   // Compute and set tick parameters (i.e., step, prescale, etc.).
@@ -87,17 +93,11 @@ BaseType_t xPortStartScheduler(void) {
   irq_timer_ctrl(true);
   irq_external_ctrl(true);
   irq_software_ctrl(true);
+  // Note: no need to call 'irq_global_ctrl(true)' since the global interrupt
+  // enable is set in the xPortStartFirstTask sub-routine in
+  // sw/device/lib/testing/test_framework/freertos_port.S.
   xPortStartFirstTask();
 
   // Unreachable.
   return pdFAIL;
-}
-
-void vPortEndScheduler(void) {
-  // Not implemented.
-  // TODO: trigger this to be called when from the idle task hook when all tests
-  // have completed.
-  while (true) {
-    wait_for_interrupt();
-  }
 }

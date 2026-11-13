@@ -1,14 +1,16 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Dict, Iterator, Optional
 
-from .constants import ErrBits
+from .constants import CsrAddrs, ErrBits, WsrAddrs
 from .flags import FlagReg
 from .isa import (OTBNInsn, RV32RegReg, RV32RegImm,
-                  RV32ImmShift, insn_for_mnemonic, logical_byte_shift,
-                  extract_quarter_word)
+                  RV32ImmShift, BnVecVecAdd, BnVecVecMul, BnVecVecTrn,
+                  insn_for_mnemonic, logical_byte_shift,
+                  extract_quarter_word, extract_vec_elem, element_length_in_bits,
+                  shift_vec_elem, map_elems, montgomery_mul_no_cond_subtraction)
 from .state import OTBNState
 
 
@@ -250,20 +252,24 @@ class LW(OTBNInsn):
         base = state.gprs.get_reg(self.grs1).read_unsigned()
         if state.gprs.call_stack_err:
             state.stop_at_end_of_cycle(ErrBits.CALL_STACK)
-            return
+            return None
 
         addr = (base + self.offset) & ((1 << 32) - 1)
 
         if not state.dmem.is_valid_32b_addr(addr):
             state.stop_at_end_of_cycle(ErrBits.BAD_DATA_ADDR)
-            return
+            return None
 
-        result = state.dmem.load_u32(addr)
+        result, valid = state.dmem.load_u32(addr)
 
         # Stall for a single cycle for memory to respond
-        yield
+        yield None
+
+        if not valid:
+            state.stop_at_end_of_cycle(ErrBits.DMEM_INTG_VIOLATION)
 
         state.gprs.get_reg(self.grd).write_unsigned(result)
+        return None
 
 
 class SW(OTBNInsn):
@@ -301,6 +307,7 @@ class SW(OTBNInsn):
 class BEQ(OTBNInsn):
     insn = insn_for_mnemonic('beq', 3)
     affects_control = True
+    has_fetch_stall = True
 
     def __init__(self, raw: int, op_vals: Dict[str, int]):
         super().__init__(raw, op_vals)
@@ -326,6 +333,7 @@ class BEQ(OTBNInsn):
 class BNE(OTBNInsn):
     insn = insn_for_mnemonic('bne', 3)
     affects_control = True
+    has_fetch_stall = True
 
     def __init__(self, raw: int, op_vals: Dict[str, int]):
         super().__init__(raw, op_vals)
@@ -352,6 +360,7 @@ class BNE(OTBNInsn):
 class JAL(OTBNInsn):
     insn = insn_for_mnemonic('jal', 2)
     affects_control = True
+    has_fetch_stall = True
 
     def __init__(self, raw: int, op_vals: Dict[str, int]):
         super().__init__(raw, op_vals)
@@ -373,6 +382,7 @@ class JAL(OTBNInsn):
 class JALR(OTBNInsn):
     insn = insn_for_mnemonic('jalr', 3)
     affects_control = True
+    has_fetch_stall = True
 
     def __init__(self, raw: int, op_vals: Dict[str, int]):
         super().__init__(raw, op_vals)
@@ -407,31 +417,43 @@ class CSRRS(OTBNInsn):
         self.csr = op_vals['csr']
         self.grs1 = op_vals['grs1']
 
+    def reads_urnd_first_cycle(self) -> bool:
+        return self.csr == CsrAddrs.URND
+
     def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
         if not state.csrs.check_idx(self.csr):
             # Invalid CSR index. Stop with an illegal instruction error.
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
         bits_to_set = state.gprs.get_reg(self.grs1).read_unsigned()
         if state.gprs.call_stack_err:
             state.stop_at_end_of_cycle(ErrBits.CALL_STACK)
-            return
+            return None
 
-        if self.csr == 0xfc0:
+        if self.csr == CsrAddrs.RND:
             # A read from RND. If a RND value is not available, request_value()
             # initiates or continues an EDN request and returns False. If a RND
             # value is available, it returns True.
             while not state.wsrs.RND.request_value():
                 # There's a pending EDN request. Stall for a cycle.
-                yield
+                yield None
 
-        # At this point, the CSR is ready. Read, update and write back to grs1.
+        # At this point, the CSR is ready. Read it to grd.
         old_val = state.read_csr(self.csr)
-        new_val = old_val | bits_to_set
         state.gprs.get_reg(self.grd).write_unsigned(old_val)
+
+        # If CSR should be updated, compute update, check if update is allowed
+        # and write it back.
         if self.grs1 != 0:
+            new_val = old_val | bits_to_set
+            if self.csr == CsrAddrs.MAI_CTRL:
+                if not state.mai.is_valid_ctrl_change(new_val):
+                    state.stop_at_end_of_cycle(ErrBits.MAI_ERROR)
+                    return None
             state.write_csr(self.csr, new_val)
+
+        return None
 
 
 class CSRRW(OTBNInsn):
@@ -443,24 +465,27 @@ class CSRRW(OTBNInsn):
         self.csr = op_vals['csr']
         self.grs1 = op_vals['grs1']
 
+    def reads_urnd_first_cycle(self) -> bool:
+        return self.csr == CsrAddrs.URND and self.grd != 0
+
     def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
         if not state.csrs.check_idx(self.csr):
             # Invalid CSR index. Stop with an illegal instruction error.
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
         new_val = state.gprs.get_reg(self.grs1).read_unsigned()
         if state.gprs.call_stack_err:
             state.stop_at_end_of_cycle(ErrBits.CALL_STACK)
-            return
+            return None
 
-        if self.csr == 0xfc0 and self.grd != 0:
+        if self.csr == CsrAddrs.RND and self.grd != 0:
             # A read from RND. If a RND value is not available, request_value()
             # initiates or continues an EDN request and returns False. If a RND
             # value is available, it returns True.
             while not state.wsrs.RND.request_value():
                 # There's a pending EDN request. Stall for a cycle.
-                yield
+                yield None
 
         # At this point, the CSR is either ready or unneeded. Read it if
         # necessary and write to grd, then overwrite with new_val.
@@ -469,7 +494,14 @@ class CSRRW(OTBNInsn):
             old_val = state.read_csr(self.csr)
             state.gprs.get_reg(self.grd).write_unsigned(old_val)
 
+        # Check if the write to MAI_CTRL is allowed.
+        if self.csr == CsrAddrs.MAI_CTRL:
+            if not state.mai.is_valid_ctrl_change(new_val):
+                state.stop_at_end_of_cycle(ErrBits.MAI_ERROR)
+                return None
+
         state.write_csr(self.csr, new_val)
+        return None
 
 
 class ECALL(OTBNInsn):
@@ -478,6 +510,23 @@ class ECALL(OTBNInsn):
     def execute(self, state: OTBNState) -> None:
         # Set INTR_STATE.done and STATUS, reflecting the fact we've stopped.
         state.stop_at_end_of_cycle(err_bits=0)
+
+
+class WFI(OTBNInsn):
+    insn = insn_for_mnemonic('wfi', 0)
+
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
+        # wfi is only legal when CTRL.wfi_enabled is set.
+        if not state.wfi_enabled:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Stall until RESUME command is seen.
+        state.enter_wfi_pause()
+        while not state.wfi_should_resume():
+            yield None
+        state.exit_wfi_pause()
+        return None
 
 
 class LOOP(OTBNInsn):
@@ -1037,7 +1086,7 @@ class BNLID(OTBNInsn):
 
         if self.grs1_inc and self.grd_inc:
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
         grs1_val = state.gprs.get_reg(self.grs1).read_unsigned()
         addr = (grs1_val + self.offset) & ((1 << 32) - 1)
@@ -1061,10 +1110,10 @@ class BNLID(OTBNInsn):
             saw_err = True
 
         if saw_err:
-            return
+            return None
 
         wrd = grd_val & 0x1f
-        value = state.dmem.load_u256(addr)
+        value, valid = state.dmem.load_u256(addr)
 
         if self.grd_inc:
             new_grd_val = grd_val + 1
@@ -1075,9 +1124,13 @@ class BNLID(OTBNInsn):
             state.gprs.get_reg(self.grs1).write_unsigned(new_grs1_val)
 
         # Stall for a single cycle for memory to respond
-        yield
+        yield None
+
+        if not valid:
+            state.stop_at_end_of_cycle(ErrBits.DMEM_INTG_VIOLATION)
 
         state.wdrs.get_reg(wrd).write_unsigned(value)
+        return None
 
 
 class BNSID(OTBNInsn):
@@ -1091,10 +1144,10 @@ class BNSID(OTBNInsn):
         self.grs1 = op_vals['grs1']
         self.grs1_inc = op_vals['grs1_inc']
 
-    def execute(self, state: OTBNState) -> None:
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
         if self.grs1_inc and self.grs2_inc:
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
         grs1_val = state.gprs.get_reg(self.grs1).read_unsigned()
         addr = (grs1_val + self.offset) & ((1 << 32) - 1)
@@ -1118,12 +1171,7 @@ class BNSID(OTBNInsn):
             saw_err = True
 
         if saw_err:
-            return
-
-        wrs = grs2_val & 0x1f
-        wrs_val = state.wdrs.get_reg(wrs).read_unsigned()
-
-        state.dmem.store_u256(addr, wrs_val)
+            return None
 
         if self.grs1_inc:
             new_grs1_val = (grs1_val + 32) & ((1 << 32) - 1)
@@ -1132,6 +1180,14 @@ class BNSID(OTBNInsn):
         if self.grs2_inc:
             new_grs2_val = grs2_val + 1
             state.gprs.get_reg(self.grs2).write_unsigned(new_grs2_val)
+
+        yield None
+
+        wrs = grs2_val & 0x1f
+        wrs_val = state.wdrs.get_reg(wrs).read_unsigned()
+
+        state.dmem.store_u256(addr, wrs_val)
+        return None
 
 
 class BNMOV(OTBNInsn):
@@ -1157,10 +1213,10 @@ class BNMOVR(OTBNInsn):
         self.grs = op_vals['grs']
         self.grs_inc = op_vals['grs_inc']
 
-    def execute(self, state: OTBNState) -> None:
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
         if self.grs_inc and self.grd_inc:
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
         grd_val = state.gprs.get_reg(self.grd).read_unsigned()
         grs_val = state.gprs.get_reg(self.grs).read_unsigned()
@@ -1183,13 +1239,10 @@ class BNMOVR(OTBNInsn):
             saw_err = True
 
         if saw_err:
-            return
+            return None
 
         wrd = grd_val & 0x1f
         wrs = grs_val & 0x1f
-
-        value = state.wdrs.get_reg(wrs).read_unsigned()
-        state.wdrs.get_reg(wrd).write_unsigned(value)
 
         if self.grd_inc:
             new_grd_val = grd_val + 1
@@ -1198,6 +1251,12 @@ class BNMOVR(OTBNInsn):
         if self.grs_inc:
             new_grs_val = grs_val + 1
             state.gprs.get_reg(self.grs).write_unsigned(new_grs_val)
+
+        yield None
+
+        value = state.wdrs.get_reg(wrs).read_unsigned()
+        state.wdrs.get_reg(wrd).write_unsigned(value)
+        return None
 
 
 class BNWSRR(OTBNInsn):
@@ -1208,25 +1267,36 @@ class BNWSRR(OTBNInsn):
         self.wrd = op_vals['wrd']
         self.wsr = op_vals['wsr']
 
+    def reads_urnd_first_cycle(self) -> bool:
+        return self.wsr == WsrAddrs.URND
+
     def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
         # The first, and possibly only, cycle of execution.
         if not state.wsrs.check_idx(self.wsr):
             # Invalid WSR index. Stop with an illegal instruction error.
             state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
-            return
+            return None
 
-        if self.wsr == 0x1:
+        if self.wsr == WsrAddrs.RND:
             # A read from RND. If a RND value is not available, request_value()
             # initiates or continues an EDN request and returns False. If a RND
             # value is available, it returns True.
             while not state.wsrs.RND.request_value():
                 # There's a pending EDN request. Stall for a cycle.
-                yield
+                yield None
 
-        # At this point, the WSR is ready. Read it, and update wrd with the
-        # result.
+        # At this point, the WSR is ready. Does it have a valid value? (It
+        # might not if this is a sideload key register and keymgr hasn't
+        # provided us with a value). If not, fail with a KEY_INVALID error.
+        if not state.wsrs.has_value_at_idx(self.wsr):
+            state.stop_at_end_of_cycle(ErrBits.KEY_INVALID)
+            return None
+
+        # The WSR is ready and has a value. Read it.
         val = state.wsrs.read_at_idx(self.wsr)
+
         state.wdrs.get_reg(self.wrd).write_unsigned(val)
+        return None
 
 
 class BNWSRW(OTBNInsn):
@@ -1238,8 +1308,523 @@ class BNWSRW(OTBNInsn):
         self.wrs = op_vals['wrs']
 
     def execute(self, state: OTBNState) -> None:
+        if not state.wsrs.check_idx(self.wsr):
+            # Invalid WSR index. Stop with an illegal instruction error.
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Check if MAI is ready to accept new inputs. If not stop with MAI
+        # error.
+        if self.wsr in [WsrAddrs.MAI_IN0_S0, WsrAddrs.MAI_IN0_S1,
+                        WsrAddrs.MAI_IN1_S0, WsrAddrs.MAI_IN1_S1]:
+            if not state.mai.ready_for_inputs():
+                state.stop_at_end_of_cycle(ErrBits.MAI_ERROR)
+                return None
+
         val = state.wdrs.get_reg(self.wrs).read_unsigned()
+
         state.wsrs.write_at_idx(self.wsr, val)
+
+
+class BNADDV(BnVecVecAdd):
+    insn = insn_for_mnemonic('bn.addv', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        # The operation performed on the element pairs.
+        def op(a: int, b: int) -> int:
+            c = a + b
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNADDV.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        result = map_elems(op, size, vec_a, vec_b)
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNADDVM(BnVecVecAdd):
+    insn = insn_for_mnemonic('bn.addvm', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        # The operation performed on the element pairs.
+        def op(mod_val: int, a: int, b: int) -> int:
+            c = a + b
+            if c >= mod_val:
+                c -= mod_val
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNADDVM.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Extract the modulus from WSR MOD but only size bits as upper bits may contain the
+        # Montgomery constant.
+        mod_val = state.wsrs.MOD.read_unsigned() & ((1 << size) - 1)
+
+        result = map_elems(lambda a, b: op(mod_val, a, b), size, vec_a, vec_b)
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNSUBV(BnVecVecAdd):
+    insn = insn_for_mnemonic('bn.subv', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        # The operation performed on the element pairs.
+        def op(a: int, b: int) -> int:
+            c = a - b
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNSUBV.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        result = map_elems(op, size, vec_a, vec_b)
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNSUBVM(BnVecVecAdd):
+    insn = insn_for_mnemonic('bn.subvm', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        # The operation performed on the element pairs.
+        def op(mod_val: int, a: int, b: int) -> int:
+            c = a - b
+            if c < 0:
+                c += mod_val
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNSUBVM.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Extract the modulus from WSR MOD.
+        mod_val = state.wsrs.MOD.read_unsigned() & ((1 << size) - 1)
+
+        result = map_elems(lambda a, b: op(mod_val, a, b), size, vec_a, vec_b)
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNMULV(BnVecVecMul):
+    insn = insn_for_mnemonic('bn.mulv', 4)
+
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
+        # The operation performed on the element pairs.
+        def op(a: int, b: int) -> int:
+            c = a * b
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNMULV.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # This instruction operates over 4 cycles. In each cycle 64b of the 256b vector are
+        # processed. We first compute the results and then emulate the register updates.
+        result = map_elems(op, size, vec_a, vec_b)
+
+        # The chunk processing order is rotated by a random offset sampled from URND.
+        offset = state.mac_rnd_offset
+
+        # Emulate the register updates by reading the ACC and write current quarter word result to
+        # it. In the last cycle ACC is cleared and the result is written to the destination WDR.
+        qword_mask = (1 << 64) - 1
+        for cycle in range(3):
+            chunk = (cycle + offset) & 0x3
+            acc = state.wsrs.ACC.read_unsigned()
+            current_qword_mask = qword_mask << (chunk * 64)
+            acc &= ~current_qword_mask
+            acc |= result & current_qword_mask
+            state.wsrs.ACC.write_unsigned(acc)
+            if cycle == 2:
+                # ACC is cleared with URND on cycle 3. If the PRNG is stopped, it must advance.
+                # This must happen one cycle before as URND is the flopped PRNG output.
+                state.wsrs.URND.mark_consumed()
+            yield None
+
+        state.wsrs.ACC.write_unsigned(state.wsrs.URND.read_unsigned())
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNMULVL(BnVecVecMul):
+    insn = insn_for_mnemonic('bn.mulvl', 5)
+
+    def __init__(self, raw: int, op_vals: Dict[str, int]):
+        super().__init__(raw, op_vals)
+        self.lane = op_vals['lane']
+
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
+        # The operation performed on the element pairs.
+        def op(a: int, b: int) -> int:
+            c = a * b
+            return c
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNMULVL.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # This instruction operates over 4 cycles. In each cycle 64b of the 256b vector are
+        # processed. We first compute the results and then emulate the register updates.
+
+        # Replicate lane element to generate a 256b vector with 256/size elements.
+        lane_elem = extract_vec_elem(vec_b, self.lane, size)
+        lane_vec = 0
+        for i in range(256 // size):
+            lane_vec |= (lane_elem << (i * size))
+
+        result = map_elems(op, size, vec_a, lane_vec)
+
+        # The chunk processing order is rotated by a random offset sampled from URND.
+        offset = state.mac_rnd_offset
+
+        # Emulate the register updates by reading the ACC and write current quarter word result to
+        # it. In the last cycle ACC is cleared and the result is written to the destination WDR.
+        qword_mask = (1 << 64) - 1
+        for cycle in range(3):
+            chunk = (cycle + offset) & 0x3
+            acc = state.wsrs.ACC.read_unsigned()
+            current_qword_mask = qword_mask << (chunk * 64)
+            acc &= ~current_qword_mask
+            acc |= result & current_qword_mask
+            state.wsrs.ACC.write_unsigned(acc)
+            if cycle == 2:
+                # ACC is cleared with URND on cycle 3. If the PRNG is stopped, it must advance.
+                # This must happen one cycle before as URND is the flopped PRNG output.
+                state.wsrs.URND.mark_consumed()
+            yield None
+
+        state.wsrs.ACC.write_unsigned(state.wsrs.URND.read_unsigned())
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNMULVM(BnVecVecMul):
+    insn = insn_for_mnemonic('bn.mulvm', 4)
+
+    # This instruction performs a Montgomery multiplication without the final conditional
+    # subtraction.
+    #
+    # Inputs for the Montgomery algorithm:
+    # - a, b: Operands in [0, q[ in Montgomery space
+    # - d:    Bit-width of operands
+    # - q:    Modulus in ]0, 2^d]
+    # - mu:   Montgomery constant, precomputed, mu = (-q)^(-1) mod 2^d
+    #
+    # The operands must be pre-transformed into Montgomery space with
+    #   a = a_orig * 2^d mod q.
+    # This must be ensured by the programmer.
+    #
+    # The Montgomery multiplication is defined as:
+    #   r = a*b * 2^(-d) mod q
+    # where r is in [0,q[.
+    #
+    # This can be computed with the following steps where `[]_d` are the lower `d` bits and `[]^d`
+    # are the higher `d` bits:
+    #   c = a*b
+    #   r = [c + [[c]_d * mu]_d * q]^d
+    #   if r >= q then // not implemented in hardware
+    #       return r - q
+    #   return r
+    #
+    # This instruction computes these steps except the final conditional subtraction (`r >= q`) to
+    # optimize area and timing.
+    #
+    # To save resources the 64 bit MAC multiplier is reused and thus the calculations is split over
+    # multiple cycles. The instruction requires 12 cycles in total where each 64b part is processed
+    # in 3 cycles.
+    #   Cycle 0:  Reg(Tmp) = 0, Reg(C) = 0
+    #   Cycle 1:  Reg(Tmp) = [a*b]_d,     Reg(C) = a*b
+    #   Cycle 2:  Reg(Tmp) = [Tmp*mu]_d,  Reg(C) = a*b
+    #   Cycle 3:  Output   = c + (Tmp)*q mod q = [c + (Tmp)*q]^d (-q)
+    #
+    # The required constants q and mu are expected to be in the MOD WSR at following locations:
+    # For .8s: q @ [31:0], mu @ [63:32]
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
+        # The operation performed on the element pairs.
+        def op(a: int, b: int, q: int, mu: int, size: int) -> int:
+            return montgomery_mul_no_cond_subtraction(a, b, q, mu, size)
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNMULVM.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Extract the Montgomery constants q and mu
+        mod_raw = state.wsrs.MOD.read_unsigned()
+        offset_mu = size
+        mod_q = mod_raw & ((1 << size) - 1)
+        mod_mu = (mod_raw >> offset_mu) & ((1 << size) - 1)
+
+        # We first compute the result and then emulate the register update sequence. We do model
+        # only the ACC updates. We do not model the MAC's internal registers.
+        result = map_elems(lambda a, b: op(a, b, mod_q, mod_mu, size), size, vec_a, vec_b)
+
+        # Emulate the ACC register updates.
+        # One 64b chunk computation requires 3 cycles. We perform the following register accesses
+        # Cycle 1: TMP and C are written (internal registers, not modelled)
+        # Cycle 2: TMP is written, ACC and C unused
+        # Cycle 3: ACC is read and written, TMP and C are read
+        #
+        # We now repeat these 3 cycles for all four 64b chunks (quarter words). After each chunk,
+        # TMP and C are cleared using URND. ACC is cleared on cycle 12 and the result is written to
+        # the destination WDR.
+        #
+        # The chunk processing order is rotated by a random offset sampled from URND.
+        offset = state.mac_rnd_offset
+        qword_mask = (1 << 64) - 1
+        for qword in range(4):
+            # For the first QWord the first cycle is the one when the loop starts.
+            if qword != 0:
+                yield None
+            yield None
+            # The PRNG advance must be issued one cycle before URND is used.
+            state.wsrs.URND.mark_consumed()
+            yield None
+            chunk = (qword + offset) & 0x3
+            acc = state.wsrs.ACC.read_unsigned()
+            current_qword_mask = qword_mask << (chunk * 64)
+            acc &= ~current_qword_mask
+            acc |= result & current_qword_mask
+            if qword < 3:
+                state.wsrs.ACC.write_unsigned(acc)
+
+        state.wsrs.ACC.write_unsigned(state.wsrs.URND.read_unsigned())
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNMULVML(BnVecVecMul):
+    insn = insn_for_mnemonic('bn.mulvml', 5)
+
+    def __init__(self, raw: int, op_vals: Dict[str, int]):
+        super().__init__(raw, op_vals)
+        self.lane = op_vals['lane']
+
+    # See BNMULVM for detailed explanation of instruction
+    def execute(self, state: OTBNState) -> Optional[Iterator[None]]:
+        def op(a: int, b: int, q: int, mu: int, size: int) -> int:
+            return montgomery_mul_no_cond_subtraction(a, b, q, mu, size)
+
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNMULVML.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        # Extract the Montgomery constants q and mu
+        mod_raw = state.wsrs.MOD.read_unsigned()
+        offset_mu = size
+        mod_q = mod_raw & ((1 << size) - 1)
+        mod_mu = (mod_raw >> offset_mu) & ((1 << size) - 1)
+
+        # This instruction operates over 12 cycles. We first compute the results and then emulate
+        # the register updates.
+
+        # Replicate lane element to generate a 256b vector with 256/size elements.
+        lane_elem = extract_vec_elem(vec_b, self.lane, size)
+        lane_vec = 0
+        for i in range(256 // size):
+            lane_vec |= (lane_elem << (i * size))
+
+        result = map_elems(lambda a, b: op(a, b, mod_q, mod_mu, size), size, vec_a, lane_vec)
+
+        # Emulate the register updates. See BN.MULVM for details.
+        # The chunk processing order is rotated by a random offset sampled from URND.
+        offset = state.mac_rnd_offset
+        qword_mask = (1 << 64) - 1
+        for qword in range(4):
+            # For the first QWord the first cycle is the one when the loop starts.
+            if qword != 0:
+                yield None
+            yield None
+            state.wsrs.URND.mark_consumed()
+            yield None
+            chunk = (qword + offset) & 0x3
+            acc = state.wsrs.ACC.read_unsigned()
+            current_qword_mask = qword_mask << (chunk * 64)
+            acc &= ~current_qword_mask
+            acc |= result & current_qword_mask
+            if qword < 3:
+                state.wsrs.ACC.write_unsigned(acc)
+
+        state.wsrs.ACC.write_unsigned(state.wsrs.URND.read_unsigned())
+        state.wdrs.get_reg(self.wrd).write_unsigned(result)
+
+
+class BNTRN1(BnVecVecTrn):
+    insn = insn_for_mnemonic('bn.trn1', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNTRN1.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        vec_c = 0
+        for elem in range(0, 256 // size, 2):
+            elem_a = extract_vec_elem(vec_a, elem, size)
+            elem_b = extract_vec_elem(vec_b, elem, size)
+
+            vec_c = vec_c | ((elem_a) << (elem * size))
+            vec_c = vec_c | ((elem_b) << ((elem + 1) * size))
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(vec_c)
+
+
+class BNTRN2(BnVecVecTrn):
+    insn = insn_for_mnemonic('bn.trn2', 4)
+
+    def execute(self, state: OTBNState) -> None:
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNTRN2.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        vec_c = 0
+        for elem in range(0, 256 // size, 2):
+            elem_a = extract_vec_elem(vec_a, elem + 1, size)
+            elem_b = extract_vec_elem(vec_b, elem + 1, size)
+
+            vec_c = vec_c | ((elem_a) << (elem * size))
+            vec_c = vec_c | ((elem_b) << ((elem + 1) * size))
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(vec_c)
+
+
+class BNSHV(OTBNInsn):
+    insn = insn_for_mnemonic('bn.shv', 5)
+    supported_elens = [32]
+
+    def __init__(self, raw: int, op_vals: Dict[str, int]):
+        super().__init__(raw, op_vals)
+        self.wrd = op_vals['wrd']
+        self.wrs1 = op_vals['wrs']
+        self.elen = op_vals['elen']
+        self.shift_type = op_vals['shift_type']
+        self.shift_bits = op_vals['shift_bits']
+
+    def execute(self, state: OTBNState) -> None:
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        size = element_length_in_bits(self.elen)
+
+        # Invalid ELEN choice. Stop with an illegal instruction error.
+        if size not in BNSHV.supported_elens:
+            state.stop_at_end_of_cycle(ErrBits.ILLEGAL_INSN)
+            return None
+
+        vec_c = 0
+        for elem in range(256 // size):
+            elem_a = extract_vec_elem(vec_a, elem, size)
+            elem_a_shifted = shift_vec_elem(elem_a, size, self.shift_type, self.shift_bits)
+            vec_c = vec_c | (elem_a_shifted << (elem * size))
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(vec_c)
+
+
+class BNUNPK(OTBNInsn):
+    insn = insn_for_mnemonic('bn.unpk', 4)
+
+    def __init__(self, raw: int, op_vals: Dict[str, int]):
+        super().__init__(raw, op_vals)
+        self.wrd = op_vals['wrd']
+        self.wrs1 = op_vals['wrs1']
+        self.wrs2 = op_vals['wrs2']
+        self.shift = op_vals['shift_bits']
+
+    def execute(self, state: OTBNState) -> None:
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+
+        # Concatenate to 512 bits and shift
+        combined = (vec_a << 256) | (vec_b)
+        shifted = combined >> self.shift
+
+        # Unpack 8 24-bit elements into 32-bit elements
+        unpacked = 0
+        for elem in range(256 // 32):
+            chunk = (shifted >> (elem * 24)) & ((1 << 24) - 1)
+            unpacked = unpacked | (chunk << (elem * 32))
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(unpacked)
+
+
+class BNPACK(OTBNInsn):
+    insn = insn_for_mnemonic('bn.pack', 4)
+
+    def __init__(self, raw: int, op_vals: Dict[str, int]):
+        super().__init__(raw, op_vals)
+        self.wrd = op_vals['wrd']
+        self.wrs1 = op_vals['wrs1']
+        self.wrs2 = op_vals['wrs2']
+        self.shift = op_vals['shift_bits']
+
+    def execute(self, state: OTBNState) -> None:
+        vec_a = state.wdrs.get_reg(self.wrs1).read_unsigned()
+        vec_b = state.wdrs.get_reg(self.wrs2).read_unsigned()
+
+        # Pack 8 24b elements from 256b string into 192b string
+        def pack_24b_elems(vec: int) -> int:
+            dense = 0
+            for elem in range(256 // 32):
+                elem_a = (vec >> (elem * 32)) & ((1 << 24) - 1)
+                dense = dense | (elem_a << (elem * 24))
+            return dense
+
+        dense_a = pack_24b_elems(vec_a)
+        dense_b = pack_24b_elems(vec_b)
+
+        # Concatenate and append 64 zeros to the right.
+        combined = (dense_a << (192 + 64)) | (dense_b << 64)
+        shifted = combined >> self.shift
+        packed = shifted & ((1 << 256) - 1)
+
+        state.wdrs.get_reg(self.wrd).write_unsigned(packed)
 
 
 INSN_CLASSES = [
@@ -1248,7 +1833,7 @@ INSN_CLASSES = [
     LW, SW,
     BEQ, BNE, JAL, JALR,
     CSRRS, CSRRW,
-    ECALL,
+    ECALL, WFI,
     LOOP, LOOPI,
 
     BNADD, BNADDC, BNADDI, BNADDM,
@@ -1260,5 +1845,13 @@ INSN_CLASSES = [
     BNCMP, BNCMPB,
     BNLID, BNSID,
     BNMOV, BNMOVR,
-    BNWSRR, BNWSRW
+    BNWSRR, BNWSRW,
+
+    BNADDV, BNADDVM,
+    BNSUBV, BNSUBVM,
+    BNMULV, BNMULVL,
+    BNMULVM, BNMULVML,
+    BNTRN1, BNTRN2,
+    BNSHV,
+    BNUNPK, BNPACK
 ]

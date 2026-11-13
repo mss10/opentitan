@@ -1,51 +1,39 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #ifndef OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_MOCK_MANIFEST_H_
 #define OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_MOCK_MANIFEST_H_
 
+#include "sw/device/lib/base/global_mock.h"
 #include "sw/device/silicon_creator/lib/manifest.h"
-#include "sw/device/silicon_creator/testing/mask_rom_test.h"
+#include "sw/device/silicon_creator/testing/rom_test.h"
 
-namespace mask_rom_test {
+namespace rom_test {
 namespace internal {
 
 /**
  * Mock class for manifest.h.
  */
-class MockManifest : public GlobalMock<MockManifest> {
+class MockManifest : public global_mock::GlobalMock<MockManifest> {
  public:
   MOCK_METHOD(rom_error_t, Check, (const manifest_t *));
   MOCK_METHOD(manifest_digest_region_t, DigestRegion, (const manifest_t *));
   MOCK_METHOD(epmp_region_t, CodeRegion, (const manifest_t *));
   MOCK_METHOD(uintptr_t, EntryPoint, (const manifest_t *));
+  MOCK_METHOD(rom_error_t, SpxKey,
+              (const manifest_t *, const manifest_ext_spx_key_t **spx_key));
+  MOCK_METHOD(rom_error_t, SpxSignature,
+              (const manifest_t *,
+               const manifest_ext_spx_signature_t **spx_signature));
+  MOCK_METHOD(rom_error_t, Isfb,
+              (const manifest_t *, const manifest_ext_isfb_t **isfb));
 };
 
 }  // namespace internal
 
 using MockManifest = testing::StrictMock<internal::MockManifest>;
 
-extern "C" {
-
-rom_error_t manifest_check(const manifest_t *manifest) {
-  return MockManifest::Instance().Check(manifest);
-}
-
-manifest_digest_region_t manifest_digest_region_get(
-    const manifest_t *manifest) {
-  return MockManifest::Instance().DigestRegion(manifest);
-}
-
-epmp_region_t manifest_code_region_get(const manifest_t *manifest) {
-  return MockManifest::Instance().CodeRegion(manifest);
-}
-
-uintptr_t manifest_entry_point_get(const manifest_t *manifest) {
-  return MockManifest::Instance().EntryPoint(manifest);
-}
-
-}  // extern "C"
-}  // namespace mask_rom_test
+}  // namespace rom_test
 
 #endif  // OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_MOCK_MANIFEST_H_

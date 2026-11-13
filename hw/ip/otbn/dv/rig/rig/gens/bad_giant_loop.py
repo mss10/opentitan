@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -86,7 +86,7 @@ class BadGiantLoop(Loop):
         if iters is None:
             return None
 
-        iters_opval, num_iters, warp = iters
+        iters_opval, _num_iters, _warp = iters
         hd_addr = model.pc
         hd_insn = ProgInsn(insn, [iters_opval, enc_bodysize], None)
 
@@ -106,4 +106,4 @@ class BadGiantLoop(Loop):
         assert body_snippet is not None
 
         loop_snippet = LoopSnippet(hd_addr, hd_insn, body_snippet, None)
-        return (loop_snippet, True, end_model)
+        return (loop_snippet, end_model)

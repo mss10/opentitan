@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,22 +8,29 @@
 
 set -e
 
-tools=(
+required_tools=(
     git
     python3
     yapf
     isort
-    clang-format
     flake8
     ninja
-    meson
-    doxygen
+)
+
+optional_tools=(
     verible-verilog-lint
 )
 
-for tool in "${tools[@]}"; do
+for tool in "${required_tools[@]}"; do
     set -x
     $tool --version
+    { set +x; } 2>/dev/null
+    echo
+done
+
+for tool in "${optional_tools[@]}"; do
+    set -x
+    $tool --version || echo "Warning: failed to determine version of $tool"
     { set +x; } 2>/dev/null
     echo
 done

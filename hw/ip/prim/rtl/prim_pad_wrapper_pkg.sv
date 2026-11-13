@@ -1,22 +1,29 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 package prim_pad_wrapper_pkg;
 
   typedef enum logic [2:0] {
-    BidirStd = 3'h0,  // Standard bidirectional pad
-    BidirTol = 3'h1,  // Voltage tolerant pad
-    BidirOd = 3'h2,   // Open-drain capable pad
-    InputStd = 3'h3,  // Input-only pad
-    AnalogIn0 = 3'h4, // Analog input pad
-    AnalogIn1 = 3'h5  // Analog input pad
+    BidirStd = 3'h0,     // Standard bidirectional pad
+    BidirTol = 3'h1,     // Voltage tolerant pad
+    BidirOd = 3'h2,      // Open-drain capable pad
+    InputStd = 3'h3,     // Input-only pad
+    AnalogIn0 = 3'h4,    // Analog input pad
+    AnalogIn1 = 3'h5,    // Analog input pad
+    DualBidirTol = 3'h6  // Dual Voltage tolerant pad
   } pad_type_e;
+
+  typedef enum logic {
+    OrientH = 1'b0, // Horizontal
+    OrientV = 1'b1  // Vertical
+  } pad_orient_e;
 
   typedef enum logic [1:0] {
     NoScan = 2'h0,
     ScanIn = 2'h1,
-    ScanOut = 2'h2
+    ScanOut = 2'h2,
+    ScanClock = 2'h3
   } scan_role_e;
 
   // Pad attributes
@@ -26,6 +33,7 @@ package prim_pad_wrapper_pkg;
   typedef struct packed {
     logic [DriveStrDw-1:0] drive_strength; // Drive strength (0000: weakest, 1111: strongest).
     logic [SlewRateDw-1:0] slew_rate;      // Slew rate (0: slowest, 11: fastest).
+    logic input_disable;                   // Input disable.
     logic od_en;                           // Open-drain enable
     logic schmitt_en;                      // Schmitt trigger enable.
     logic keep_en;                         // Keeper enable.

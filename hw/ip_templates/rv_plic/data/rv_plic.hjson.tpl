@@ -1,19 +1,63 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-<% import math %>\
-# RV_PLIC register template
+<%
+  import math
+
+# Interrupt 0 is reserved to indicate "no interrupt" so the number of real
+# sources is src-1. This template assumes that there is at least one real interrupt,
+# otherwise it generates invalid bitfields.
+  assert src > 1, "the rv_plic template assumes that there is at least one interrupt"
+%>\
+# ${(module_instance_name).upper()} register template
 #
 # Parameter (given by Python tool)
 #  - src:    Number of Interrupt Sources
 #  - target: Number of Targets that handle interrupt requests
 #  - prio:   Max value of interrupt priorities
+#  - module_instance_name: Module instance name.
 {
-  name: "RV_PLIC",
+  name:               "${module_instance_name}",
+  human_name:         "RISC-V platform level interrupt controller",
+  one_line_desc:      "Interrupt controller, adhering to RISC-V PLIC specification",
+  one_paragraph_desc: '''
+    rv_plic is an interrupt controller which handles multiple interrupt sources. Each interrupt
+    source can be enabled or disabled, and can be given a priority. rv_plic generates an output
+    that identifies the source with the highest priority amongst those that are currently asserted.
+  '''
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "33",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_${module_instance_name.lower()}",
+  revisions: [
+    {
+      version:            "2.0.0",
+      life_stage:         "L1",
+      design_stage:       "D3",
+      verification_stage: "V2",
+      dif_stage:          "S2",
+      commit_id:          "5967df933a814f72d5212bd43d13a0041a3aaf9d",
+      notes:              "Use FPV to perform block level verification.",
+    }
+    {
+      version:            "2.1.0",
+      life_stage:         "L1",
+      design_stage:       "D3",
+      verification_stage: "V2",
+      dif_stage:          "S2",
+      notes:              "Use FPV to perform block level verification.",
+    }
+  ],
   clocking: [{clock: "clk_i", reset: "rst_ni"}],
   bus_interfaces: [
+  % if racl_support:
+    { protocol: "tlul", direction: "device", racl_support: true }
+  % else:
     { protocol: "tlul", direction: "device" }
+  % endif
   ],
 
   param_list: [
@@ -71,26 +115,68 @@
       package: "",
       width:   "${target}"
     },
+  % if racl_support:
+    { struct:  "racl_policy_vec",
+      type:    "uni",
+      name:    "racl_policies",
+      act:     "rcv",
+      package: "top_racl_pkg",
+      desc:    '''
+        Incoming RACL policy vector from a racl_ctrl instance.
+        The policy selection vector (parameter) selects the policy for each register.
+      '''
+    }
+    { struct:  "racl_error_log",
+      type:    "uni",
+      name:    "racl_error",
+      act:     "req",
+      width:   "1"
+      package: "top_racl_pkg",
+      desc:    '''
+        RACL error log information of this module.
+      '''
+    }
+  % endif
+  ]
+
+  countermeasures: [
+    { name: "BUS.INTEGRITY",
+      desc: "End-to-end bus integrity scheme."
+    }
+  ]
+
+  features: [
+    { name: "RV_PLIC.PRIORITY",
+      desc: '''Each interrupt source can be given a configurable priority.'''
+    }
+    { name: "RV_PLIC.ENABLE",
+      desc: '''Each target has an associated set of interrupt enable bits. Configuring these
+               controls whether a target will be notified when the interrupt is triggered.
+            '''
+    }
   ]
 
   regwidth: "32",
   registers: [
-% for i in range(src):
-    { name: "PRIO${i}",
-      desc: "Interrupt Source ${i} Priority",
-      swaccess: "rw",
-      hwaccess: "hro",
-      fields: [
-        { bits: "${(prio).bit_length()-1}:0" }
-      ],
+    { multireg:
+      { name: "PRIO",
+        desc: "Interrupt Source Priority",
+        count: "NumSrc",
+        cname: "${(module_instance_name).upper()}",
+        swaccess: "rw",
+        hwaccess: "hro",
+        compact: false,
+        fields: [
+          { bits: "${(prio).bit_length()-1}:0" }
+        ],
+      }
     }
-% endfor
     { skipto: "0x00001000" }
     { multireg: {
         name: "IP",
         desc: "Interrupt Pending",
         count: "NumSrc",
-        cname: "RV_PLIC",
+        cname: "${(module_instance_name).upper()}",
         swaccess: "ro",
         hwaccess: "hwo",
         fields: [
@@ -101,12 +187,12 @@
       }
     },
 % for i in range(target):
-    { skipto: "${"0x{:x}".format(0x00002000 + i * 0x100)}" }
+    { skipto: "${"0x{:x}".format(0x00002000 + i * 0x80)}" }
     { multireg: {
         name: "IE${i}",
         desc: "Interrupt Enable for Target ${i}",
         count: "NumSrc",
-        cname: "RV_PLIC",
+        cname: "${(module_instance_name).upper()}",
         swaccess: "rw",
         hwaccess: "hro",
         fields: [
@@ -161,10 +247,18 @@
       hwaccess: "hro",
       hwqe:     "True",
       hwext:    "True",
+      inregwen: "regwen",
       fields: [
         { bits: "0",
           name: "fatal_fault",
           desc: "'Write 1 to trigger one alert event of this kind.'",
+        }
+        { bits: "31",
+          name: "regwen",
+          swaccess: "rw0c",
+          hwaccess: "none",
+          resval: "1",
+          desc: "Write 0 to disable alert testing until the next reset.",
         }
       ],
     }

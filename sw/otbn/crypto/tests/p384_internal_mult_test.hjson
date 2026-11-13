@@ -1,0 +1,32 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+{
+  "entrypoint": "p384_internal_mult_test",
+  "input": {
+    "dmem": {
+      # 1st scalar share d0 (768-bit)
+      "d0": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000032f9e2b08677a5f2adb9ce1be14cd8df800a4c9416f5c1ee1e9d19e796d2f9e05b7d3b0f4de8344e6e0012819a0c1b763eb17c275c832a51",
+      # 2nd scalar share d1 (768-bit)
+      "d1": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000009e5dc5989ec9b43013e7014aa9da1611b706d6828930f2434ad22b6e9cb814d944676e619ef51898ab8fb14d507568cdd31b18d533eae098",
+      # point 1 x-cooridante p1_x
+      "x": "0x000000000000000000000000000000003af8f1c5b44ba79930eda4ab247053177dff4c2bf84e7899dbdb132e2a35de105ef02be3440d8db602e3d5a91a11808b",
+      # point 1 y-cooridante p1_y
+      "y": "0x00000000000000000000000000000000841e49490fe7dbde87498a208d8d864192a5c72af491007e26b4d3c6757d449392b9c4bb8e51c66282f268bea9f8b96e",
+    }
+  }
+  "output": {
+    "regs": {
+      # [w26, w25] is the first x coordinate of the scalar multiplication result
+      "w25": "0xd450758db76d52310e3bba138b041a000d995fab8075f98f674c2e4bbf42eb3a",
+      "w26": "0x000000000000000000000000000000001b1b6a2a1560cfcb23b58428708d5662",
+      # [w28, w27] is the first y coordinate of the scalar multiplication result
+      "w27": "0x5bf536b7380cec4150cae3372d326d7979e9d4e53eea52182f95a43c1534f027",
+      "w28": "0x0000000000000000000000000000000092c7a44caed1c1a9a83627b7d3a7ad39",
+      # [w30, w29] is the first z coordinate of the scalar multiplication result
+      "w29": "0x3defd61fedcbb24b64a9f58d52cf102b110fc99fc15175688b2e6f86173eab9b",
+      "w30": "0x000000000000000000000000000000006204a7d9c637d92ca4cf0c7111dd8c35",
+    }
+  }
+}

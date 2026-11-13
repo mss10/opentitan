@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:dv:lc_ctrl_sim:0.1"
@@ -13,6 +13,8 @@ filesets:
     depend:
       - lowrisc:dv:lc_ctrl_test
       - lowrisc:dv:lc_ctrl_sva
+      - lowrisc:dv:lc_ctrl_cov
+      - lowrisc:tlul:jtag_dtm
     files:
       - tb.sv
     file_type: systemVerilogSource

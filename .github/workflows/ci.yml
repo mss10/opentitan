@@ -1,0 +1,646 @@
+# Copyright lowRISC contributors (OpenTitan project).
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches-ignore:
+      - "backport-*"
+      - "gh-readonly-queue/**"
+    tags:
+      - "*"
+  merge_group:
+    types:
+      - checks_requested
+
+permissions:
+  contents: read
+  # Needed for workload identity federation
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  VIVADO_VERSION: "2021.1"
+  # Release tag from https://github.com/lowRISC/lowrisc-toolchains/releases
+  TOOLCHAIN_VERSION: 20220210-1
+
+jobs:
+  # Lint is split into independent categories that run in parallel, each in
+  # the `lint` devShell so `nix run .#lint` reproduces them locally. Most get
+  # everything from the devShell; the `bazel` category additionally uses
+  # prepare-env for the system libraries and remote-cache credentials its
+  # Bazel builds need. See ci/lint/run.sh for the single source of truth.
+  #
+  # Every gating category runs on every event, including the merge queue. Lint
+  # is cheap relative to the build and test jobs the queue skips, and several
+  # categories check properties of the *merged* tree that a per-PR run cannot:
+  # generated files matching their sources, vendored directories matching what
+  # util/vendor.py produces, or the hardware linting cleanly. Two PRs can each
+  # pass alone and still break one of those once queued together -- one editing
+  # an hjson while the other edits a file generated from it, say.
+
+  # Fast text/metadata/Python hygiene. Also serves as the cheap gate that the
+  # heavy build/test jobs wait on.
+  lint_hygiene:
+    name: Lint (hygiene)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Required so we can lint commit messages and diffs.
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Run hygiene lint
+        run: nix run --quiet --no-warn-dirty .#lint -- hygiene
+        env:
+          OT_BASE_REF: ${{ github.base_ref || 'master' }}
+          OT_RUN_PR_CHECKS: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+
+  # Generated and vendored files must be clean and up to date.
+  lint_gen:
+    name: Lint (generated)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Run generated/vendored lint
+        run: nix run --quiet --no-warn-dirty .#lint -- gen
+
+  # Per-top hardware lint (Verible + countermeasures), one matrix leg per top.
+  lint_hw:
+    name: Lint HW (${{ matrix.top }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        top: [earlgrey, darjeeling]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Run hardware lint
+        run: nix run --quiet --no-warn-dirty .#lint -- hw ${{ matrix.top }}
+
+  # Per-top slang lint and elaboration.
+  lint_slang:
+    name: Lint slang (${{ matrix.top }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        top: [earlgrey, darjeeling]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Run slang lint
+        run: nix run --quiet --no-warn-dirty .#lint -- slang ${{ matrix.top }}
+
+  # Whole-tree Verible style check:
+  #
+  # Covers .sv/.v files no per-top lint cfg reaches
+  # (vendored RTL, DV/FPV sources, unintegrated IPs).
+  #
+  # Advisory only, and runs on pull requests alone. The step swallows its
+  # exit status, and sets `continue-on-error` so a crash in the runner
+  # itself can't block merges either. See cat_sv in ci/lint/run.sh for why
+  # it can't be gating.
+  lint_sv_sweep:
+    name: Lint (SV sweep)
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'merge_group' }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Run whole-tree Verible sweep
+        run: nix run --quiet --no-warn-dirty .#lint -- sv
+
+  # Bazel-graph hygiene, link checking and alert classification. Runs in the
+  # lint devShell like the other categories (so Bazel comes from the cache and
+  # matches local runs), but still uses prepare-env for the system libraries
+  # the Bazel-built tools link against, the remote-cache config in ~/.bazelrc,
+  # and the secure credential handling for cache uploads.
+  #
+  # One leg per group (see cat_bazel in ci/lint/run.sh). `alerts` builds
+  # opentitantool and takes several minutes; running it after the query-only
+  # checks made this category the critical path for the whole lint stage. In
+  # parallel the category costs its slowest leg instead of the sum.
+  lint_bazel:
+    name: Lint bazel (${{ matrix.group }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [graph, alerts]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Bitstream cache / graph queries require all commits.
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Run bazel lint (${{ matrix.group }})
+        run: nix run --quiet --no-warn-dirty .#lint -- bazel ${{ matrix.group }}
+        env:
+          OT_BASE_REF: ${{ github.base_ref || 'master' }}
+          OT_RUN_PR_CHECKS: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+
+  # Aggregate of the individual lint categories above. This job exists so the
+  # pipeline has a single, stable status-check name ("Lint (quick)") for the
+  # rest of the workflow to depend on and for the master branch ruleset to
+  # require. Splitting or renaming the individual lint jobs therefore does not
+  # require touching every downstream `needs:` or the (out-of-repo) ruleset.
+  # `if: !cancelled()` ensures it still runs (and fails) when a lint fails.
+  # `skipped` counts as success, so that making a category conditional cannot
+  # leave this check pending forever and block the merge queue.
+  quick_lint:
+    name: Lint (quick)
+    runs-on: ubuntu-latest
+    needs: [lint_hygiene, lint_gen, lint_hw, lint_slang, lint_bazel]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Check lint results
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "Lint category results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::A lint category did not succeed (result: $r)"
+              exit 1
+            fi
+          done
+
+  # Single source of truth for whether the rest of the pipeline (everything
+  # except the lint jobs) should run. While a PR is a draft, only lint runs.
+  gate:
+    name: Draft PR gate
+    runs-on: ubuntu-latest
+    outputs:
+      run_full: ${{ steps.check.outputs.run_full }}
+    steps:
+      - id: check
+        run: echo "run_full=${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}" >> "$GITHUB_OUTPUT"
+
+  build_docs:
+    name: Build documentation
+    runs-on: ubuntu-22.04
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    env:
+      BUCKET: gold-hybrid-255313-prod
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Bitstream cache requires all commits.
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Build documentation
+        run: util/site/build-docs.sh build
+      - name: Upload files as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs
+          path: build-site/
+          overwrite: true
+      - name: Upload files
+        if: ${{ github.event_name != 'pull_request' && github.ref_name == 'master' }}
+        run: |
+          echo "::group::Upload all uncompressed files"
+          gcloud storage cp -R --gzip-in-flight=js,css,html "build-site/*" gs://$BUCKET
+          echo "::endgroup::"
+
+          # This script compresses the searchindex files, replacing the originals in-place.
+          # (This is how 'content-encoding'-tagged files should be uploaded to gcloud buckets)
+          util/site/post-build.sh compress_br
+
+          search_indexes=$(find build-site/ -type f -name '*searchindex.json')
+          for f in $search_indexes; do
+              echo "Uploading compressed file ${f}"
+              # Get directory of file, relative to the build directory.
+              # - var=${var#*//} # removes stuff from the begining up to //
+              dir=$(dirname "${f#*build-site/}")
+              # When serving from gcloud buckets, file should be uploaded with an identical name as the
+              # original, but compressed and with the matching 'content-encoding' and 'content-type' tags applied.
+              gcloud storage cp \
+                     --content-encoding=br \
+                     --content-type=application/json \
+                     -R \
+                     "$f" "gs://$BUCKET/${dir}/"
+          done
+
+  airgapped_build:
+    name: Airgapped build
+    runs-on: ubuntu-22.04
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Bitstream cache requires all commits.
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+          configure-bazel: false
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+      - name: Check disk space
+        run: |
+          df -h
+      - name: Prepare airgapped environment
+        run: ./util/prep-bazel-airgapped-build.sh
+      - name: Check disk space
+        run: |
+          df -h
+      - name: Build in the airgapped environment
+        run: ./ci/scripts/test-airgapped-build.sh
+
+  otbn_standalone_tests:
+    name: Run OTBN smoke Test
+    needs: [quick_lint, gate]
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Bitstream cache requires all commits.
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Install toolchain
+        run: |
+          TOOLCHAIN_PATH=/tools/riscv
+          sudo util/get-toolchain.py \
+            --install-dir="$TOOLCHAIN_PATH" \
+            --release-version="$TOOLCHAIN_VERSION" \
+            --update
+          echo "$TOOLCHAIN_PATH/bin" >> $GITHUB_PATH
+      - name: Display environment
+        run: |
+          python3 --version
+          nix run --quiet --no-warn-dirty .#eda -- fusesoc --version
+          nix run --quiet --no-warn-dirty .#eda -- verilator --version
+      - name: OTBN ISS test
+        run: make -C hw/ip/otbn/dv/otbnsim test
+      # The smoke test builds a Verilator model with FuseSoC, so it runs in the
+      # development shell.  The RISC-V toolchain installed above stays visible,
+      # as the shell bind-mounts the directories of the host.
+      - name: OBTN smoke test
+        run: nix run --quiet --no-warn-dirty .#eda -- ./hw/ip/otbn/dv/smoke/run_smoke.sh
+      - name: Assemble & link code snippets
+        run: make -C hw/ip/otbn/util asm-check
+
+  otbn_crypto_tests:
+    name: Run OTBN crypto tests
+    needs: [quick_lint, gate]
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Bitstream cache requires all commits.
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Execute tests
+        run: ./bazelisk.sh test --test_tag_filters=-broken,-skip_in_ci,-nightly //sw/otbn/crypto/...
+
+  verilator_englishbreakfast:
+    name: Verilated English Breakfast
+    runs-on: ubuntu-22.04
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Build simulator with Verilator
+        run: |
+          nix run --quiet --no-warn-dirty .#eda -- \
+            ./bazelisk.sh build --//hw/top=englishbreakfast //hw:verilator_real
+          sim_binary_path=$(nix run --quiet --no-warn-dirty .#eda -- \
+            ./bazelisk.sh cquery --//hw/top=englishbreakfast --output=files //hw:verilator_real)
+          mkdir -p build-bin/hw/top_englishbreakfast
+          cp ${sim_binary_path} build-bin/hw/top_englishbreakfast/
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: verilated_englishbreakfast
+          path: build-bin/hw/top_englishbreakfast/Vchip_englishbreakfast_verilator
+          overwrite: true
+      - name: Test
+        run: nix run --quiet --no-warn-dirty .#eda -- ./ci/scripts/run-english-breakfast-verilator-tests.sh
+        # The patching mechanism for english breakfast is incompatible with multitop
+        # so this job will fail. At the same time, multitop is not advanced enough
+        # that we can compile those tests for EB yet. Ignore this job until we can
+        # fix it.
+        continue-on-error: true
+
+  verilator_earlgrey:
+    name: Verilated Earl Grey
+    runs-on: ubuntu-22.04
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Run fast Verilator tests
+        run: nix run --quiet --no-warn-dirty .#eda -- ./ci/scripts/run-verilator-tests.sh
+      - name: Publish Bazel test results
+        uses: ./.github/actions/publish-bazel-test-results
+        if: ${{ !cancelled() }}
+        with:
+          artifact-name: verilator_earlgrey-test-results
+
+  verilator_eg_sanity:
+    name: Earl Grey Sanity Check (FPGA Gate)
+    runs-on: ubuntu-22.04
+    needs: quick_lint
+    if: ${{ github.event_name != 'merge_group' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Nix
+        uses: ./.github/actions/prepare-nix
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Run Verilator test
+        run: nix run --quiet --no-warn-dirty .#eda -- ./ci/scripts/run-verilator-tests.sh --sanity
+      - name: Publish Bazel test results
+        uses: ./.github/actions/publish-bazel-test-results
+        if: ${{ !cancelled() }}
+        with:
+          artifact-name: verilator_eg_sanity-test-results
+
+  chip_earlgrey_cw340:
+    name: Earl Grey for CW340
+    needs: [quick_lint, gate]
+    if: ${{ needs.gate.outputs.run_full == 'true' }}
+    uses: ./.github/workflows/bitstream.yml
+    secrets: inherit
+    with:
+      top_name: earlgrey
+      design_suffix: cw340
+
+  cache_bitstreams:
+    name: Cache bitstreams to GCP
+    runs-on: ubuntu-22.04
+    needs:
+      - chip_earlgrey_cw340
+    steps:
+      - name: Skipped message
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          echo ":information_source: Bitstream caching is skipped for this pull request job" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v6
+        if: ${{ github.event_name != 'pull_request' }}
+      - name: Prepare environment
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Download partial build-bin
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: ./.github/actions/download-partial-build-bin
+        with:
+          job-patterns: chip_earlgrey_cw340
+      - name: Create bitstream cache archive
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          shopt -s globstar # Allow use of **
+          ./bazelisk.sh build //util/py/scripts:bitstream_cache_create
+          ./bazelisk.sh run //util/py/scripts:bitstream_cache_create -- \
+            --schema $PWD/rules/scripts/bitstreams_manifest.schema.json \
+            --stamp-file $PWD/bazel-out/volatile-status.txt \
+            --out $PWD/build-bin/bitstream-cache \
+            $PWD/build-bin/**/manifest.json
+      - name: Upload bitstreams to GCP bucket
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          BUCKET_URI=gs://opentitan-bitstreams/${{ github.ref_name }}
+          printf "$(date -u +%Y-%m-%dT%H:%M:%S)\n${{ github.sha }}" > latest.txt
+          gcloud storage cp build-bin/bitstream-cache/bitstream-cache.tar.gz $BUCKET_URI/bitstream-${{ github.sha }}.tar.gz
+          gcloud storage cp latest.txt $BUCKET_URI/latest.txt
+          gcloud storage cp $BUCKET_URI/bitstream-${{ github.sha }}.tar.gz $BUCKET_URI/bitstream-latest.tar.gz
+
+  schedule_fpga_jobs:
+    name: Schedule FPGA jobs
+    runs-on: ubuntu-22.04
+    needs: gate
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    outputs:
+      jobs_cw340: ${{ steps.schedule.outputs.jobs_cw340 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Required for the bitstream cache
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Compute job schedule
+        id: schedule
+        run: |
+          jobs_dir=$(mktemp -d)
+          echo "jobs_dir=$jobs_dir" >> "$GITHUB_OUTPUT"
+          JOBS=$(./ci/scripts/schedule_fpga_jobs.py \
+            --out-dir $jobs_dir/ \
+            --test_tag_filters=-manual,-broken,-skip_in_ci,-slow_test,fpga \
+            "tests(//sw/... union @manufacturer_test_hooks//...)")
+          echo "$JOBS"
+          echo 'jobs_cw340<<EOF' >> "$GITHUB_OUTPUT"
+          echo "$JOBS" | jq '[.[] | select(.board == "cw340")]' >> "$GITHUB_OUTPUT"
+          echo EOF >> "$GITHUB_OUTPUT"
+      - name: Upload target files
+        uses: actions/upload-artifact@v7
+        with:
+            name: fpga_jobs
+            path: ${{ steps.schedule.outputs.jobs_dir }}
+
+  execute_fpga_cw340_jobs:
+    name: ${{ matrix.name }}
+    needs:
+      - schedule_fpga_jobs
+      - quick_lint
+      - chip_earlgrey_cw340
+      # Don't run any FPGA jobs if we can't even pass a basic sanity test in Verilator,
+      # even if the quick lint passes and the bitstream builds.
+      - verilator_eg_sanity
+      - gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.schedule_fpga_jobs.outputs.jobs_cw340) }}
+    uses: ./.github/workflows/fpga.yml
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    secrets: inherit
+    with:
+      job_name: ${{ matrix.id }}
+      bitstream: chip_earlgrey_cw340
+      board: ${{ matrix.board }}
+      interface: cw340
+      artifact: fpga_jobs
+      target_file: ${{ matrix.target_file }}
+
+  build_docker_containers:
+    name: Build Docker Containers
+    runs-on: ubuntu-22.04
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build Developer Utility Container
+        uses: docker/build-push-action@v7.0.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: util/container/Dockerfile
+
+  sw_build_test:
+    name: Build and test software
+    runs-on: ubuntu-22.04-vivado
+    timeout-minutes: 120
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Required for bitstream cache to work.
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Check Bazel build graph
+        run: |
+          # Test the graph with both an empty and filled bitstream cache.
+          ./ci/scripts/test-empty-bitstream-cache.sh
+          ./bazelisk.sh build --nobuild //...
+      - name: Select software targets
+        run: |
+          target_pattern_file="$(mktemp)"
+          echo "target_pattern_file=${target_pattern_file}" >> "$GITHUB_ENV"
+
+          # Start with building the whole graph.
+          echo '//...' > "$target_pattern_file"
+          # Exclude some targets:
+          #
+          # 1. `//hw/...` is out of scope.
+          # 2. `//quality/...` is tested by the lint jobs.
+          # 3. `//sw/otbn/crypto/...` is tested by the OTBN job.
+          # 4. `//third_party/...` which is not our code.
+          printf "%s\n"             \
+            "-//hw/..."             \
+            "-//quality/..."        \
+            "-//sw/otbn/crypto/..." \
+            "-//third_party/..."    \
+            >> "$target_pattern_file"
+          # Exclude building anything that is tagged as a target for FPGA,
+          # or anything which transitively depends on such a target.
+          ./bazelisk.sh cquery                           \
+            --noinclude_aspects                          \
+            --output=starlark                            \
+            --starlark:expr='"-{}".format(target.label)' \
+            --define DISABLE_VERILATOR_BUILD=true        \
+            -- "rdeps(//..., attr(tags, 'fpga', //...))" \
+            >> "$target_pattern_file"
+      - name: Build software targets
+        run: |
+          # Build everything we selected, excluding some tags.
+          ./bazelisk.sh build                                                       \
+            --remote_download_outputs=minimal                                       \
+            --build_tests_only=false                                                \
+            --define DISABLE_VERILATOR_BUILD=true                                   \
+            --test_tag_filters=-broken,-skip_build_in_ci,-fpga,-qemu,-verilator,-dv \
+            --target_pattern_file="$target_pattern_file"
+      - name: Run software unit tests
+        run: |
+          ./bazelisk.sh test                                                                 \
+            --build_tests_only=true                                                          \
+            --test_output=errors                                                             \
+            --define DISABLE_VERILATOR_BUILD=true                                            \
+            --test_tag_filters=-broken,-skip_build_in_ci,-fpga,-qemu,-verilator,-dv,-silicon \
+            --target_pattern_file="$target_pattern_file"
+      - name: Publish Bazel test results
+        uses: ./.github/actions/publish-bazel-test-results
+        if: ${{ !cancelled() }}
+        with:
+          artifact-name: sw_build_test-test-results
+      - name: Check for unrunnable tests
+        run: ./ci/scripts/check-unrunnable-tests.sh
+        continue-on-error: true
+
+  dj_sw_build_test:
+    name: Build and test Darjeeling software
+    runs-on: ubuntu-22.04-vivado
+    timeout-minutes: 120
+    needs: [quick_lint, gate]
+    if: ${{ github.event_name != 'merge_group' && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Required for bitstream cache to work.
+      - name: Prepare environment
+        uses: ./.github/actions/prepare-env
+        with:
+          service_account_json: '${{ secrets.BAZEL_CACHE_CREDS }}'
+      - name: Check Bazel build graph
+        run: |
+          # Test the graph with both an empty and filled bitstream cache.
+          ./ci/scripts/test-empty-bitstream-cache.sh
+          ./bazelisk.sh build --nobuild --//hw/top=darjeeling //...
+      - name: Build software targets
+        run: |
+          # Compile some selected targets
+          ./bazelisk.sh build                                \
+            --remote_download_outputs=minimal                \
+            --define DISABLE_VERILATOR_BUILD=true            \
+            --build_tests_only=false                         \
+            --//hw/top=darjeeling                            \
+            //sw/device/...
+
+  # Single job that we can gate pull requests and merge queues on:
+  merge_blocker:
+    name: Merge blocker
+    runs-on: ubuntu-latest
+    needs: [cache_bitstreams, gate]
+    if: ${{ !cancelled() && needs.gate.outputs.run_full == 'true' }}
+    steps:
+      - name: Complete
+        run: ${{ needs.cache_bitstreams.result == 'success' }}

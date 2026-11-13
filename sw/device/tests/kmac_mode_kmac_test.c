@@ -1,19 +1,18 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "hw/top/dt/kmac.h"  // Generated
+
 #include "sw/device/lib/arch/device.h"
-#include "sw/device/lib/base/memory.h"
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/base/mmio.h"
 #include "sw/device/lib/dif/dif_kmac.h"
-#include "sw/device/lib/flash_ctrl.h"
 #include "sw/device/lib/runtime/log.h"
-#include "sw/device/lib/testing/check.h"
-#include "sw/device/lib/testing/test_framework/test_main.h"
+#include "sw/device/lib/testing/test_framework/check.h"
+#include "sw/device/lib/testing/test_framework/ottf_main.h"
 
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
-
-const test_config_t kTestConfig;
+OTTF_DEFINE_TEST_CONFIG();
 
 #define DIGEST_LEN_KMAC_MAX 100
 
@@ -189,19 +188,22 @@ const kmac_test_t kmac_tests[] = {
     },
 };
 
-bool test_main() {
+bool test_main(void) {
   LOG_INFO("Running KMAC DIF test...");
 
   // Intialize KMAC hardware.
   dif_kmac_t kmac;
+  dt_kmac_t kKmacDt = (dt_kmac_t)0;
+  static_assert(kDtKmacCount >= 1,
+                "This test requires at least one KMAC instance");
   dif_kmac_operation_state_t kmac_operation_state;
-  CHECK_DIF_OK(
-      dif_kmac_init(mmio_region_from_addr(TOP_EARLGREY_KMAC_BASE_ADDR), &kmac));
+  CHECK_DIF_OK(dif_kmac_init_from_dt(kKmacDt, &kmac));
 
   // Configure KMAC hardware using software entropy.
   dif_kmac_config_t config = (dif_kmac_config_t){
       .entropy_mode = kDifKmacEntropyModeSoftware,
-      .entropy_seed = 0xffff,
+      .entropy_seed = {0xb153e3fe, 0x09596819, 0x3e85a6e8, 0xb6dcdaba,
+                       0x50dc409c, 0x11e1ebd1},
       .entropy_fast_process = kDifToggleEnabled,
   };
   CHECK_DIF_OK(dif_kmac_configure(&kmac, config));
@@ -227,7 +229,8 @@ bool test_main() {
     uint32_t out[DIGEST_LEN_KMAC_MAX];
     CHECK(DIGEST_LEN_KMAC_MAX >= test.digest_len);
     CHECK_DIF_OK(dif_kmac_squeeze(&kmac, &kmac_operation_state, out,
-                                  test.digest_len, NULL));
+                                  test.digest_len, /*processed=*/NULL,
+                                  /*capacity=*/NULL));
     CHECK_DIF_OK(dif_kmac_end(&kmac, &kmac_operation_state));
 
     for (int j = 0; j < test.digest_len; ++j) {

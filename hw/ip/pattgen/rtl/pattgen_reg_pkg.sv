@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -13,6 +13,14 @@ package pattgen_reg_pkg;
   // Address widths within the block
   parameter int BlockAw = 6;
 
+  // Number of registers for every interface
+  parameter int NumRegs = 12;
+
+  // Alert indices
+  typedef enum int {
+    AlertFatalFaultIdx = 0
+  } pattgen_alert_idx_t;
+
   ////////////////////////////
   // Typedefs for registers //
   ////////////////////////////
@@ -20,30 +28,30 @@ package pattgen_reg_pkg;
   typedef struct packed {
     struct packed {
       logic        q;
-    } done_ch0;
+    } done_ch1;
     struct packed {
       logic        q;
-    } done_ch1;
+    } done_ch0;
   } pattgen_reg2hw_intr_state_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        q;
-    } done_ch0;
+    } done_ch1;
     struct packed {
       logic        q;
-    } done_ch1;
+    } done_ch0;
   } pattgen_reg2hw_intr_enable_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        q;
       logic        qe;
-    } done_ch0;
+    } done_ch1;
     struct packed {
       logic        q;
       logic        qe;
-    } done_ch1;
+    } done_ch0;
   } pattgen_reg2hw_intr_test_reg_t;
 
   typedef struct packed {
@@ -54,16 +62,28 @@ package pattgen_reg_pkg;
   typedef struct packed {
     struct packed {
       logic        q;
-    } enable_ch0;
+    } inactive_level_pda_ch1;
     struct packed {
       logic        q;
-    } enable_ch1;
+    } inactive_level_pcl_ch1;
+    struct packed {
+      logic        q;
+    } inactive_level_pda_ch0;
+    struct packed {
+      logic        q;
+    } inactive_level_pcl_ch0;
+    struct packed {
+      logic        q;
+    } polarity_ch1;
     struct packed {
       logic        q;
     } polarity_ch0;
     struct packed {
       logic        q;
-    } polarity_ch1;
+    } enable_ch1;
+    struct packed {
+      logic        q;
+    } enable_ch0;
   } pattgen_reg2hw_ctrl_reg_t;
 
   typedef struct packed {
@@ -84,37 +104,37 @@ package pattgen_reg_pkg;
 
   typedef struct packed {
     struct packed {
-      logic [5:0]  q;
-    } len_ch0;
-    struct packed {
       logic [9:0] q;
-    } reps_ch0;
+    } reps_ch1;
     struct packed {
       logic [5:0]  q;
     } len_ch1;
     struct packed {
       logic [9:0] q;
-    } reps_ch1;
+    } reps_ch0;
+    struct packed {
+      logic [5:0]  q;
+    } len_ch0;
   } pattgen_reg2hw_size_reg_t;
 
   typedef struct packed {
     struct packed {
       logic        d;
       logic        de;
-    } done_ch0;
+    } done_ch1;
     struct packed {
       logic        d;
       logic        de;
-    } done_ch1;
+    } done_ch0;
   } pattgen_hw2reg_intr_state_reg_t;
 
   // Register -> HW type
   typedef struct packed {
-    pattgen_reg2hw_intr_state_reg_t intr_state; // [237:236]
-    pattgen_reg2hw_intr_enable_reg_t intr_enable; // [235:234]
-    pattgen_reg2hw_intr_test_reg_t intr_test; // [233:230]
-    pattgen_reg2hw_alert_test_reg_t alert_test; // [229:228]
-    pattgen_reg2hw_ctrl_reg_t ctrl; // [227:224]
+    pattgen_reg2hw_intr_state_reg_t intr_state; // [241:240]
+    pattgen_reg2hw_intr_enable_reg_t intr_enable; // [239:238]
+    pattgen_reg2hw_intr_test_reg_t intr_test; // [237:234]
+    pattgen_reg2hw_alert_test_reg_t alert_test; // [233:232]
+    pattgen_reg2hw_ctrl_reg_t ctrl; // [231:224]
     pattgen_reg2hw_prediv_ch0_reg_t prediv_ch0; // [223:192]
     pattgen_reg2hw_prediv_ch1_reg_t prediv_ch1; // [191:160]
     pattgen_reg2hw_data_ch0_mreg_t [1:0] data_ch0; // [159:96]
@@ -145,8 +165,9 @@ package pattgen_reg_pkg;
   parameter logic [1:0] PATTGEN_INTR_TEST_RESVAL = 2'h 0;
   parameter logic [0:0] PATTGEN_INTR_TEST_DONE_CH0_RESVAL = 1'h 0;
   parameter logic [0:0] PATTGEN_INTR_TEST_DONE_CH1_RESVAL = 1'h 0;
-  parameter logic [0:0] PATTGEN_ALERT_TEST_RESVAL = 1'h 0;
+  parameter logic [31:0] PATTGEN_ALERT_TEST_RESVAL = 32'h 80000000;
   parameter logic [0:0] PATTGEN_ALERT_TEST_FATAL_FAULT_RESVAL = 1'h 0;
+  parameter logic [0:0] PATTGEN_ALERT_TEST_REGWEN_RESVAL = 1'h 1;
 
   // Register index
   typedef enum int {
@@ -169,7 +190,7 @@ package pattgen_reg_pkg;
     4'b 0001, // index[ 0] PATTGEN_INTR_STATE
     4'b 0001, // index[ 1] PATTGEN_INTR_ENABLE
     4'b 0001, // index[ 2] PATTGEN_INTR_TEST
-    4'b 0001, // index[ 3] PATTGEN_ALERT_TEST
+    4'b 1111, // index[ 3] PATTGEN_ALERT_TEST
     4'b 0001, // index[ 4] PATTGEN_CTRL
     4'b 1111, // index[ 5] PATTGEN_PREDIV_CH0
     4'b 1111, // index[ 6] PATTGEN_PREDIV_CH1
@@ -181,4 +202,3 @@ package pattgen_reg_pkg;
   };
 
 endpackage
-

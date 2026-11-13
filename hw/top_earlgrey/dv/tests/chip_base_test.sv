@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,8 +6,8 @@ class chip_base_test extends cip_base_test #(
     .ENV_T(chip_env),
     .CFG_T(chip_env_cfg)
   );
-  `uvm_component_utils(chip_base_test)
   `uvm_component_new
+  `uvm_component_utils(chip_base_test)
 
   // The base class dv_base_test creates the following instances:
   // chip_env_cfg: cfg
@@ -18,48 +18,132 @@ class chip_base_test extends cip_base_test #(
 
   virtual function void build_phase(uvm_phase phase);
     string sw_images_plusarg;
+    string use_otp_image_plusarg;
+    bit    use_jtag_dmi;
+
     super.build_phase(phase);
 
-    // TL integrity gen is in the design data path, no need to generate it in the agent
-    cfg.en_tl_intg_gen = 0;
-
-    // Knob to en/dis stubbing cpu (disabled by default).
-    void'($value$plusargs("stub_cpu=%0b", cfg.stub_cpu));
-    // Set tl_agent's is_active bit based on the retrieved stub_cpu value.
-    cfg.m_tl_agent_cfg.is_active = cfg.stub_cpu;
+    // Knob to select the chip clock source.
+    `DV_GET_ENUM_PLUSARG(chip_clock_source_e, cfg.chip_clock_source, "chip_clock_source")
+    if (cfg.chip_clock_source != ChipClockSourceInternal) begin
+      cfg.clk_freq_mhz = cfg.chip_clock_source;
+    end
 
     // Knob to set the UART baud rate (set to 2M by default).
     void'($value$plusargs("uart_baud_rate=%0d", cfg.uart_baud_rate));
 
-
     // The following plusargs are only valid for SW based tests (i.e., no stubbed CPU).
     // Knob to configure writing sw logs to a separate file (enabled by default).
     void'($value$plusargs("write_sw_logs_to_file=%0b", cfg.write_sw_logs_to_file));
-
-    // Knob to enable logging over UART (disabled by default).
-    void'($value$plusargs("en_uart_logger=%0b", cfg.en_uart_logger));
-    cfg.m_uart_agent_cfgs[0].en_logger = cfg.en_uart_logger;
     cfg.m_uart_agent_cfgs[0].write_logs_to_file = cfg.write_sw_logs_to_file;
 
-    // Knob to set the sw_test_timeout_ns (set to 5ms by default).
+    // Knob to enable logging over UART (disabled by default).
+    void'($value$plusargs("en_uart_logger=%0b", cfg.m_uart_agent_cfgs[0].en_logger));
+
+    // Knob to set the sw_test_timeout_ns (set to 12ms by default).
     void'($value$plusargs("sw_test_timeout_ns=%0d", cfg.sw_test_timeout_ns));
 
-    // Knob to pre-initialize RAM to 0s (disabled by default).
-    void'($value$plusargs("initialize_ram=%0b", cfg.initialize_ram));
-
-    // Knob to use SPI to load image via ROM bootstrap.
+    // Knob to use SPI to load image via ROM bootstrap on first boot.
+    // cfg.use_spi_load_bootstrap will be reset to 0 upon completion.
     void'($value$plusargs("use_spi_load_bootstrap=%0b", cfg.use_spi_load_bootstrap));
-
-    // Knob to indicate where to pick up the SW images from.
-    void'($value$plusargs("sw_build_bin_dir=%0s", cfg.sw_build_bin_dir));
-
-    // Knob to indicate what build device to use (DV, Verilator or FPGA).
-    void'($value$plusargs("sw_build_device=%0s", cfg.sw_build_device));
 
     // Knob to set custom sw image names for rom and sw.
     if ($value$plusargs("sw_images=%0s", sw_images_plusarg)) begin
-      cfg.parse_sw_images_string(sw_images_plusarg);
+      // Knob to indicate what build device to use (DV, Verilator or FPGA).
+      string sw_build_device = "sim_dv";
+      void'($value$plusargs("sw_build_device=%0s", sw_build_device));
+
+      cfg.parse_sw_images_string(sw_build_device, sw_images_plusarg);
+    end
+
+    // Knob to use small page rma
+    void'($value$plusargs("en_small_rma=%0b", cfg.en_small_rma));
+
+    // Override the initial AST configuration data at runtime via plusarg.
+    foreach (cfg.creator_sw_cfg_ast_cfg_data[i]) begin
+      void'($value$plusargs({$sformatf("creator_sw_cfg_ast_cfg_data[%0d]", i), "=%0h"},
+                            cfg.creator_sw_cfg_ast_cfg_data[i]));
+    end
+
+    // Knob to select the OTP image based on LC state.
+    `DV_GET_ENUM_PLUSARG(otp_type_e, cfg.use_otp_image, "use_otp_image")
+    `DV_CHECK_FATAL(cfg.otp_images.exists(cfg.use_otp_image),
+                    $sformatf({"Unsupported plusarg value: +use_otp_image=%0s. An image associated",
+                               "with this LC state needs to be created first."}, cfg.use_otp_image))
+
+    // Knob to skip ROM backdoor logging (for sims that use ROM macro).
+    void'($value$plusargs("skip_rom_bkdr_load=%0b", cfg.skip_rom_bkdr_load));
+
+    // Knob to add vendor flash write latency
+    void'($value$plusargs("flash_write_latency_in_us=%d", cfg.flash_write_latency_in_us));
+
+    // Knob to set early_cpu_init
+    void'($value$plusargs("early_cpu_init=%b", cfg.early_cpu_init));
+
+    // Set the test timeout value to be sufficiently large.
+    test_timeout_ns = 50_000_000;
+    test_timeout_ns = `DV_MAX2(test_timeout_ns, 5 * cfg.sw_test_timeout_ns);
+    `uvm_info(`gfn, $sformatf("test_timeout_ns = %0d", test_timeout_ns), UVM_LOW)
+
+    void'($value$plusargs("use_jtag_dmi=%0b", use_jtag_dmi));
+    if (use_jtag_dmi) begin
+      cfg.set_use_jtag_dmi();
     end
   endfunction : build_phase
+
+  virtual function void initialize_env_cfg();
+    bit skip_middle;
+
+    // The number of Virtual Targets that each I3C instance implements is a per-instance parameter
+    // of the DUT, and `post_build_ral_settings()` needs it, so fetch it before the RAL is built.
+    if (!uvm_config_db#(int unsigned)::get(this, "", "i3c0_num_targets",
+                                           cfg.i3c0_num_targets)) begin
+      `uvm_fatal(`gfn, "Failed to get i3c0_num_targets from uvm_config_db.")
+    end
+    if (!uvm_config_db#(int unsigned)::get(this, "", "i3c1_num_targets",
+                                           cfg.i3c1_num_targets)) begin
+      `uvm_fatal(`gfn, "Failed to get i3c1_num_targets from uvm_config_db.")
+    end
+
+    super.initialize_env_cfg();
+
+    // Look up the +skip_middle_of_rom plusarg.
+    if ($value$plusargs("skip_middle_of_rom=%0b", skip_middle)) begin
+      `uvm_info("skip_middle_mode",
+                $sformatf("Setting skip_middle to %d in rom_ctrl env cfg, based on plusarg.",
+                          skip_middle),
+                UVM_HIGH)
+      if (skip_middle) begin
+        // Configure the block-level environment to support skipping the middle of the ROM, and also
+        // to support overriding the response that comes back from KMAC.
+        cfg.m_rom_ctrl_env_cfg.set_skip_middle(skip_middle);
+        cfg.m_rom_ctrl_env_cfg.set_force_expected_kmac_rsp(skip_middle);
+      end
+    end
+  endfunction
+
+  virtual function void configure_sequence(uvm_sequence seq);
+    chip_base_vseq vseq;
+
+    super.configure_sequence(seq);
+
+    if (!$cast(vseq, seq)) begin
+      `uvm_fatal(get_full_name(),
+                 $sformatf("Cannot configure sequence that isn't a chip_base_vseq: %0s.",
+                           seq.sprint()))
+    end
+
+    // If the bound-in rom_ctrl environment has been configured to skip the middle of ROM, we need
+    // to pass vseq the handles that it will need to run a rom_ctrl_skip_middle_with_digest_vseq.
+    if (cfg.m_rom_ctrl_env_cfg.get_skip_middle()) begin
+      vseq.m_reset_event               = env.m_rom_ctrl_env.get_reset_agent().get_event();
+      vseq.m_addr_force_sequencer      = env.m_rom_ctrl_env.get_addr_force_sequencer();
+      vseq.m_override_digest_sequencer = env.m_rom_ctrl_env.get_kmac_rsp_force_sequencer();
+    end
+
+    // Should the AST actually be programmed in the vseq? By default, it should, but this can be
+    // disabled with the do_creator_sw_cfg_ast_cfg plusarg.
+    void'($value$plusargs("do_creator_sw_cfg_ast_cfg=%0b", vseq.do_creator_sw_cfg_ast_cfg));
+  endfunction
 
 endclass : chip_base_test

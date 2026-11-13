@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -8,6 +8,7 @@ module tb;
   import dv_utils_pkg::*;
   import tl_agent_pkg::*;
   import tl_agent_env_pkg::*;
+  import tl_agent_test_pkg::*;
 
   // macro includes
   `include "uvm_macros.svh"

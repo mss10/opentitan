@@ -1,43 +1,59 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
-use erased_serde::Serialize;
-use humantime::parse_duration;
+use anyhow::{Context, Result, ensure};
+use clap::Args;
 use std::any::Any;
 use std::path::PathBuf;
-use std::time::Duration;
-use structopt::StructOpt;
 
 use opentitanlib::app::command::CommandDispatch;
-use opentitanlib::app::TransportWrapper;
+use opentitanlib::app::{StagedProgressBar, TransportWrapper};
 use opentitanlib::bootstrap::{Bootstrap, BootstrapOptions, BootstrapProtocol};
-use opentitanlib::io::spi::SpiParams;
-use opentitanlib::transport::Capability;
+use opentitanlib::image::image::ImageAssembler;
+use opentitanlib::transport;
+use opentitanlib::util::parse_int::ParseInt;
 
 /// Bootstrap the target device.
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 pub struct BootstrapCommand {
-    #[structopt(flatten)]
-    params: SpiParams,
-    #[structopt(
-        short,
-        long,
-        possible_values = &BootstrapProtocol::variants(),
-        case_insensitive = true,
-        default_value = "primitive",
-        help = "Bootstrap protocol to use"
-    )]
-    protocol: BootstrapProtocol,
-    #[structopt(long, parse(try_from_str=parse_duration), help = "Duration of the reset delay")]
-    reset_delay: Option<Duration>,
-    #[structopt(long, parse(try_from_str=parse_duration), help = "Duration of the inter-frame delay")]
-    inter_frame_delay: Option<Duration>,
-    #[structopt(long, parse(try_from_str=parse_duration), help = "Duration of the flash-erase delay")]
-    flash_erase_delay: Option<Duration>,
-    #[structopt(name = "FILE")]
-    filename: PathBuf,
+    #[command(flatten)]
+    bootstrap_options: BootstrapOptions,
+    /// The size of the image to assemble (only valid with multiple FILE arguments).
+    #[arg(long, value_parser = usize::from_str, default_value = "1048576")]
+    size: usize,
+    /// Whether or not the assembled image is mirrored (only valid with multiple FILE arguments).
+    #[arg(long, action = clap::ArgAction::Set, default_value = "true")]
+    mirror: bool,
+    /// An image to bootstrap or multiple filename@offset specifiers to assemble into a bootstrap image.
+    #[arg(value_name = "FILE", required = true, num_args = 1..)]
+    filename: Vec<String>,
+}
+
+impl BootstrapCommand {
+    fn bootstrap_using_direct_emulator_integration(
+        &self,
+        transport: &TransportWrapper,
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>> {
+        ensure!(
+            !(self.filename.len() > 1 || self.filename[0].contains('@')),
+            "The `emulator` protocol does not support image assembly"
+        );
+        transport.dispatch(&transport::Bootstrap {
+            image_path: PathBuf::from(&self.filename[0]),
+        })
+    }
+
+    fn payload(&self) -> Result<Vec<u8>> {
+        if self.filename.len() > 1 || self.filename[0].contains('@') {
+            let mut image = ImageAssembler::with_params(self.size, self.mirror);
+            image.parse(&self.filename)?;
+            image.assemble()
+        } else {
+            Ok(std::fs::read(&self.filename[0])
+                .with_context(|| format!("Failed to read {}", self.filename[0]))?)
+        }
+    }
 }
 
 impl CommandDispatch for BootstrapCommand {
@@ -45,24 +61,14 @@ impl CommandDispatch for BootstrapCommand {
         &self,
         _context: &dyn Any,
         transport: &TransportWrapper,
-    ) -> Result<Option<Box<dyn Serialize>>> {
-        transport
-            .capabilities()
-            .request(Capability::GPIO | Capability::SPI)
-            .ok()?;
+    ) -> Result<Option<Box<dyn erased_serde::Serialize>>> {
+        if self.bootstrap_options.protocol == BootstrapProtocol::Emulator {
+            return self.bootstrap_using_direct_emulator_integration(transport);
+        }
 
-        let options = BootstrapOptions {
-            reset_delay: self.reset_delay,
-            inter_frame_delay: self.inter_frame_delay,
-            flash_erase_delay: self.flash_erase_delay,
-        };
-        let bootstrap = Bootstrap::new(self.protocol, options)?;
-
-        let spi = self.params.create(transport)?;
-        let reset_pin = transport.gpio_pin("RESET")?;
-        let bootstrap_pin = transport.gpio_pin("BOOTSTRAP")?;
-        let payload = std::fs::read(&self.filename)?;
-        bootstrap.update(&*spi, &*reset_pin, &*bootstrap_pin, &payload)?;
+        let payload = self.payload()?;
+        let progress = StagedProgressBar::new();
+        Bootstrap::update_with_progress(transport, &self.bootstrap_options, &payload, &progress)?;
         Ok(None)
     }
 }

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,15 +7,13 @@
 
 #include "sw/device/lib/arch/device.h"
 #include "sw/device/lib/runtime/print.h"
+#include "sw/device/lib/testing/test_framework/ottf_main.h"
 #include "sw/device/silicon_creator/lib/drivers/uart.h"
 #include "sw/device/silicon_creator/lib/error.h"
-#include "sw/device/silicon_creator/lib/test_main.h"
 
 #include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
 
-const test_config_t kTestConfig = {
-    .can_clobber_uart = true,
-};
+OTTF_DEFINE_TEST_CONFIG(.console.test_may_clobber = true);
 
 rom_error_t uart_test(void) {
   // Configure UART0 as stdout.
@@ -30,7 +28,7 @@ rom_error_t uart_test(void) {
 }
 
 bool test_main(void) {
-  rom_error_t result = kErrorOk;
+  status_t result = OK_STATUS();
   EXECUTE_TEST(result, uart_test);
-  return result == kErrorOk;
+  return status_ok(result);
 }

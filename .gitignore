@@ -1,9 +1,14 @@
 *~
 *.bak
+*.swp
+*.swo
 tags
-__pycache__
 /.vscode
 opentitan-docs
+
+# Python
+__pycache__
+.venv/
 
 # fusesoc result
 build/
@@ -17,11 +22,17 @@ hw/ip/*/sw
 # JasperGold FPV Result
 jgproject/
 
+# CDC result
+._dbname
+._idebug_exit_script
+idebugcfg.db
+idebugcfg.db-journal
+ivision.ws
+meridian_project/
+mrdc.his
+
 # FPGA splice intermediate files
 *.jou
-
-# Environment configuration (produced by Meson)
-.env
 
 # Simulation Results
 *.log
@@ -41,6 +52,8 @@ novas.conf
 verdiLog/
 ascent_project/
 ascentlint.rpt
+.idebugrc
+idebugFiles/
 
 # verilator/gtkwave waveforms and wave lists
 *.fst
@@ -52,16 +65,35 @@ hw/foundry/
 # ROM_EXT signer vendored in dependencies
 sw/host/rom_ext_image_signer/vendored_dependencies
 
-# Autogen files for non-Earlgrey tops
-hw/top_englishbreakfast/**/autogen/
-hw/top_englishbreakfast/ip/alert_handler/dv/alert_handler_env_pkg__params.sv
-hw/top_englishbreakfast/ip/sensor_ctrl/rtl/*
-hw/top_englishbreakfast/ip/xbar_main/xbar_main.core
-hw/top_englishbreakfast/ip/xbar_peri/xbar_peri.core
-
 # Rust Cargo build system files.
-Cargo.lock
 sw/host/**/target
+rust-project.json
 
 # Bazel-related cache and output directories
 bazel-*
+
+# Site-specific bazel configuration
+.bazelrc-site
+
+# Compilation database generated from build system
+compile_commands.json
+
+# Local binaries that should not be committed to the codebase
+.bin/
+
+# Clangd index directory.
+.cache/clangd/
+
+# mdbook builds into `./book` directories, let's ignore them
+book
+
+# Hugo Lock
+.hugo_build.lock
+
+# Custom Ruff config overrides
+.ruff.toml
+
+# Synopsys Z01X configuration files
+*.sff
+hw/dv/tools/fi_sim.tcl
+hw/dv/tools/dvsim/z01x.hjson

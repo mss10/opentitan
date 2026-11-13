@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -6,9 +6,10 @@
   import_testplans: ["hw/dv/tools/dvsim/testplans/csr_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/alert_test_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/intr_test_testplan.hjson",
-                     // TODO: comment out for V2
-                     //"hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
-                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson"],
+                     "hw/dv/tools/dvsim/testplans/mem_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson",
+                     "spi_host_sec_cm_testplan.hjson"],
   testpoints: [
     {
       name: smoke
@@ -22,8 +23,10 @@
 
             Checking:
               - Ensure transactions are transmitted/received correctly
+              - Ensure the active CSB line is the one that CSID selected when the command was
+                written
             '''
-      milestone: V1
+      stage: V1
       tests: ["spi_host_smoke"]
     }
     {
@@ -39,8 +42,8 @@
             Checking:
               - Ensure transactions are transmitted/received correctly
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_performance"]
     }
     {
       name: error_event_intr
@@ -60,8 +63,8 @@
               - Ensure the matching between the bit-field values of ERROR_ENABLE
                 once the event interrupt pin is asserted
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_overflow_underflow", "spi_host_error_cmd", "spi_host_event"]
     }
     {
       name: clock_rate
@@ -76,8 +79,8 @@
               - verify that merging of commands work correctly
               - verify that the DUT can handle different sck -> cs_n timings
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_speed"]
     }
     {
       name: speed
@@ -88,8 +91,8 @@
             Checking:
               - verify that all speeds are supported
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_speed"]
     }
     {
       name: chip_select_timing
@@ -100,8 +103,25 @@
             Checking:
               - Check that the DUT operates correctly under different SPI clock speeds
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_speed"]
+    }
+    {
+      name: upper_range_clkdiv
+      desc: '''
+            Verify SPI host correctness with large clock divider values.
+
+            Stimulus:
+              - Constrain CLKDIV to the upper half of the valid range, with 30 % probability
+                of selecting the maximum value
+              - Enable FSM fast mode so the internal counter decrements by 16 units per step,
+                bounding simulation time for very slow SPI clocks
+
+            Checking:
+              - Ensure transactions are transmitted/received correctly under slow SPI clocks
+            '''
+      stage: V2
+      tests: ["spi_host_upper_range_clkdiv"]
     }
     {
       name: sw_reset
@@ -110,15 +130,15 @@
 
             Stimulus:
               - Reset the spi_host randomly
-                after a random number of data shows up on fifos
+                after a random number of data shows up on FIFOs
 
             Checking:
               - Ensure that reads to RXDATA register yield 0s after the rx_fifo is reset
               - Ensure that transactions are dropped in both the scoreboard and spi_agent monitor
                 after the tx_fifo or spi_fsm is reset
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_sw_reset"]
     }
     {
       name: passthrough_mode
@@ -126,12 +146,21 @@
             - Verify the function of spi_host in passthrough_mode
 
             Stimulus:
-              - TBD
+              - Randomly set CONTROL.OUTPUT_EN
+              - If NumCS > 1, usually hold a CSB line other than CSB[0] active with a CSAAT
+                command before enabling Passthrough Mode
+              - Enable Passthrough Mode
             Checking:
-              - TBD
+              - Ensure Host to Device and Device to Host paths are switched to Passthrough ports
+              - Ensure CSB[0] follows the passthrough port
+              - If NumCS > 1, ensure the other CSB lines are inactive and their output enables
+                follow CONTROL.OUTPUT_EN, and that the held CSB line is active again when
+                Passthrough Mode is disabled
+
+            The spi_host_3cs sim cfg variant runs all tests with NumCS = 3.
       '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_passthrough_mode"]
     }
     {
       name: cpol_cpha
@@ -142,8 +171,8 @@
             Checking:
               - Check that the DUT operates correctly under different cs_n settings
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_speed"]
     }
     {
       name: full_cycle
@@ -154,21 +183,8 @@
             Checking:
               - Check that the data can be read one full cycle after the data was asserted
             '''
-      milestone: V2
-      tests: []
-    }
-    {
-      name: endian
-      desc: '''
-            Stimulus:
-              - set the compile time parameter to configure the DUT in both modes.
-              if possible this should be randomized for all test to verify support in both modes
-
-            Checking:
-              - Check all features are supported correctly in both little and big endian mode
-            '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_speed"]
     }
     {
       name: duplex
@@ -179,8 +195,8 @@
             Checking:
               - verify that the DUT support both half and full duplex in standard mode.
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_smoke"]
     }
     {
       name: tx_rx_only
@@ -193,8 +209,8 @@
               - verify that the DUT ignores rx line when in tx only mode
               - verify that the DUT does not drain the tx fifo in rx only mode
             '''
-      milestone: V2
-      tests: []
+      stage: V2
+      tests: ["spi_host_smoke"]
     }
     {
       name: stress_all
@@ -210,7 +226,109 @@
               - Ensure transactions are transmitted/received correctly
               - Ensure reset is handled correctly
             '''
-      milestone: V2
+      stage: V2
+      tests: ["spi_host_stress_all"]
+    }
+    {
+      name: spien
+      desc: '''
+            Check that with mid-transaction writes to CONTROL.SPIEN, the block behaves according
+            to the documentation.
+            - Writing a zero to this register temporarily suspends any previously
+              submitted transactions.
+            - If the block is re-enabled by writing a one to CONTROL.SPIEN, any previously
+              executing commands will continue from wherever they left off.
+
+            Stimulus:
+              - Issue a transaction
+              - De-assert CONTROL.SPIEN after the command byte is received
+              - Re-assert after a randomized delay
+            Checking:
+              - Ensure transactions are transmitted/received correctly, even with a large
+                temporary suspension in the middle.
+            '''
+      stage: V2
+      tests: ["spi_host_spien"]
+    }
+    {
+      name: stall
+      desc: '''
+            Stimulus:
+              - Ongoing transaction has stalled due to lack of available space in the RX FIFO
+                and continues when RX fifo is cleared
+              - Ongoing transaction has stalled due to lack of data in the TX FIFO
+                and continues when data is provided in TX FIFO
+
+            Checking:
+              - Ensure Rxstall occurs and recovers
+              - Ensure Txstall occurs and recovers
+            '''
+      stage: V2
+      tests: ["spi_host_status_stall"]
+    }
+    {
+      name: segment_length
+      desc: '''
+            Check segments across the full range of COMMAND.LEN
+
+            Stimulus:
+              - Data segments from 1 byte up to several KiB, including segments longer than the
+                TX/RX FIFOs, so the FIFOs are refilled/drained while the segment is ongoing
+
+            Checking:
+              - Scoreboard checks every byte transmitted and received
+              - Properties covering correct behaviour over the full range of LEN are proven
+            '''
+      stage: V2
+      tests: []
+    }
+    {
+      name: Idlecsbactive
+      desc: '''
+            Stimulus:
+              - Pause next segment availability and idly wait for next command
+
+            Checking:
+              - Ensure transactions goes through even with a segment pause and idle wait
+                in the state IdleCsbActive
+            '''
+      stage: V2
+      tests: ["spi_host_idlecsbactive"]
+    }
+    {
+      name: data_fifo_status
+      desc: '''
+            Ensure we are modelling the Fifo depths, to ensure we can compare against predictions
+            of their state, particularly current depth.
+            - TXDATA
+              Push on CSR writes, Pop on submitting new word to ByteSel/SR
+            - RXDATA
+              Push on new word from SR/ByteMerge, Pop on CSR read
+
+            Stimulus:
+              - Create transactions that Pop/Push to the data FIFOs
+              - Readback the queue depths at various points during active and after completed
+                transactions.
+
+            Checking:
+              - Ensure rx/tx_qd and rx/tx_full/empty match predictions.
+            '''
+      stage: V2
+      tests: ["spi_host_overflow_underflow"]
+    }
+    {
+      name: winbond
+      desc: '''
+          Replace SPI agent with the Winbond Flash model
+
+          Stimulus:
+            - constraint the Sequence to create well-formed transactions that the model understands
+
+          Checking:
+            - Verify the DUT against the WindBond bfm by making the spi agent passive
+              to verify that we comply with the spi targeted for opentitan
+            '''
+      stage: V3
       tests: []
     }
   ]
@@ -230,27 +348,12 @@
             '''
     }
     {
-      name: long_commands_cg
-      desc: '''
-            Collect coverage to verify that both a read and write command longer than 4 bytes
-            was seen
-            '''
-    }
-    {
-      name:config_opts_cg
+      name: config_opts_cg
       desc: '''
             Collect coverage on the config opts register, some important crosses:
 
             -  CPOL and CPHA, check all 4 combinations are tested
             -  CSNLEAD, CSNTRAIL and CSNIDLE
-            '''
-    }
-    {
-      name: cdc_cg
-      desc: '''
-            Collect coverage on the relationship between the core_clk and the spi_sck to verify that
-            both scenarios with both a slow spi_sck, a very fast spi_sck (2x core_clk)
-            and where the two clocks are very close has been tested
             '''
     }
     {
@@ -267,21 +370,9 @@
             '''
     }
     {
-      name: interrupts_cg
-      desc: '''
-            Collect coverage that all types of interrupt was seen
-            '''
-    }
-    {
-      name: alert_cg
-      desc: '''
-            Collect coverage to verify all alerts are triggered correctly
-            '''
-    }
-    {
       name: control_cg
       desc: '''
-            Collect coverage on the control register to make sure all options are excercised
+            Collect coverage on the control register to make sure all options are exercised
             - Tx and RX water mark should have a bin for min value, max value
               and one for everything in between
             '''
@@ -295,13 +386,13 @@
     {
       name: csid_cg
       desc: '''
-            Collect coverage that different IDs are used.
+            Collect coverage that each CSB line is active during a segment.
             '''
     }
     {
       name: command_cg
       desc: '''
-            Collect coverage that different commant settings, important cross:
+            Collect coverage that different command settings, important cross:
 
             - Direction and SPEED
             - CSAAT and SPEED
@@ -323,6 +414,46 @@
       name: event_en_cg
       desc: '''
             Collect coverage that all events was enabled and seen
+            '''
+    }
+    {
+      name: interrupt_cg
+      desc: '''
+            Collect coverage that all types of interrupt was seen
+            - check that we see all scenarios that can cause an interrupt and that the interrupts is fired.
+            - also check we can clear the interrupt
+
+            (Coverage gathered in base class :: intr_test_cg)
+            '''
+    }
+    {
+      name: different_ch_settings_cg
+      desc: '''
+            - Check that multiple end points was running at different speeds concurrently.
+            - Collect coverage that multiple SPI endpoints was run with different config opts
+            '''
+    }
+    {
+      name: num_segment_cg
+      desc: '''
+            - Check that the DUT only transmits what is in a command even if more segments are in the TX FIFO
+            '''
+    }
+    {
+      name: segment_speed_cg
+      desc: '''
+            - Check that we test with transactions that uses different speeds
+              i.e first segment in standard mode, followed by segments in dual or quad mode
+            '''
+    }
+    {
+      name: passthrough_cg
+      desc: '''
+            Check that the pass through data is transmitted instead of the data in the tx fifo.
+
+            - Cover that passthrough is activated when a normal transaction is in progress.
+            - Cover that data on the passthrough interface is ignored while passthrough disabled.
+
             '''
     }
   ]

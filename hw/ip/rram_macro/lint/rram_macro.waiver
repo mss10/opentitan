@@ -1,0 +1,21 @@
+# Copyright lowRISC contributors (OpenTitan project).
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# waiver file for rram_macro
+
+# rst_ni is the asynchronous reset of rram_macro. It's unused in the generic
+# prim_ram_1p implementation, but other implementations may use it.
+waive -rules {RESET_USE} -location {rram_macro.sv} \
+      -regexp {rst_ni' is connected to 'prim_ram_1p' port 'rst_ni', and used as an asynchronous reset or set at rram_macro.sv} \
+      -comment "rst_ni is the asynchronous reset of rram_macro. It's unused in the generic implementation, but other implementations may use it."
+
+waive -rules {INOUT_AS_IN} -location {rram_macro.sv} \
+      -msg {Inout port 'rram_test_analog_io' has no driver in module 'rram_macro'} \
+      -comment "This signal is not driven in the open-source emulation model."
+
+waive -rules CLOCK_MUX -location {dmi_jtag_tap.sv} -regexp {Clock '.*tck_n' is driven by a multiplexer here, used as a clock at dmi_jtag_tap.sv} \
+      -comment "Scan mode bypass of the TCK inverter inside dmi_jtag_tap."
+
+waive -rules {CLOCK_DRIVER} -location {rram_macro.sv} -regexp {'tap_tck' is driven by instance 'u_tck_and' of module 'prim_and2', and used as a clock 'tck_i' at dmi_jtag_tap.sv} \
+      -comment "TCK of the RRAM TAP, gated with lc_nvm_debug_en like in the closed-source macro."

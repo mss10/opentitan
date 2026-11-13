@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,10 +9,13 @@ package alert_handler_env_pkg;
   import dv_utils_pkg::*;
   import csr_utils_pkg::*;
   import tl_agent_pkg::*;
-  import alert_esc_agent_pkg::*;
+  import alert_agent_pkg::*;
+  import esc_agent_pkg::*;
+  import alert_handler_ral_pkg::*;
   import dv_base_reg_pkg::*;
   import cip_base_pkg::*;
-  import alert_handler_ral_pkg::*;
+  import push_pull_agent_pkg::*;
+  import sec_cm_pkg::*;
 
   // macro includes
   `include "uvm_macros.svh"
@@ -20,6 +23,7 @@ package alert_handler_env_pkg;
 
   // parameters
   parameter uint NUM_ALERTS                = alert_handler_reg_pkg::NAlerts;
+  parameter uint NUM_EDN                   = 1;
   parameter uint NUM_ESCS                  = 4;
   parameter uint NUM_MAX_ESC_SEV           = 8;
   parameter uint NUM_ESC_SIGNALS           = 4;
@@ -35,9 +39,15 @@ package alert_handler_env_pkg;
   // set the max ping timeout cycle to constrain the simulation run time
   parameter uint MAX_PING_TIMEOUT_CYCLE    = 300;
 
+  // Alert_handler ping timer design should automatically fetch EDN entropy every 500k clock
+  // cycles. We set the threshold to 600k clock cycles.
+  parameter uint MAX_EDN_REQ_WAIT_CYCLES   = 600_000;
+
   parameter uint NUM_CRASHDUMP             = NUM_ALERT_CLASSES * (alert_handler_reg_pkg::AccuCntDw
                                              + alert_handler_reg_pkg::EscCntDw + 3) +
                                              NUM_ALERTS + NUM_LOCAL_ALERTS;
+  parameter bit[15:0] MAX_PING_WAIT_CYCLES = '1;
+
   // types
   typedef enum {
     EscPhase0,
@@ -82,6 +92,7 @@ package alert_handler_env_pkg;
   // forward declare classes to allow typedefs below
   typedef virtual pins_if #(NUM_MAX_ESC_SEV) esc_en_vif;
   typedef virtual pins_if #(NUM_CRASHDUMP) crashdump_vif;
+  typedef virtual alert_handler_if alert_handler_vif;
 
   // functions
 

@@ -1,26 +1,30 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""Contains life cycle state encoding class which is
 used to generate new life cycle encodings.
 """
 import logging as log
-import random
 from collections import OrderedDict
+
 from Crypto.Hash import cSHAKE128
+from design.lib.common import (check_int, ecc_encode, get_hd, hd_histogram,
+                               is_valid_codeword, random_or_hexvalue, scatter_bits)
+from topgen.secure_prng import SecurePrngFactory
 
-from lib.common import (check_int, ecc_encode, get_hd, hd_histogram,
-                        is_valid_codeword, random_or_hexvalue, scatter_bits)
+# This seed is used to generate the non-secure life cycle state encodings.
+# Use a common seed for all tops and selected seed types.
+lc_ctrl_non_secure_seed = 0x517ecf3166f4323433e4ad760d6f8e2fdf45244002ce54be8ca3cb7747c21bb
 
-# Seed diversification constant for LcStEnc (this enables to use
-# the same seed for different classes)
-LC_SEED_DIVERSIFIER = 1939944205722120255
 
 # State types and permissible format for entries
 # The format is index dependent, e.g. ['0', 'A1', 'B1'] for index 1
 LC_STATE_TYPES = {
     'lc_state': ['0', 'A{}', 'B{}'],
-    'lc_cnt': ['0', 'C{}', 'D{}']
+    'lc_cnt': ['0', 'C{}', 'D{}'],
+    'soc_dbg_state': ['0', 'E{}', 'F{}'],
+    'ownership_state': ['0', 'G{}', 'H{}'],
+    'auth_state': ['0', 'I{}', 'J{}']
 }
 
 
@@ -44,7 +48,7 @@ def _get_incremental_codewords(config, base_ecc, existing_words):
 
     # We only need to spin through data bits that have not been set yet.
     # Hence, we first count how many bits are zero (and hence still
-    # modifyable). Then, we enumerate all possible combinations and scatter
+    # modifiable). Then, we enumerate all possible combinations and scatter
     # the bits of the enumerated values into the correct bit positions using
     # the scatter_bits() function.
     incr_cands = []
@@ -74,12 +78,13 @@ def _get_incremental_codewords(config, base_ecc, existing_words):
 
 def _get_new_state_word_pair(config, existing_words):
     '''Randomly generate a new incrementally writable word pair'''
+    prng = SecurePrngFactory.get("lc_non_secure")
     while 1:
         # Draw a random number and check whether it is unique and whether
         # the Hamming weight is in range.
         width = config['secded']['data_width']
         ecc_width = config['secded']['ecc_width']
-        base = random.getrandbits(width)
+        base = prng.getrandbits(width)
         base = format(base, '0' + str(width) + 'b')
         base_cand_ecc = ecc_encode(config, base)
         # disallow all-zero and all-one states
@@ -97,7 +102,7 @@ def _get_new_state_word_pair(config, existing_words):
                 # there are valid candidates, draw one at random.
                 # otherwise we just start over.
                 if incr_cands_ecc:
-                    incr_cand_ecc = random.choice(incr_cands_ecc)
+                    incr_cand_ecc = prng.choice(incr_cands_ecc)
                     log.info('word {}: {}|{} -> {}|{}'.format(
                         int(len(existing_words) / 2),
                         base_cand_ecc[ecc_width:], base_cand_ecc[0:ecc_width],
@@ -148,13 +153,13 @@ def _validate_secded(config):
         raise RuntimeError('ECC matrix does not have correct number of rows')
 
     log.info('SECDED Matrix:')
-    for i, l in enumerate(config['secded']['ecc_matrix']):
-        log.info('ECC Bit {} Fanin: {}'.format(i, l))
-        for j, e in enumerate(l):
-            e = check_int(e)
-            if e < 0 or e >= total_width:
+    for i, fanin in enumerate(config['secded']['ecc_matrix']):
+        log.info('ECC Bit {} Fanin: {}'.format(i, fanin))
+        for j, element in enumerate(fanin):
+            element = check_int(element)
+            if element < 0 or element >= total_width:
                 raise RuntimeError('ECC bit position is out of bounds')
-            config['secded']['ecc_matrix'][i][j] = e
+            config['secded']['ecc_matrix'][i][j] = element
 
 
 def _validate_constraints(config):
@@ -183,14 +188,15 @@ def _validate_tokens(config):
     config['token_size'] = check_int(config['token_size'])
     # This needs to be byte aligned
     if config['token_size'] % 8:
-        raise ValueError('Size of token {} must be byte aligned'
-                         .format(token['name']))
+        raise ValueError('Size of token {} must be byte aligned'.format(
+            config['token_size']))
 
     num_bytes = config['token_size'] // 8
 
     hashed_tokens = []
+    prng = SecurePrngFactory.get("lc_secure")
     for token in config['tokens']:
-        random_or_hexvalue(token, 'value', config['token_size'])
+        random_or_hexvalue(prng, token, 'value', config['token_size'])
         hashed_token = OrderedDict()
         hashed_token['name'] = token['name'] + 'Hashed'
         data = token['value'].to_bytes(num_bytes, byteorder='little')
@@ -262,15 +268,13 @@ class LcStEnc():
     # This holds the config dict.
     config = {}
 
-    def __init__(self, config):
+    def __init__(self, config, seed):
         '''The constructor validates the configuration dict.'''
 
         log.info('')
         log.info('Generate life cycle state')
         log.info('')
 
-        if 'seed' not in config:
-            raise RuntimeError('Missing seed in configuration')
         if 'secded' not in config:
             raise RuntimeError('Missing secded configuration')
         if 'tokens' not in config:
@@ -280,12 +284,12 @@ class LcStEnc():
             if typ not in config:
                 raise RuntimeError('Missing {} definition'.format(typ))
 
-        config['seed'] = check_int(config['seed'])
+        config['seed'] = seed
         log.info('Seed: {0:x}'.format(config['seed']))
         log.info('')
 
-        # Re-initialize with seed to make results reproducible.
-        random.seed(LC_SEED_DIVERSIFIER + int(config['seed']))
+        SecurePrngFactory.create("lc_secure", int(config["seed"]))
+        SecurePrngFactory.create("lc_non_secure", lc_ctrl_non_secure_seed)
 
         log.info('Checking SECDED.')
         _validate_secded(config)

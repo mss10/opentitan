@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,7 +21,7 @@ extern "C" {
  *
  * This module is responsible for tracking critical register values for an
  * initialized context `sec_mmio_ctx_t`, and provides a mechanism to evaluate
- * expectations and trigger shutdown escalation on fault detection.
+ * expectations and trigger an exception on fault detection.
  *
  * Initialization
  *
@@ -30,9 +30,9 @@ extern "C" {
  * Register writes
  *
  * - Perform a number (N) of calls to `sec_mmio_write32()`.
- * - Increment the expected number of writes by N by calling
- *   `sec_mmio_write_increment()`. This is done using a separate function call
- *   to be able to detect skip instruciton faults on `sec_mmio_write32()`
+ * - Increment the expected number of writes by N with
+ *   `SEC_MMIO_WRITE_INCREMENT()`. This is done using a separate function call
+ *   to be able to detect skip instruction faults on `sec_mmio_write32()`
  *   calls.
  *
  * Register reads
@@ -45,23 +45,13 @@ extern "C" {
  *
  * - `sec_mmio_check_values()`
  * - `sec_mmio_check_counters()`
- *
- * Opens:
- *
- * - Currently fault detection escalations are performed by calling a handler
- *   that is registered at `sec_mmio_init()` call time. Need to determine if we
- *   want to move to a mock_shutdown implementation, or if we want to refactor
- *   the code to return error codes.
  */
 
 enum {
   /**
    * Number of registers stored in the sec_mmio context.
-   *
-   * This value must be less than the `kSecMmioRndStep` in sec_mmio.c.
    */
-  // TODO(#6609): Update size of expectations table.
-  kSecMmioRegFileSize = 200,
+  kSecMmioRegFileSize = 1000,
 };
 
 /**
@@ -71,16 +61,6 @@ enum {
  * as expected counters.
  */
 typedef struct sec_mmio_ctx {
-  /**
-   * List of expected register values.
-   */
-  uint32_t values[kSecMmioRegFileSize];
-
-  /**
-   * List of expected register addresses.
-   */
-  uint32_t addrs[kSecMmioRegFileSize];
-
   /**
    * Represents the expected number of register values.
    */
@@ -92,7 +72,7 @@ typedef struct sec_mmio_ctx {
   uint32_t write_count;
   /**
    * Represents the expected number of register write operations. Incremented by
-   * the `sec_mmio_write_increment()` function.
+   * `SEC_MMIO_WRITE_INCREMENT()`.
    */
   uint32_t expected_write_count;
   /**
@@ -101,50 +81,69 @@ typedef struct sec_mmio_ctx {
    * `sec_mmio_check_counters()` functions.
    */
   uint32_t check_count;
+  /**
+   * List of expected register values.
+   */
+  uint32_t values[kSecMmioRegFileSize];
+  /**
+   * List of expected register addresses.
+   */
+  uint32_t addrs[kSecMmioRegFileSize];
 } sec_mmio_ctx_t;
 
 /**
- * The `sec_mmio_ctx_t` structure is accessible by both the mask ROM and ROM
+ * The `sec_mmio_ctx_t` structure is accessible by both the ROM and ROM
  * extension. It's layout is therefore fixed and any changes must be applied
  * to both boot stages.
  */
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, values, 0);
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, addrs, 800);
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, last_index, 1600);
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, write_count, 1604);
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, expected_write_count, 1608);
-OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, check_count, 1612);
-OT_ASSERT_SIZE(sec_mmio_ctx_t, 1616);  // Checked by linker script.
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, last_index, 0);
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, write_count, 4);
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, expected_write_count, 8);
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, check_count, 12);
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, values, 16);
+OT_ASSERT_MEMBER_OFFSET(sec_mmio_ctx_t, addrs, 4016);
+OT_ASSERT_SIZE(sec_mmio_ctx_t, 8016);  // Checked by linker script.
+
+// The sec_mmio_ctx is referenced here to be able to use it inside the
+// `SEC_MMIO_WRITE_INCREMENT()` macro.
+extern sec_mmio_ctx_t sec_mmio_ctx;
 
 /**
- * Shutdown module callback handler.
+ * Increment the expected count of register writes by `value`.
+ *
+ * This macro must be used to increment the number of expected register writes
+ * before calling `sec_mmio_check_counters()`.
+ *
+ * @param value The expected write count increment.
  */
-typedef void (*sec_mmio_shutdown_handler)(rom_error_t);
+#define SEC_MMIO_WRITE_INCREMENT(value) \
+  (sec_mmio_ctx.expected_write_count += (value))
+
+/**
+ * Assert macro used to cross-reference exported sec_mmio expected write counts
+ * to their respective functions.
+ */
+#define SEC_MMIO_ASSERT_WRITE_INCREMENT(enum_val, expected) \
+  static_assert(enum_val == expected, "Unexpected value for " #enum_val)
 
 /**
  * Initializes the module.
  *
- * Registers the `cb` callback handler and initializes the internal
- * `sec_mmio_ctx_t` context.
- *
- * @param cb Shutdown module callback handler.
+ * Initializes the internal `sec_mmio_ctx_t` context.
  */
-void sec_mmio_init(sec_mmio_shutdown_handler cb);
+void sec_mmio_init(void);
 
 /**
  * Executes sec_mmio next boot stage initialization.
  *
- * Registers the `cb` callback handler, and performs the following operations to
- * the internal `sec_mmio_ctx_t` context:
+ * Performs the following operations to the internal `sec_mmio_ctx_t` context:
  *
  * - Clear the check count. This allows the caller to reset the
  *   `sec_mmio_check_counters()` expected count argument.
  * - Reset all expected address and values in the expectations table starting at
  *   the last_index.
- *
- * @param cb Shutdown module callback handler.
  */
-void sec_mmio_next_stage_init(sec_mmio_shutdown_handler cb);
+void sec_mmio_next_stage_init(void);
 
 /**
  * Reads an aligned uint32_t from the MMIO region `addr`.
@@ -153,11 +152,12 @@ void sec_mmio_next_stage_init(sec_mmio_shutdown_handler cb);
  * is stored in the list of expected register values for later comparison
  * via `sec_mmio_check_values()`.
  *
- * A shutdown sequence is initiated if the comparison operation fails.
+ * An exception is thrown if the comparison operation fails.
  *
  * @param addr The address to read from.
  * @return the read value.
  */
+OT_WARN_UNUSED_RESULT
 uint32_t sec_mmio_read32(uint32_t addr);
 
 /**
@@ -169,10 +169,10 @@ uint32_t sec_mmio_read32(uint32_t addr);
  * via `sec_mmio_check_values()`.
  *
  * On successful calls, this function will increment the internal count of
- * writes. The caller is responsible to setting the expected write count by
- * calling `sec_mmio_write_increment()`.
+ * writes. The caller is responsible to setting the expected write count with
+ * `SEC_MMIO_WRITE_INCREMENT()`.
  *
- * A shutdown sequence is initiated if the comparison operation fails.
+ * An exception is thrown if the comparison operation fails.
  *
  * @param addr The address to write to.
  * @param value The value to write.
@@ -188,10 +188,10 @@ void sec_mmio_write32(uint32_t addr, uint32_t value);
  * values for later comparison via `sec_mmio_check_values()`.
  *
  * On successful calls, this function will increment the internal count of
- * writes. The caller is responsible to setting the expected write count by
- * calling `sec_mmio_write_increment()`.
+ * writes. The caller is responsible to setting the expected write count with
+ * `SEC_MMIO_WRITE_INCREMENT()`.
  *
- * A shutdown sequence is initiated if the comparison operation fails.
+ * An exception is thrown if the comparison operation fails.
  *
  * @param addr The address to write to.
  * @param value The value to write.
@@ -199,17 +199,10 @@ void sec_mmio_write32(uint32_t addr, uint32_t value);
 void sec_mmio_write32_shadowed(uint32_t addr, uint32_t value);
 
 /**
- * Increment the expected count of register writes by `value`.
- *
- * @param value The expected write count increment.
- */
-void sec_mmio_write_increment(uint32_t value);
-
-/**
  * Checks the expected list of register values.
  *
- * All expected register values are verified against expectations. A shutdown
- * sequence is initiated if any of the comparison fails.
+ * All expected register values are verified against expectations. An exception
+ * is thrown if any of the comparison fails.
  *
  * The `rnd_offset` parameter can be set to a random value to randomize the
  * order of reads.
@@ -225,10 +218,31 @@ void sec_mmio_write_increment(uint32_t value);
 void sec_mmio_check_values(uint32_t rnd_offset);
 
 /**
+ * Checks the expected list of register values except for OTP values.
+ *
+ * All expected register values (except OTP) are verified against expectations.
+ * An exception is thrown if any of the comparison fails.
+ *
+ * The `rnd_offset` parameter can be set to a random value to randomize the
+ * order of reads.
+ *
+ * Calling this function will increment the check function counter on a
+ * successful call.
+ *
+ * The `rnd_offset` parameter can be generated by calling the entropy source or
+ * the CSRNG driver.
+ *
+ * @param rnd_offset A random value used to generate a random read sequence.
+ * @param otp_base The base address of the OTP peripheral.  The avoided region
+ *                 is 64K in size.
+ */
+void sec_mmio_check_values_except_otp(uint32_t rnd_offset, uint32_t otp_base);
+
+/**
  * Checks the expected counter state.
  *
- * Checks the expected number of register writes and check counts. A shutdown
- * sequence is initiated if the counters fail to match expectations.
+ * Checks the expected number of register writes and check counts. An exception
+ * is thrown if the counters fail to match expectations.
  *
  * Calling this function will increment the check function counter on a
  * successful

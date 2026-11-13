@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 #ifndef OPENTITAN_HW_IP_OTBN_DV_MODEL_OTBN_MODEL_H_
@@ -12,12 +12,13 @@
 
 #include "otbn_memutil.h"
 
-class ISSWrapper;
+struct ISSWrapper;
 
 class OtbnModel {
  public:
-  OtbnModel(const std::string &mem_scope, const std::string &design_scope,
-            unsigned imem_size_words, unsigned dmem_size_words);
+  enum command_t { Execute, DmemWipe, ImemWipe };
+
+  OtbnModel(const std::string &mem_scope, const std::string &design_scope);
   ~OtbnModel();
 
   // Replace any current loop warps with those from memutil. Returns 0
@@ -29,21 +30,45 @@ class OtbnModel {
   // implementation too (which needs checking).
   bool has_rtl() const { return !design_scope_.empty(); }
 
-  // Start a new run with the model, writing IMEM/DMEM and jumping to address
-  // zero. Returns 0 on success; -1 on failure.
-  int start();
+  // Start an execution or an IMEM or DMEM secure wipe operation. Returns 0 on
+  // success; -1 on failure.
+  int start_operation(command_t command);
 
-  // EDN Step sends ISS the RND data when ACK signal is high.
-  void edn_step(svLogicVecVal *edn_rnd_data /* logic [31:0] */);
+  // Flush EDN data from model because of edn_rst_n. Returns 0 on success or -1
+  // on error.
+  int edn_flush();
 
-  // Signals that RTL is finished processing RND data from EDN
-  void edn_rnd_cdc_done();
+  // Send ISS some RND data from EDN. Returns 0 on success or -1 on error.
+  int edn_rnd_step(svLogicVecVal *edn_rnd_data /* logic [31:0] */,
+                   unsigned char fips_err);
+
+  // Send ISS some URND data from EDN. Returns 0 on success or -1 on error.
+  int edn_urnd_step(svLogicVecVal *edn_urnd_data /* logic [31:0] */);
+
+  // Signal that RTL is finished processing RND data from EDN. Returns 0 on
+  // success or -1 on error.
+  int edn_rnd_cdc_done();
+
+  // Signal that RTL is finished processing data from EDN for URND. Returns 0
+  // on success or -1 on error.
+  int edn_urnd_cdc_done();
+
+  // Signal that RTL is finished processing OTP key. Returns 0 on success or -1
+  // on error.
+  int otp_key_cdc_done();
+
+  // Set or unset the two keys from keymgr. Returns 0 on success or -1
+  // on error.
+  int set_keymgr_value(svLogicVecVal *key0 /* logic [511:0] */,
+                       svLogicVecVal *key1 /* logic [511:0] */,
+                       unsigned char valid);
 
   // Step once in the model. Returns 1 if the model has finished, 0 if not and
   // -1 on failure. If gen_trace is true, pass trace entries to the trace
   // checker. If the model has finished, writes otbn.ERR_BITS to *err_bits.
-  int step(svLogic edn_urnd_data_valid, svBitVecVal *status /* bit [7:0] */,
+  int step(svBitVecVal *status /* bit [7:0] */,
            svBitVecVal *insn_cnt /* bit [31:0] */,
+           svBitVecVal *rnd_req /* bit [0:0] */,
            svBitVecVal *err_bits /* bit [31:0] */,
            svBitVecVal *stop_pc /* bit [31:0] */);
 
@@ -61,8 +86,72 @@ class OtbnModel {
   // error. Returns 0 on success; -1 on failure.
   int invalidate_imem();
 
-  // Flush any information in the model
-  void reset();
+  // Mark all of DMEM as invalid so that any load causes an integrity
+  // error. Returns 0 on success; -1 on failure.
+  int invalidate_dmem();
+
+  // Tell the trace checker to tolerate one mismatch between RTL and ISS trace
+  // entries during the next num_checks checks. A value of 0 means indefinitely
+  // many checks will tolerate a mismatch. In both cases the checker no longer
+  // tolerates mismatches after the first detected mismatch. Required for tests
+  // covering FI countermeasures with delayed escalation.
+  void tolerate_result_mismatch(unsigned int num_checks);
+
+  // Set software_errs_fatal bit in ISS model. Returns 0 on success; -1 on
+  // failure.
+  int set_software_errs_fatal(unsigned char new_val);
+
+  // Set wfi_enabled bit in ISS model. Returns 0 on success; -1 on failure.
+  int set_wfi_enabled(unsigned char new_val);
+
+  // Set urnd_ctrl_enabled bit in ISS model. Returns 0 on success; -1 on
+  // failure.
+  int set_urnd_ctrl_enabled(unsigned char new_val);
+
+  // Resume a paused wfi instruction. Returns 0 on success; -1 on failure.
+  int wfi_resume();
+
+  // Tell the trace checker to not execute checks to see if secure wiping has
+  // written random data to all registers before wiping them with zeroes.
+  void set_no_sec_wipe_chk();
+
+  // Step CRC by consuming 48 bits of data.
+  //
+  // This doesn't actually update any internal state: we're just using the
+  // otbn_model framework as a convenient connection between SystemVerilog and
+  // Python. Returns 0 on success; -1 on failure.
+  int step_crc(const svBitVecVal *item /* bit [47:0] */,
+               svBitVecVal *state /* bit [31:0] */);
+
+  // Flush any information in the model. Returns 0 on success or -1 on error.
+  int reset(svBitVecVal *status /* bit [7:0] */,
+            svBitVecVal *insn_cnt /* bit [31:0] */,
+            svBitVecVal *rnd_req /* bit [0:0] */,
+            svBitVecVal *err_bits /* bit [31:0] */,
+            svBitVecVal *stop_pc /* bit [31:0] */);
+
+  // Escalate errors. Returns 0 on success; -1 on failure.
+  int send_err_escalation(svBitVecVal *err_val /* bit [31:0] */,
+                          svBit lock_immediately);
+
+  // Stall for one cycle instead of retiring the next instruction.
+  // In case there is a pending halt, the stall request is ignored except if
+  // enforced is True
+  // Returns 0 on success; -1 on failure.
+  int send_stall_request(svBit enforced);
+
+  // Returns true if we have an ISS wrapper and it has the START_WIPE flag
+  // asserted
+  bool is_at_start_of_wipe() const;
+
+  // Trigger initial secure wipe. Returns 0 on success; -1 on failure.
+  int initial_secure_wipe();
+
+  // Set RMA request input on model. Returns 0 on success; -1 on failure.
+  int set_rma_req(svBitVecVal *rma_req /* bit [3:0] */);
+
+  // Disable stack integrity checks
+  void disable_stack_check();
 
  private:
   // Constructs an ISS wrapper if necessary. If something goes wrong, this
@@ -72,10 +161,15 @@ class OtbnModel {
   ISSWrapper *ensure_wrapper();
 
   // Read the contents of the ISS's memory
-  std::vector<uint8_t> get_sim_memory(bool is_imem) const;
+  Ecc32MemArea::EccWords get_sim_memory(bool is_imem) const;
 
   // Set the contents of the ISS's memory
-  void set_sim_memory(bool is_imem, const std::vector<uint8_t> &data);
+  void set_sim_memory(bool is_imem, const Ecc32MemArea::EccWords &words);
+
+  // Update an ISS memory with the current model's memory content. Used at
+  // Execute start and when resuming from a WFI pause, where the host may have
+  // written to DMEM while OTBN was paused.
+  void send_mem_to_iss(ISSWrapper *iss, bool is_imem);
 
   // Grab contents of dmem from the model and compare them with the RTL. Prints
   // messages to stderr on failure or mismatch. Returns true on success; false
@@ -95,11 +189,19 @@ class OtbnModel {
   // We want to create the model in an initial block in the SystemVerilog
   // simulation, but might not actually want to spawn the ISS. To handle that
   // in a non-racy way, the most convenient thing is to spawn the ISS the first
-  // time it's actually needed. Use ensure_iss() to create as needed.
+  // time it's actually needed. Use ensure_wrapper() to create as needed.
   std::unique_ptr<ISSWrapper> iss_;
+
   OtbnMemUtil mem_util_;
   std::string design_scope_;
-  unsigned imem_size_words_, dmem_size_words_;
+
+  bool stack_check_enabled_ = true;
+
+  // If true, tolerate a mismatch in results between ISS and RTL.
+  bool tolerate_result_mismatch_ = false;
+  // The number of checks a mismatch between RTL and ISS is tolerated. A value
+  // of 0 means mismatches are tolerated indefinitely until a mismatch occurs.
+  unsigned int num_tolerating_checks_ = 0;
 };
 
 #endif  // OPENTITAN_HW_IP_OTBN_DV_MODEL_OTBN_MODEL_H_

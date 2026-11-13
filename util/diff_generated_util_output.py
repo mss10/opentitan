@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """Show a diff between the generated output from utils in the current working
@@ -32,8 +32,6 @@ testlist = [
     # generating include define headers
     ["uart.h", False,
      "./regtool.py -D ../hw/ip/uart/data/uart.hjson > ", ""],
-    ["gpio.h", False,
-     "./regtool.py -D ../hw/ip/gpio/data/gpio.hjson > ", ""],
     ["spi_device.h", False,
      "./regtool.py -D ../hw/ip/spi_device/data/spi_device.hjson > ", ""]
 ]  # yapf: disable

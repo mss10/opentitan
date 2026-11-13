@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,6 +19,12 @@ if {[info exists ::env(WAVES)]} {
 set gui 0
 if {[info exists ::env(GUI)]} {
   set gui "$::env(GUI)"
+}
+
+set gui_debug 0
+# Detect when GUI debug mode has been invoked to build UVM objects by default
+if {[info exists ::env(GUI_DEBUG)]} {
+  set gui_debug "$::env(GUI_DEBUG)"
 }
 
 set tb_top "tb"

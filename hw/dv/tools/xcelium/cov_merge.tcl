@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -18,4 +18,9 @@ puts "Output directory for merged coverage:"
 set cov_merge_db_dir [string trim $::env(cov_merge_db_dir) " \"'"]
 
 # Run the merge command.
-merge $cov_db_dirs -out $cov_merge_db_dir -overwrite
+merge $cov_db_dirs -out $cov_merge_db_dir -overwrite -initial_model union_all
+
+# Create a file with the path to the cover dirs
+# Replace spaces with newlines so each run is on its own line for the 'rank' command
+set cov_db_dirs_rank [string map {" " "\n"} [string trim $cov_db_dirs]]
+exec sh -c "cat << 'EOF' > $cov_merge_db_dir/runs.txt\n$cov_db_dirs_rank\nEOF"

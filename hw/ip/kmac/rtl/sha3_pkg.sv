@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -12,8 +12,8 @@ package sha3_pkg;
   // specification. But sha3pad logic assumes the value as 1600.
   parameter int StateW = 1600;
 
-  // Function Name (N) and Customzation String (S) shall be
-  // smaller than 2**256 bits and integer divisiable by 8.
+  // Function Name (N) and Customization String (S) shall be
+  // smaller than 2**256 bits and integer divisible by 8.
   parameter int FnWidth = 32;  // up to 32bit Function Name
   parameter int CsWidth = 256; // up to 256bit Customization Input
 
@@ -47,7 +47,7 @@ package sha3_pkg;
   //    divides 1600 keccak state `Width`. Choose the value accordingly.
   // 2. sha3pad module has fixed width mux for funcpad logic. If MsgWidth is
   //    changed, the logic also need to be revised.
-  // 3. kmac core logic also has fixed size mux for appeding output length.
+  // 3. kmac core logic also has fixed size mux for appending output length.
   //    Revise the case statement to fit into revised MsgWidth value.
   parameter int MsgWidth = 64;
   parameter int MsgStrbW = MsgWidth / 8;
@@ -90,6 +90,14 @@ package sha3_pkg;
      576/MsgWidth   //  9 depth := (1600 - 512*2)
   };
 
+  parameter int unsigned KeccakBitCapacity [5] = '{
+    2 * 128, // capacity for L128
+    2 * 224, // capacity for L224
+    2 * 256, // capacity for L256
+    2 * 384, // capacity for L384
+    2 * 512  // capacity for L512
+  };
+
   parameter int unsigned MaxBlockSize = KeccakRate[0];
 
   parameter int unsigned KeccakEntries = 1600/MsgWidth;
@@ -100,40 +108,141 @@ package sha3_pkg;
   // SHA3 core state. This state value is used in sha3core module
   // and also in KMAC top module and the register interface for sw to track the
   // sha3 status.
-  typedef enum logic [2:0] {
-    StIdle,
+  // Encoding generated with:
+  // $ ./util/design/sparse-fsm-encode.py -d 3 -m 7 -n 6 \
+  //      -s 4082450958 --language=sv
+  //
+  // Hamming distance histogram:
+  //
+  //  0: --
+  //  1: --
+  //  2: --
+  //  3: |||||||||||||||||||| (57.14%)
+  //  4: ||||||||||||||| (42.86%)
+  //  5: --
+  //  6: --
+  //
+  // Minimum Hamming distance: 3
+  // Maximum Hamming distance: 4
+  // Minimum Hamming weight: 1
+  // Maximum Hamming weight: 4
+  //
+  localparam int StateWidth = 6;
+  typedef enum logic [StateWidth-1:0] {
+    StIdle_sparse = 6'b101100,
 
     // Absorb stage receives the message bitstream and computes the keccak
     // rounds. This internal operation is mainly done inside sha3pad module
     // not sha3core. The core module and this state machine observe the status
     // of the process and mainly waits until all the sponge absorbing is
     // completed. The main indicator is `absorbed` signal.
-    StAbsorb,
+    StAbsorb_sparse = 6'b100001,
 
-    // TODO: Implement StAbort later after context-switching discussion.
-    // Abort stage can be moved from StAbsorb stage. It basically holds the
-    // keccak round operation and opens up the internal state variable to the
-    // software. This stage is for the software to pause current operation and
-    // store the internal state elsewhere then initiates new KMAC/SHA3 process.
-    // StAbort only can be moved to _StFlush_.
-    //StAbort,
+    // The absorb has been stopped at a block boundary for a context save. The
+    // Keccak state is exposed to SW and only the Done command is accepted.
+    StStop_sparse = 6'b011101,
 
     // Squeeze stage allows the software to read the internal state.
     // If `EnMasking`, it opens the read permission of two share of the state.
     // The squeezing in SHA3 specification describes the software to read up to
     // the rate of SHA3 algorithm but this logic opens up the entire 1600 bits
     // of the state (3200bits if `EnMasking`).
-    StSqueeze,
+    StSqueeze_sparse = 6'b001011,
 
-    // ManualRun stage initiaties the keccak round and waits the completion.
+    // ManualRun stage initiates the keccak round and waits the completion.
     // This state is moved from Squeeze state by writing 1 to manual_run CSR.
     // When keccak round is completed, it goes back to Squeeze state.
-    StManualRun,
+    StManualRun_sparse = 6'b010000,
 
     // Flush stage, the core clears out the internal variables and also
     // submodules' variables too. Then moves back to Idle state.
-    StFlush
+    StFlush_sparse =  6'b000110,
+
+    StTerminalError_sparse = 6'b111010
+  } sha3_st_sparse_e;
+
+  localparam int StateWidthLogic = 3;
+  typedef enum logic [StateWidthLogic-1:0] {
+    StIdle,
+    StAbsorb,
+    StSqueeze,
+    StManualRun,
+    StFlush,
+    StError,
+    StStop
   } sha3_st_e;
+
+  function automatic sha3_st_e sparse2logic(sha3_st_sparse_e st);
+    unique case (st)
+      StIdle_sparse      : return StIdle;
+      StAbsorb_sparse    : return StAbsorb;
+      StStop_sparse      : return StStop;
+      StSqueeze_sparse   : return StSqueeze;
+      StManualRun_sparse : return StManualRun;
+      StFlush_sparse     : return StFlush;
+      default            : return StError;
+    endcase
+  endfunction : sparse2logic
+
+
+  //////////////////////
+  // Keccak Round FSM //
+  //////////////////////
+
+  // Encoding generated with:
+  // $ ./util/design/sparse-fsm-encode.py -d 3 -m 8 -n 6 \
+  //      -s 1363425333 --language=sv
+  //
+  // Hamming distance histogram:
+  //
+  //  0: --
+  //  1: --
+  //  2: --
+  //  3: |||||||||||||||||||| (57.14%)
+  //  4: ||||||||||||||| (42.86%)
+  //  5: --
+  //  6: --
+  //
+  // Minimum Hamming distance: 3
+  // Maximum Hamming distance: 4
+  // Minimum Hamming weight: 1
+  // Maximum Hamming weight: 5
+  //
+  localparam int KeccakFsmWidth = 6;
+  typedef enum logic [KeccakFsmWidth-1:0] {
+    KeccakStIdle = 6'b011111,
+
+    // Active state is used in Unmasked version only.
+    // It handles keccak round in a cycle
+    KeccakStActive = 6'b000100,
+
+    // Phase1 --> Phase2Cycle1 --> Phase2Cycle2 --> Phase2Cycle3
+    // Activated only in Masked version.
+    // Phase1 processes Theta, Rho, Pi steps in a cycle and stores the states
+    // into storage. It only moves to Phase2 once the randomness required for
+    // Phase2 is available.
+    KeccakStPhase1 = 6'b101101,
+
+    // Chi Stage 1 for first lane halves. Unconditionally move to Phase2Cycle2.
+    KeccakStPhase2Cycle1 = 6'b000011,
+
+    // Chi Stage 2 and Iota for first lane halves. Chi Stage 1 for second
+    // lane halves. Unconditionally move to Phase2Cycle3.
+    KeccakStPhase2Cycle2 = 6'b011000,
+
+    // Chi Stage 2 and Iota for second lane halves.
+    // When doing the last round (MaxRound -1) it completes the process and
+    // goes back to Idle. If not, it repeats the phases again.
+    KeccakStPhase2Cycle3 = 6'b101010,
+
+    // Error state. Not clearly defined yet.
+    // Intention is if any unexpected input in the process, state moves to
+    // here and report through the error fifo with debugging information.
+    KeccakStError = 6'b110001,
+
+    KeccakStTerminalError = 6'b110110
+  } keccak_st_e;
+
 
   //////////////////
   // Error Report //

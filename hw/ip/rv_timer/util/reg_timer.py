@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""Mako template to Hjson register description
@@ -36,7 +36,7 @@ def main():
     out = StringIO()
 
     reg_tpl = Template(args.input.read())
-    out.write(reg_tpl.render(harts=args.harts, timers=args.timers))
+    out.write(reg_tpl.render(harts=args.harts, timers=args.timers).rstrip())
 
     print(out.getvalue())
 

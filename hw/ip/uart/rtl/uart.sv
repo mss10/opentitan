@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,7 +9,12 @@
 module uart
     import uart_reg_pkg::*;
 #(
-  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}}
+  parameter logic [NumAlerts-1:0]           AlertAsyncOn              = {NumAlerts{1'b1}},
+  // Number of cycles a differential skew is tolerated on the alert signal
+  parameter int unsigned                    AlertSkewCycles           = 1,
+  parameter bit                             EnableRacl                = 1'b0,
+  parameter bit                             RaclErrorRsp              = EnableRacl,
+  parameter top_racl_pkg::racl_policy_sel_t RaclPolicySelVec[NumRegs] = '{NumRegs{0}}
 ) (
   input           clk_i,
   input           rst_ni,
@@ -22,6 +27,12 @@ module uart
   input  prim_alert_pkg::alert_rx_t [NumAlerts-1:0] alert_rx_i,
   output prim_alert_pkg::alert_tx_t [NumAlerts-1:0] alert_tx_o,
 
+  // RACL interface
+  input  top_racl_pkg::racl_policy_vec_t racl_policies_i,
+  output top_racl_pkg::racl_error_log_t  racl_error_o,
+
+  output logic    lsio_trigger_o,
+
   // Generic IO
   input           cio_rx_i,
   output logic    cio_tx_o,
@@ -29,8 +40,9 @@ module uart
 
   // Interrupts
   output logic    intr_tx_watermark_o ,
+  output logic    intr_tx_empty_o ,
   output logic    intr_rx_watermark_o ,
-  output logic    intr_tx_empty_o  ,
+  output logic    intr_tx_done_o  ,
   output logic    intr_rx_overflow_o  ,
   output logic    intr_rx_frame_err_o ,
   output logic    intr_rx_break_err_o ,
@@ -38,21 +50,25 @@ module uart
   output logic    intr_rx_parity_err_o
 );
 
-  import uart_reg_pkg::*;
-
   logic [NumAlerts-1:0] alert_test, alerts;
   uart_reg2hw_t reg2hw;
   uart_hw2reg_t hw2reg;
 
-  uart_reg_top u_reg (
+  uart_reg_top #(
+    .EnableRacl(EnableRacl),
+    .RaclErrorRsp(RaclErrorRsp),
+    .RaclPolicySelVec(RaclPolicySelVec)
+  ) u_reg (
     .clk_i,
     .rst_ni,
     .tl_i,
     .tl_o,
     .reg2hw,
     .hw2reg,
-    .intg_err_o (alerts[0]),
-    .devmode_i  (1'b1)
+    .racl_policies_i,
+    .racl_error_o,
+    // SEC_CM: BUS.INTEGRITY
+    .intg_err_o (alerts[0])
   );
 
   uart_core uart_core (
@@ -64,9 +80,12 @@ module uart
     .rx    (cio_rx_i   ),
     .tx    (cio_tx_o   ),
 
+    .lsio_trigger_o,
+
     .intr_tx_watermark_o,
-    .intr_rx_watermark_o,
     .intr_tx_empty_o,
+    .intr_rx_watermark_o,
+    .intr_tx_done_o,
     .intr_rx_overflow_o,
     .intr_rx_frame_err_o,
     .intr_rx_break_err_o,
@@ -83,6 +102,7 @@ module uart
   for (genvar i = 0; i < NumAlerts; i++) begin : gen_alert_tx
     prim_alert_sender #(
       .AsyncOn(AlertAsyncOn[i]),
+      .SkewCycles(AlertSkewCycles),
       .IsFatal(1'b1)
     ) u_prim_alert_sender (
       .clk_i,
@@ -100,20 +120,27 @@ module uart
   assign cio_tx_en_o = 1'b1;
 
   // Assert Known for outputs
-  `ASSERT_KNOWN(txenKnown, cio_tx_en_o)
-  `ASSERT_KNOWN(txKnown, cio_tx_o, clk_i, !rst_ni || !cio_tx_en_o)
+  `ASSERT(TxEnIsOne_A, cio_tx_en_o === 1'b1)
+  `ASSERT_KNOWN(TxKnown_A, cio_tx_o, clk_i, !rst_ni || !cio_tx_en_o)
+  `ASSERT_KNOWN(TlODValidKnown_A, tl_o.d_valid)
+  `ASSERT_KNOWN(TlOAReadyKnown_A, tl_o.a_ready)
 
   // Assert Known for alerts
   `ASSERT_KNOWN(AlertsKnown_A, alert_tx_o)
 
   // Assert Known for interrupts
-  `ASSERT_KNOWN(txWatermarkKnown, intr_tx_watermark_o)
-  `ASSERT_KNOWN(rxWatermarkKnown, intr_rx_watermark_o)
-  `ASSERT_KNOWN(txEmptyKnown, intr_tx_empty_o)
-  `ASSERT_KNOWN(rxOverflowKnown, intr_rx_overflow_o)
-  `ASSERT_KNOWN(rxFrameErrKnown, intr_rx_frame_err_o)
-  `ASSERT_KNOWN(rxBreakErrKnown, intr_rx_break_err_o)
-  `ASSERT_KNOWN(rxTimeoutKnown, intr_rx_timeout_o)
-  `ASSERT_KNOWN(rxParityErrKnown, intr_rx_parity_err_o)
+  `ASSERT_KNOWN(TxWatermarkKnown_A, intr_tx_watermark_o)
+  `ASSERT_KNOWN(TxEmptyKnown_A, intr_tx_empty_o)
+  `ASSERT_KNOWN(RxWatermarkKnown_A, intr_rx_watermark_o)
+  `ASSERT_KNOWN(TxDoneKnown_A, intr_tx_done_o)
+  `ASSERT_KNOWN(RxOverflowKnown_A, intr_rx_overflow_o)
+  `ASSERT_KNOWN(RxFrameErrKnown_A, intr_rx_frame_err_o)
+  `ASSERT_KNOWN(RxBreakErrKnown_A, intr_rx_break_err_o)
+  `ASSERT_KNOWN(RxTimeoutKnown_A, intr_rx_timeout_o)
+  `ASSERT_KNOWN(RxParityErrKnown_A, intr_rx_parity_err_o)
+  `ASSERT_KNOWN(LsioTriggerKnown_A, lsio_trigger_o)
+  `ASSERT_KNOWN(RaclErrorKnown_A, racl_error_o.valid)
 
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ALERT(RegWeOnehotCheck_A, u_reg, alert_tx_o[0])
 endmodule

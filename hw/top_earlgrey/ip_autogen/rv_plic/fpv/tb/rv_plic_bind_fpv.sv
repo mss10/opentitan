@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -25,7 +25,9 @@ module rv_plic_bind_fpv;
     .claim,
     .complete,
     .prio,
-    .threshold
+    .threshold,
+    .fatal_alert_i (alerts[0]),
+    .tl_o
   );
 
   bind rv_plic tlul_assert #(

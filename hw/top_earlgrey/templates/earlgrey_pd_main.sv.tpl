@@ -1,0 +1,137 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+${gencmd}
+<%
+import topgen.lib as lib
+
+domain = "Main"
+
+feature_info = {}
+cio_info = {}
+%>\
+<%include file="/toplevel_snippets/info_dicts.tpl" args="top=top, feature_info=feature_info, cio_info=cio_info" />\
+`include "prim_assert.sv"
+
+module ${top["name"]}_pd_${domain.lower()} #(
+<%include file="/toplevel_snippets/header_parameters.tpl" args="top=top, domain=domain, feedthrough=False" />\
+) (
+<%include file="/toplevel_snippets/port_intermodule_signals.tpl" args="top=top, domain=domain, last_snippet=False" />\
+<%include file="/toplevel_snippets/port_special_signals.tpl" args="top=top, feature_info=feature_info, cio_info=cio_info, domain=domain" />\
+);
+
+  import top_${top["name"]}_pkg::*;
+  // Compile-time random constants
+  import top_${top["name"]}_rnd_cnst_pkg::*;
+
+<%include file="/toplevel_snippets/localparams.tpl" args="top=top, domain=domain" />\
+
+<%include file="/toplevel_snippets/cio_signals.tpl" args="top=top, feature_info=feature_info, cio_info=cio_info, domain=domain" />\
+
+<%include file="/toplevel_snippets/interrupt_signals.tpl" args="top=top, name_to_block=name_to_block, domain=domain" />\
+
+<%include file="/toplevel_snippets/alert_handler_signals.tpl" args="top=top, feature_info=feature_info, domain=domain" />\
+
+<%include file="/toplevel_snippets/intermodule_signals.tpl" args="top=top, domain=domain" />\
+
+% for m in lib.get_all_modules(top, domain=domain):
+  % if m.get("template_type") == "otp_ctrl":
+  // OTP HW_CFG* Broadcast signals.
+  // TODO(#6713): The actual struct breakout and mapping currently needs to
+  // be performed by hand.
+  assign sram_ctrl_main_otp_en_sram_ifetch =
+      otp_ctrl_otp_broadcast.hw_cfg1_data.en_sram_ifetch;
+  assign sram_ctrl_sec_otp_en_sram_ifetch =
+      otp_ctrl_otp_broadcast.hw_cfg1_data.en_sram_ifetch;
+  assign rv_dm_otp_dis_rv_dm_late_debug =
+      otp_ctrl_otp_broadcast.hw_cfg1_data.dis_rv_dm_late_debug;
+  assign lc_ctrl_otp_device_id =
+      otp_ctrl_otp_broadcast.hw_cfg0_data.device_id;
+  assign lc_ctrl_otp_manuf_state =
+      otp_ctrl_otp_broadcast.hw_cfg0_data.manuf_state;
+  assign keymgr_dpe_device_id =
+      otp_ctrl_otp_broadcast.hw_cfg0_data.device_id;
+
+  logic unused_otp_broadcast_bits;
+  assign unused_otp_broadcast_bits = ^{
+    otp_ctrl_otp_broadcast.valid,
+    otp_ctrl_otp_broadcast.hw_cfg0_data.hw_cfg0_digest,
+    otp_ctrl_otp_broadcast.hw_cfg1_data.hw_cfg1_digest,
+    otp_ctrl_otp_broadcast.hw_cfg1_data.unallocated
+  };
+  % endif
+  % if m.get("name") == "rram_ctrl":
+
+  % endif
+% endfor
+
+  // Ibex-specific assignments
+  // TODO: This should be further automated in the future.
+  assign rv_core_ibex_irq_timer = intr_rv_timer_timer_expired_hart0_timer0;
+  assign rv_core_ibex_hart_id = '0;
+
+% if 'rv_core_ibex_boot_addr' in (sig['signame'] for sig in top['inter_signal']['definitions']):
+  ## Not all top levels have a rom controller.
+  ## For those that do not, reference the ROM directly.
+<% num_rom_ctrl = lib.num_rom_ctrl(top["module"]) %>\
+  % if num_rom_ctrl == 1:
+  assign rv_core_ibex_boot_addr = tl_main_pkg::ADDR_SPACE_ROM_CTRL__ROM;
+  % elif num_rom_ctrl > 1:
+  assign rv_core_ibex_boot_addr = tl_main_pkg::ADDR_SPACE_ROM_CTRL0__ROM;
+  % else:
+  assign rv_core_ibex_boot_addr = tl_main_pkg::ADDR_SPACE_ROM;
+  % endif
+% endif
+
+% if lib.find_module(top["module"], "pinmux", domain=domain):
+<%include file="/toplevel_snippets/pinmux_jtag_breakout.tpl"/>\
+% endif
+
+<%include file="/toplevel_snippets/clk_reset_lpg_assigns.tpl" args="top=top, feature_info=feature_info, domain=domain" />\
+
+<%include file="/toplevel_snippets/module_instantiations.tpl" args="top=top, feature_info=feature_info, domain=domain" />\
+
+<%include file="/toplevel_snippets/interrupt_assigns.tpl" args="top=top, domain=domain" />\
+
+<%include file="/toplevel_snippets/xbar_instantiations.tpl" args="top=top, domain=domain" />\
+
+<%include file="/toplevel_snippets/cio_assigns.tpl" args="top=top, feature_info=feature_info, cio_info=cio_info, domain=domain" />\
+
+  // Tie-off unused clock gate signal
+  logic unused_cg_en_ast_ext;
+  assign unused_cg_en_ast_ext = ^cg_en_ast_ext_i;
+
+<%
+  # (struct field, flat inter-signal base name)
+  # for every memory-cfg consumer of this PD.
+  mem_cfg_consumers = [
+    ('otbn_imem',                'otbn_ram_cfg_imem'),
+    ('otbn_dmem',                'otbn_ram_cfg_dmem'),
+    ('i2c0',                     'i2c0_ram_cfg'),
+    ('i2c1',                     'i2c1_ram_cfg'),
+    ('i2c2',                     'i2c2_ram_cfg'),
+    ('i3c0_ram',                 'i3c0_ram_cfg'),
+    ('i3c0_dat',                 'i3c0_dat_cfg'),
+    ('i3c0_dct',                 'i3c0_dct_cfg'),
+    ('i3c1_ram',                 'i3c1_ram_cfg'),
+    ('i3c1_dat',                 'i3c1_dat_cfg'),
+    ('i3c1_dct',                 'i3c1_dct_cfg'),
+    ('usbdev_ram',               'usbdev_ram_cfg'),
+    ('rv_core_ibex_icache_tag',  'rv_core_ibex_ram_cfg_icache_tag'),
+    ('rv_core_ibex_icache_data', 'rv_core_ibex_ram_cfg_icache_data'),
+    ('sram_ctrl_main',           'sram_ctrl_main_ram_cfg'),
+    ('sram_ctrl_sec',            'sram_ctrl_sec_ram_cfg'),
+    ('sram_ctrl_meta',           'sram_ctrl_meta_ram_cfg'),
+    ('spi_device_sys2spi',       'spi_device_ram_cfg_sys2spi'),
+    ('spi_device_spi2sys',       'spi_device_ram_cfg_spi2sys'),
+    ('rom_ctrl_rom',             'rom_ctrl_rom_cfg'),
+  ]
+%>\
+<%include file="/toplevel_snippets/mem_cfg_wiring.tpl" args="mem_cfg_consumers=mem_cfg_consumers" />\
+
+% if lib.find_module(top["module"], "clkmgr").get("domain") == domain:
+  // Make sure scanmode_i is never X (including during reset)
+  `ASSERT_KNOWN(scanmodeKnown, scanmode_i, clk_main_i, 0)
+% endif\
+
+endmodule

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,6 +7,8 @@
 #include <cassert>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <libelf.h>
 #include <sstream>
@@ -92,6 +94,8 @@ static MemImageType GetMemImageTypeByName(const std::string &name) {
     return kMemImageElf;
   if (name == "vmem")
     return kMemImageVmem;
+  if (name == "bin")
+    return kMemImageBin;
 
   std::ostringstream oss;
   oss << "Unknown image type: `" << name << "'.";
@@ -101,8 +105,10 @@ static MemImageType GetMemImageTypeByName(const std::string &name) {
 // Return a MemImageType for the file at filepath or throw a std::runtime_error.
 // Never returns kMemImageUnknown.
 static MemImageType DetectMemImageType(const std::string &filepath) {
+  size_t stem_pos = filepath.find_last_of("/");
   size_t ext_pos = filepath.find_last_of(".");
-  if (ext_pos == std::string::npos) {
+  if (ext_pos == std::string::npos ||
+      (stem_pos != std::string::npos && ext_pos < stem_pos)) {
     // Assume ELF files if no file extension is given.
     // TODO: Make this more robust by actually checking the file contents.
     return kMemImageElf;
@@ -117,6 +123,24 @@ static MemImageType DetectMemImageType(const std::string &filepath) {
   }
 
   return image_type;
+}
+
+// Load a binary image into an array of bytes.
+static std::vector<uint8_t> LoadBinary(const std::string &filepath) {
+  std::ifstream source(filepath, std::ios::binary);
+  if (!source.good()) {
+    std::ostringstream oss;
+    oss << "Cannot read file: `" << filepath << "'.";
+    throw std::runtime_error(oss.str());
+  }
+
+  source.seekg(0, std::ios::end);
+  size_t length = source.tellg();
+  source.seekg(0, std::ios::beg);
+
+  std::vector<uint8_t> buf(length);
+  source.read(reinterpret_cast<char *>(buf.data()), length);
+  return buf;
 }
 
 // Generate a single array of bytes representing the contents of PT_LOAD
@@ -246,7 +270,7 @@ static std::vector<uint8_t> MergeSegments(const AddrRange<uint32_t> &rng0,
     std::vector<uint8_t> ret = std::move(seg1);
     ret.resize(new_len);
 
-    // We know that that rng0 isn't completely contained in rng1 and
+    // We know that rng0 isn't completely contained in rng1 and
     // that rng0 doesn't stick out of the left hand end. That means it
     // must stick out of the right (so rng1.hi < rng0.hi). However, we
     // also know that the two ranges overlap, so rng0.lo <= rng1.hi.
@@ -403,6 +427,9 @@ void DpiMemUtil::LoadFileToNamedMem(bool verbose, const std::string &name,
         break;
       case kMemImageVmem:
         m.LoadVmem(filepath);
+        break;
+      case kMemImageBin:
+        m.Write(0, LoadBinary(filepath));
         break;
       default:
         assert(0);

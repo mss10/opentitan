@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,8 +9,6 @@
  */
 
 module tlul_cmd_intg_gen import tlul_pkg::*; #(
-  // TODO: default generation of data integrity is on until host native
-  // generation is ready
   parameter bit EnableDataIntgGen = 1'b1
 ) (
   // TL-UL interface
@@ -23,7 +21,7 @@ module tlul_cmd_intg_gen import tlul_pkg::*; #(
   logic [H2DCmdMaxWidth-1:0] unused_cmd_payload;
 
   logic [H2DCmdIntgWidth-1:0] cmd_intg;
-  prim_secded_64_57_enc u_cmd_gen (
+  prim_secded_inv_64_57_enc u_cmd_gen (
     .data_i(H2DCmdMaxWidth'(cmd)),
     .data_o({cmd_intg, unused_cmd_payload})
   );
@@ -32,12 +30,10 @@ module tlul_cmd_intg_gen import tlul_pkg::*; #(
   logic [DataIntgWidth-1:0] data_intg;
 
   if (EnableDataIntgGen) begin : gen_data_intg
-    for (genvar i = 0; i < top_pkg::TL_DBW; i++) begin : gen_data_fill
-      assign data_final[i*8 +: 8] = tl_i.a_mask[i] ? tl_i.a_data[i*8 +: 8] : '0;
-    end
+    assign data_final = tl_i.a_data;
 
     logic [DataMaxWidth-1:0] unused_data;
-    prim_secded_39_32_enc u_data_gen (
+    prim_secded_inv_39_32_enc u_data_gen (
       .data_i(DataMaxWidth'(data_final)),
       .data_o({data_intg, unused_data})
     );
@@ -59,4 +55,4 @@ module tlul_cmd_intg_gen import tlul_pkg::*; #(
 
   `ASSERT_INIT(PayMaxWidthCheck_A, $bits(tl_h2d_cmd_intg_t) <= H2DCmdMaxWidth)
 
-endmodule // tlul_rsp_intg_gen
+endmodule : tlul_cmd_intg_gen

@@ -1,20 +1,23 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-name: ${instance_vlnv("lowrisc:ip:rv_plic")}
+name: ${instance_vlnv(f"lowrisc:ip:{module_instance_name}:0.1")}
 description: "RISC-V Platform Interrupt Controller (PLIC)"
 
 filesets:
   files_rtl:
     depend:
-      - lowrisc:ip:rv_plic_component
+      - ${instance_vlnv(f"lowrisc:ip:{module_instance_name}_component:0.1")}
       - lowrisc:ip:tlul
       - lowrisc:prim:subreg
+    % if racl_support:
+      - ${instance_vlnv("lowrisc:constants:top_racl_pkg")}
+    % endif
     files:
-      - rtl/rv_plic_reg_pkg.sv
-      - rtl/rv_plic_reg_top.sv
-      - rtl/rv_plic.sv
+      - rtl/${module_instance_name}_reg_pkg.sv
+      - rtl/${module_instance_name}_reg_top.sv
+      - rtl/${module_instance_name}.sv
     file_type: systemVerilogSource
 
 parameters:
@@ -26,7 +29,7 @@ targets:
   default: &default_target
     filesets:
       - files_rtl
-    toplevel: rv_plic
+    toplevel: ${module_instance_name}
 
   lint:
     <<: *default_target

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -48,7 +48,7 @@
 `endif
 
 // Creates a coverpoint for an expression where only the expression true case is of interest for
-// coverage (e.g. where the expression indicates an event has occured).
+// coverage (e.g. where the expression indicates an event has occurred).
 `ifndef DV_FCOV_EXPR_SEEN
 `ifdef DV_FCOV_DISABLE_CP
   `define DV_FCOV_EXPR_SEEN(NAME_, EXPR_)

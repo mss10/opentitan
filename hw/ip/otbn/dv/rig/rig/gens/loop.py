@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -14,7 +14,7 @@ from ..config import Config
 from ..program import ProgInsn, Program
 from ..model import LoopStack, Model
 from ..snippet import LoopSnippet, ProgSnippet, Snippet
-from ..snippet_gen import GenCont, GenRet, SimpleGenRet, SnippetGen
+from ..snippet_gen import GenCont, GenRet, SnippetGen
 
 
 class Loop(SnippetGen):
@@ -39,24 +39,6 @@ class Loop(SnippetGen):
 
         self.loop = self._get_named_insn(insns_file, 'loop')
         self.loopi = self._get_named_insn(insns_file, 'loopi')
-
-        # loop expects operands: grs, bodysize
-        if not (len(self.loop.operands) == 2 and
-                isinstance(self.loop.operands[0].op_type, RegOperandType) and
-                self.loop.operands[0].op_type.reg_type == 'gpr' and
-                isinstance(self.loop.operands[1].op_type, ImmOperandType) and
-                not self.loop.operands[1].op_type.signed):
-            raise RuntimeError('LOOP instruction from instructions file is not '
-                               'the shape expected by the Loop generator.')
-
-        # loopi expects operands: iterations, bodysize
-        if not (len(self.loopi.operands) == 2 and
-                isinstance(self.loopi.operands[0].op_type, ImmOperandType) and
-                not self.loopi.operands[0].op_type.signed and
-                isinstance(self.loopi.operands[1].op_type, ImmOperandType) and
-                not self.loopi.operands[1].op_type.signed):
-            raise RuntimeError('LOOPI instruction from instructions file is not '
-                               'the shape expected by the Loop generator.')
 
         self.loopi_prob = 0.5
 
@@ -137,11 +119,14 @@ class Loop(SnippetGen):
             warp = None
             iters = actual_iters
         else:
-            # We will start '1 + lo' iterations before the warp (and finish
-            # 'lo' of them). We'll then finish 'max_iters - lo' iterations
-            # after the warp. Both '1 + lo' and 'max_iters - lo' must be
-            # positive.
-            lo = random.randint(0, max_iters - 1)
+            # We will start '1 + lo' iterations before the warp (and finish 'lo'
+            # of them). We'll then finish 'max_iters - lo' iterations after the
+            # warp. Both '1 + lo' and 'max_iters - lo' must be positive. `lo`
+            # must not be more than `max_iters - 2` as otherwise we can warp to
+            # 1 remaining iteration. If this happens right at the end of a loop
+            # the prefetch stage will have fetched the wrong instruction and a
+            # fatal error will be raised.
+            lo = random.randint(0, max_iters - 2)
             hi = actual_iters - (max_iters - lo)
             assert 0 <= lo <= hi < actual_iters
             warp = (lo, hi)
@@ -336,7 +321,7 @@ class Loop(SnippetGen):
                   bogus_insn: ProgInsn,
                   cont: GenCont,
                   model: Model,
-                  program: Program) -> Optional[SimpleGenRet]:
+                  program: Program) -> Optional[GenRet]:
         '''Generate the body of a loop
 
         The model is currently sitting at the start of the loop body.
@@ -461,7 +446,7 @@ class Loop(SnippetGen):
                 if jump_ret is None:
                     return None
 
-                jump_insn, jump_snippet, model = jump_ret
+                _jump_insn, jump_snippet, model = jump_ret
                 assert model.pc == tail_start
 
                 head_snippet = Snippet.cons_option(head_snippet, jump_snippet)
@@ -553,7 +538,7 @@ class Loop(SnippetGen):
         # Extract the encoded operand value from iters. We ignore num_iters and
         # warp: they will be used in gen_pieces (returned in lshape), but we
         # don't need them here.
-        iter_opval, num_iters, warp = iters
+        iter_opval, _num_iters, _warp = iters
 
         # Generate the head instruction (which runs once, unconditionally) and
         # clone model and program to add it
@@ -597,7 +582,7 @@ class Loop(SnippetGen):
 
         hd_insn, lshape = ret
         bodysize, iters = lshape
-        iter_opval, num_iters, warp = iters
+        _iter_opval, num_iters, warp = iters
 
         # The address of the final instruction in the loop
         end_addr = model.pc + 4 * bodysize
@@ -675,9 +660,9 @@ class Loop(SnippetGen):
         if pieces is None:
             return None
 
-        shape, hd_insn, body_snippet, model, warp = pieces
+        _shape, hd_insn, body_snippet, model, warp = pieces
 
         snippet = LoopSnippet(hd_addr, hd_insn, body_snippet, warp)
         snippet.insert_into_program(program)
 
-        return (snippet, False, model)
+        return (snippet, model)

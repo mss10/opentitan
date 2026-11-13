@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:ip:rv_dm:0.1"
@@ -11,15 +11,20 @@ filesets:
       - lowrisc:ip:jtag_pkg
       - lowrisc:ip:tlul
       - lowrisc:prim:all
+      - lowrisc:prim:lc_or_hardened
+      - lowrisc:prim:lc_sender
       - lowrisc:prim:lc_sync
       - lowrisc:prim:clock_mux2
+      - lowrisc:prim:mubi
       - lowrisc:tlul:adapter_host
       - pulp-platform:riscv-dbg:0.1
-      - lowrisc:prim:lc_sync
+      - lowrisc:virtual_constants:top_racl_pkg
     files:
       - rtl/rv_dm_reg_pkg.sv
       - rtl/rv_dm_regs_reg_top.sv
-      - rtl/rv_dm_rom_reg_top.sv
+      - rtl/rv_dm_dbg_reg_top.sv
+      - rtl/rv_dm_dmi_gate.sv
+      - rtl/rv_dm_pkg.sv
       - rtl/rv_dm.sv
     file_type: systemVerilogSource
 
@@ -44,6 +49,11 @@ filesets:
       # common waivers
       - lowrisc:lint:common
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+
 parameters:
   NrHarts:
     datatype: int
@@ -61,6 +71,7 @@ targets:
       - tool_verilator   ? (files_verilator_waiver)
       - tool_ascentlint  ? (files_ascentlint_waiver)
       - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_slang       ? (files_slang_waiver)
       - files_rtl
     toplevel: rv_dm
 

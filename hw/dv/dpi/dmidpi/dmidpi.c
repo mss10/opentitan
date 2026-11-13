@@ -1,9 +1,8 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "dmidpi.h"
-#include "tcp_server.h"
 
 #include <assert.h>
 #include <pthread.h>
@@ -11,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "tcp_server.h"
 
 // IDCODE register
 // [31:28] 0x0,    - Version
@@ -30,7 +31,7 @@ const int IDCODEVAL = 0x04F5484D;
 // [3:0]    0x1  - Protocol version (0.13)
 const int DTMCSRVAL = 0x00000071;
 
-enum jtag_state_t : uint8_t {
+enum jtag_state_t {
   TestLogicReset,
   RunTestIdle,
   SelectDrScan,
@@ -49,7 +50,7 @@ enum jtag_state_t : uint8_t {
   UpdateIr
 };
 
-enum jtag_reg_t : uint8_t {
+enum jtag_reg_t {
   Bypass0 = 0x0,
   IdCode = 0x1,
   DTMCSR = 0x10,
@@ -64,7 +65,7 @@ struct jtag_ctx {
   uint64_t dr_captured;
   uint8_t dr_length;
   uint8_t jtag_tdo;
-  jtag_state_t jtag_state;
+  enum jtag_state_t jtag_state;
   uint8_t dmi_outstanding;
 };
 

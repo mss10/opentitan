@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -18,7 +18,7 @@ dirs_with_lint_makefile=(
 retcode=0
 for dir in "${dirs_with_lint_makefile[@]}"; do
     make -C "$dir" lint || {
-        echo -n "##vso[task.logissue type=error]"
+        echo -n "::error::"
         echo "Failed mypy check in ${dir}."
         retcode=1
     }

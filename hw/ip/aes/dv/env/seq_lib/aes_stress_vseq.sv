@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,11 +13,24 @@ class aes_stress_vseq extends aes_base_vseq;
     `uvm_info(`gfn, $sformatf("\n\n\t ----| STARTING AES MAIN SEQUENCE |----\n %s",
                               cfg.convert2string()), UVM_LOW)
 
-    // generate list of messages //
-    generate_message_queue();
-    // process all messages //
+    // Create one thread such that we can kill all its children without unwanted side effects on the
+    // caller.
+    fork
+      begin
 
-    send_msg_queue(cfg.unbalanced, cfg.read_prob, cfg.write_prob);
+        fork
+          // generate list of messages //
+          generate_message_queue();
+          // start sideload (even if not used)
+          start_sideload_seq();
+        join_any
+        // process all messages //
+        send_msg_queue(cfg.unbalanced, cfg.read_prob, cfg.write_prob);
+
+      end
+    // Kill all children.
+    disable fork;
+    join
 
   endtask : body
 endclass

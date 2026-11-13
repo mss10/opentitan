@@ -1,25 +1,26 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // ------------------- W A R N I N G: A U T O - G E N E R A T E D   C O D E !! -------------------//
 // PLEASE DO NOT HAND-EDIT THIS FILE. IT HAS BEEN AUTO-GENERATED WITH THE FOLLOWING COMMAND:
 //
-// util/topgen.py -t hw/top_earlgrey/data/top_earlgrey.hjson \
-//                -o hw/top_earlgrey/ \
-//                --rnd_cnst_seed 4881560218908238235
+// util/topgen.py -t hw/top_earlgrey/data/top_earlgrey.hjson
+//                -o hw/top_earlgrey/
 
-module chip_earlgrey_asic (
+
+
+module chip_earlgrey_asic #(
+  parameter bit SecRomCtrlDisableScrambling = 1'b0
+) (
   // Dedicated Pads
   inout POR_N, // Manual Pad
+  inout PORA_N, // Manual Pad
   inout USB_P, // Manual Pad
   inout USB_N, // Manual Pad
-  inout CC1, // Manual Pad
-  inout CC2, // Manual Pad
-  inout FLASH_TEST_VOLT, // Manual Pad
-  inout FLASH_TEST_MODE0, // Manual Pad
-  inout FLASH_TEST_MODE1, // Manual Pad
-  inout OTP_EXT_VOLT, // Manual Pad
+  `INOUT_AI CC1, // Manual Pad
+  `INOUT_AI CC2, // Manual Pad
+  inout RRAM_ANALOG, // Manual Pad
   inout SPI_HOST_D0, // Dedicated Pad for spi_host0_sd
   inout SPI_HOST_D1, // Dedicated Pad for spi_host0_sd
   inout SPI_HOST_D2, // Dedicated Pad for spi_host0_sd
@@ -32,14 +33,14 @@ module chip_earlgrey_asic (
   inout SPI_DEV_D3, // Dedicated Pad for spi_device_sd
   inout SPI_DEV_CLK, // Dedicated Pad for spi_device_sck
   inout SPI_DEV_CS_L, // Dedicated Pad for spi_device_csb
-  inout IOR8, // Dedicated Pad for sysrst_ctrl_aon_ec_rst_l
-  inout IOR9, // Dedicated Pad for sysrst_ctrl_aon_flash_wp_l
+  inout IOR8, // Dedicated Pad for sysrst_ctrl_ec_rst_l
+  inout IOR9, // Dedicated Pad for sysrst_ctrl_flash_wp_l
 
   // Muxed Pads
   inout IOA0, // MIO Pad 0
   inout IOA1, // MIO Pad 1
-  inout IOA2, // MIO Pad 2
-  inout IOA3, // MIO Pad 3
+  `INOUT_AO IOA2, // MIO Pad 2
+  `INOUT_AO IOA3, // MIO Pad 3
   inout IOA4, // MIO Pad 4
   inout IOA5, // MIO Pad 5
   inout IOA6, // MIO Pad 6
@@ -92,15 +93,15 @@ module chip_earlgrey_asic (
   // Special Signal Indices //
   ////////////////////////////
 
-  parameter int Tap0PadIdx = 30;
-  parameter int Tap1PadIdx = 27;
-  parameter int Dft0PadIdx = 25;
-  parameter int Dft1PadIdx = 26;
-  parameter int TckPadIdx = 38;
-  parameter int TmsPadIdx = 35;
-  parameter int TrstNPadIdx = 39;
-  parameter int TdiPadIdx = 37;
-  parameter int TdoPadIdx = 36;
+  localparam int Tap0PadIdx = 30;
+  localparam int Tap1PadIdx = 27;
+  localparam int Dft0PadIdx = 40;
+  localparam int Dft1PadIdx = 42;
+  localparam int TckPadIdx = 38;
+  localparam int TmsPadIdx = 35;
+  localparam int TrstNPadIdx = 39;
+  localparam int TdiPadIdx = 37;
+  localparam int TdoPadIdx = 36;
 
   // DFT and Debug signal positions in the pinout.
   localparam pinmux_pkg::target_cfg_t PinmuxTargetCfg = '{
@@ -114,28 +115,17 @@ module chip_earlgrey_asic (
     dft_strap0_idx:    Dft0PadIdx,
     dft_strap1_idx:    Dft1PadIdx,
     // TODO: check whether there is a better way to pass these USB-specific params
-    usb_dp_idx:        DioUsbdevDp,
-    usb_dn_idx:        DioUsbdevDn,
-    usb_dp_pullup_idx: DioUsbdevDpPullup,
-    usb_dn_pullup_idx: DioUsbdevDnPullup,
+    usb_dp_idx:        DioUsbdevUsbDp,
+    usb_dn_idx:        DioUsbdevUsbDn,
+    usb_sense_idx:     MioInUsbdevSense,
     // Pad types for attribute WARL behavior
     dio_pad_type: {
-      BidirOd, // DIO sysrst_ctrl_aon_flash_wp_l
-      BidirTol, // DIO usbdev_rx_enable
-      BidirTol, // DIO usbdev_suspend
-      BidirTol, // DIO usbdev_tx_mode_se
-      BidirTol, // DIO usbdev_dn_pullup
-      BidirTol, // DIO usbdev_dp_pullup
-      BidirTol, // DIO usbdev_se0
       BidirStd, // DIO spi_host0_csb
       BidirStd, // DIO spi_host0_sck
-      BidirTol, // DIO usbdev_sense
       InputStd, // DIO spi_device_csb
       InputStd, // DIO spi_device_sck
-      BidirOd, // DIO sysrst_ctrl_aon_ec_rst_l
-      BidirTol, // DIO usbdev_dn
-      BidirTol, // DIO usbdev_dp
-      BidirTol, // DIO usbdev_d
+      BidirOd, // DIO sysrst_ctrl_flash_wp_l
+      BidirOd, // DIO sysrst_ctrl_ec_rst_l
       BidirStd, // DIO spi_device_sd
       BidirStd, // DIO spi_device_sd
       BidirStd, // DIO spi_device_sd
@@ -143,7 +133,9 @@ module chip_earlgrey_asic (
       BidirStd, // DIO spi_host0_sd
       BidirStd, // DIO spi_host0_sd
       BidirStd, // DIO spi_host0_sd
-      BidirStd  // DIO spi_host0_sd
+      BidirStd, // DIO spi_host0_sd
+      BidirStd, // DIO usbdev_usb_dn
+      BidirStd  // DIO usbdev_usb_dp
     },
     mio_pad_type: {
       BidirOd, // MIO Pad 46
@@ -193,6 +185,74 @@ module chip_earlgrey_asic (
       BidirStd, // MIO Pad 2
       BidirStd, // MIO Pad 1
       BidirStd  // MIO Pad 0
+    },
+    // Pad scan roles
+    dio_scan_role: {
+      scan_role_pkg::DioPadSpiHostCsLScanRole, // DIO spi_host0_csb
+      scan_role_pkg::DioPadSpiHostClkScanRole, // DIO spi_host0_sck
+      scan_role_pkg::DioPadSpiDevCsLScanRole, // DIO spi_device_csb
+      scan_role_pkg::DioPadSpiDevClkScanRole, // DIO spi_device_sck
+      scan_role_pkg::DioPadIor9ScanRole, // DIO sysrst_ctrl_flash_wp_l
+      scan_role_pkg::DioPadIor8ScanRole, // DIO sysrst_ctrl_ec_rst_l
+      scan_role_pkg::DioPadSpiDevD3ScanRole, // DIO spi_device_sd
+      scan_role_pkg::DioPadSpiDevD2ScanRole, // DIO spi_device_sd
+      scan_role_pkg::DioPadSpiDevD1ScanRole, // DIO spi_device_sd
+      scan_role_pkg::DioPadSpiDevD0ScanRole, // DIO spi_device_sd
+      scan_role_pkg::DioPadSpiHostD3ScanRole, // DIO spi_host0_sd
+      scan_role_pkg::DioPadSpiHostD2ScanRole, // DIO spi_host0_sd
+      scan_role_pkg::DioPadSpiHostD1ScanRole, // DIO spi_host0_sd
+      scan_role_pkg::DioPadSpiHostD0ScanRole, // DIO spi_host0_sd
+      NoScan, // DIO usbdev_usb_dn
+      NoScan // DIO usbdev_usb_dp
+    },
+    mio_scan_role: {
+      scan_role_pkg::MioPadIor13ScanRole,
+      scan_role_pkg::MioPadIor12ScanRole,
+      scan_role_pkg::MioPadIor11ScanRole,
+      scan_role_pkg::MioPadIor10ScanRole,
+      scan_role_pkg::MioPadIor7ScanRole,
+      scan_role_pkg::MioPadIor6ScanRole,
+      scan_role_pkg::MioPadIor5ScanRole,
+      scan_role_pkg::MioPadIor4ScanRole,
+      scan_role_pkg::MioPadIor3ScanRole,
+      scan_role_pkg::MioPadIor2ScanRole,
+      scan_role_pkg::MioPadIor1ScanRole,
+      scan_role_pkg::MioPadIor0ScanRole,
+      scan_role_pkg::MioPadIoc12ScanRole,
+      scan_role_pkg::MioPadIoc11ScanRole,
+      scan_role_pkg::MioPadIoc10ScanRole,
+      scan_role_pkg::MioPadIoc9ScanRole,
+      scan_role_pkg::MioPadIoc8ScanRole,
+      scan_role_pkg::MioPadIoc7ScanRole,
+      scan_role_pkg::MioPadIoc6ScanRole,
+      scan_role_pkg::MioPadIoc5ScanRole,
+      scan_role_pkg::MioPadIoc4ScanRole,
+      scan_role_pkg::MioPadIoc3ScanRole,
+      scan_role_pkg::MioPadIoc2ScanRole,
+      scan_role_pkg::MioPadIoc1ScanRole,
+      scan_role_pkg::MioPadIoc0ScanRole,
+      scan_role_pkg::MioPadIob12ScanRole,
+      scan_role_pkg::MioPadIob11ScanRole,
+      scan_role_pkg::MioPadIob10ScanRole,
+      scan_role_pkg::MioPadIob9ScanRole,
+      scan_role_pkg::MioPadIob8ScanRole,
+      scan_role_pkg::MioPadIob7ScanRole,
+      scan_role_pkg::MioPadIob6ScanRole,
+      scan_role_pkg::MioPadIob5ScanRole,
+      scan_role_pkg::MioPadIob4ScanRole,
+      scan_role_pkg::MioPadIob3ScanRole,
+      scan_role_pkg::MioPadIob2ScanRole,
+      scan_role_pkg::MioPadIob1ScanRole,
+      scan_role_pkg::MioPadIob0ScanRole,
+      scan_role_pkg::MioPadIoa8ScanRole,
+      scan_role_pkg::MioPadIoa7ScanRole,
+      scan_role_pkg::MioPadIoa6ScanRole,
+      scan_role_pkg::MioPadIoa5ScanRole,
+      scan_role_pkg::MioPadIoa4ScanRole,
+      scan_role_pkg::MioPadIoa3ScanRole,
+      scan_role_pkg::MioPadIoa2ScanRole,
+      scan_role_pkg::MioPadIoa1ScanRole,
+      scan_role_pkg::MioPadIoa0ScanRole
     }
   };
 
@@ -200,55 +260,65 @@ module chip_earlgrey_asic (
   // Signal definitions //
   ////////////////////////
 
+
   pad_attr_t [pinmux_reg_pkg::NMioPads-1:0] mio_attr;
   pad_attr_t [pinmux_reg_pkg::NDioPads-1:0] dio_attr;
+
   logic [pinmux_reg_pkg::NMioPads-1:0] mio_out;
   logic [pinmux_reg_pkg::NMioPads-1:0] mio_oe;
   logic [pinmux_reg_pkg::NMioPads-1:0] mio_in;
-  logic [pinmux_reg_pkg::NMioPads-1:0] mio_in_raw;
   logic [pinmux_reg_pkg::NDioPads-1:0] dio_out;
   logic [pinmux_reg_pkg::NDioPads-1:0] dio_oe;
   logic [pinmux_reg_pkg::NDioPads-1:0] dio_in;
 
+  logic [pinmux_reg_pkg::NMioPads-1:0] mio_in_raw;
+  logic                         [20:0] dio_in_raw;
+
   logic unused_mio_in_raw;
+  logic unused_dio_in_raw;
   assign unused_mio_in_raw = ^mio_in_raw;
+  assign unused_dio_in_raw = ^dio_in_raw;
 
   // Manual pads
   logic manual_in_por_n, manual_out_por_n, manual_oe_por_n;
+  logic manual_in_pora_n, manual_out_pora_n, manual_oe_pora_n;
   logic manual_in_usb_p, manual_out_usb_p, manual_oe_usb_p;
   logic manual_in_usb_n, manual_out_usb_n, manual_oe_usb_n;
   logic manual_in_cc1, manual_out_cc1, manual_oe_cc1;
   logic manual_in_cc2, manual_out_cc2, manual_oe_cc2;
-  logic manual_in_flash_test_volt, manual_out_flash_test_volt, manual_oe_flash_test_volt;
-  logic manual_in_flash_test_mode0, manual_out_flash_test_mode0, manual_oe_flash_test_mode0;
-  logic manual_in_flash_test_mode1, manual_out_flash_test_mode1, manual_oe_flash_test_mode1;
-  logic manual_in_otp_ext_volt, manual_out_otp_ext_volt, manual_oe_otp_ext_volt;
+  logic manual_in_rram_analog, manual_out_rram_analog, manual_oe_rram_analog;
 
   pad_attr_t manual_attr_por_n;
+  pad_attr_t manual_attr_pora_n;
   pad_attr_t manual_attr_usb_p;
   pad_attr_t manual_attr_usb_n;
   pad_attr_t manual_attr_cc1;
   pad_attr_t manual_attr_cc2;
-  pad_attr_t manual_attr_flash_test_volt;
-  pad_attr_t manual_attr_flash_test_mode0;
-  pad_attr_t manual_attr_flash_test_mode1;
-  pad_attr_t manual_attr_otp_ext_volt;
+  pad_attr_t manual_attr_rram_analog;
 
+  // Power state from AST to USB
+  ast_pkg::ast_pwst_t ast_pwst_h;
+
+  // AST ADC analog inputs and direct analog pad-short outputs.
+  ast_pkg::awire_t ast_adc_a0_a, ast_adc_a1_a;
+  ast_pkg::awire_t ast2pad_t0_a, ast2pad_t1_a;
+  assign ast_adc_a0_a = CC1;
+  assign ast_adc_a1_a = CC2;
+  assign IOA2 = ast2pad_t0_a;
+  assign IOA3 = ast2pad_t1_a;
 
   //////////////////////
   // Padring Instance //
   //////////////////////
 
-  ast_pkg::ast_clks_t ast_base_clks;
-
-  // AST signals needed in padring
-  logic scan_rst_n;
-  lc_ctrl_pkg::lc_tx_t scanmode;
+  // AST signals needed in padring - must be decleared here
+  logic padring_scan_clk;
+  prim_mubi_pkg::mubi4_t scanmode;
 
   padring #(
     // Padring specific counts may differ from pinmux config due
     // to custom, stubbed or added pads.
-    .NDioPads(23),
+    .NDioPads(21),
     .NMioPads(47),
     .PhysicalPads(1),
     .NIoBanks(int'(IoBankCount)),
@@ -267,14 +337,12 @@ module chip_earlgrey_asic (
       scan_role_pkg::DioPadSpiHostD2ScanRole,
       scan_role_pkg::DioPadSpiHostD1ScanRole,
       scan_role_pkg::DioPadSpiHostD0ScanRole,
-      scan_role_pkg::DioPadOtpExtVoltScanRole,
-      scan_role_pkg::DioPadFlashTestMode1ScanRole,
-      scan_role_pkg::DioPadFlashTestMode0ScanRole,
-      scan_role_pkg::DioPadFlashTestVoltScanRole,
+      scan_role_pkg::DioPadRramAnalogScanRole,
       scan_role_pkg::DioPadCc2ScanRole,
       scan_role_pkg::DioPadCc1ScanRole,
       scan_role_pkg::DioPadUsbNScanRole,
       scan_role_pkg::DioPadUsbPScanRole,
+      scan_role_pkg::DioPadPoraNScanRole,
       scan_role_pkg::DioPadPorNScanRole
     }),
     .MioScanRole ({
@@ -326,6 +394,78 @@ module chip_earlgrey_asic (
       scan_role_pkg::MioPadIoa1ScanRole,
       scan_role_pkg::MioPadIoa0ScanRole
     }),
+    .DioPadOrient ({
+      pad_orient_pkg::DioPadIor9PadOrient,
+      pad_orient_pkg::DioPadIor8PadOrient,
+      pad_orient_pkg::DioPadSpiDevCsLPadOrient,
+      pad_orient_pkg::DioPadSpiDevClkPadOrient,
+      pad_orient_pkg::DioPadSpiDevD3PadOrient,
+      pad_orient_pkg::DioPadSpiDevD2PadOrient,
+      pad_orient_pkg::DioPadSpiDevD1PadOrient,
+      pad_orient_pkg::DioPadSpiDevD0PadOrient,
+      pad_orient_pkg::DioPadSpiHostCsLPadOrient,
+      pad_orient_pkg::DioPadSpiHostClkPadOrient,
+      pad_orient_pkg::DioPadSpiHostD3PadOrient,
+      pad_orient_pkg::DioPadSpiHostD2PadOrient,
+      pad_orient_pkg::DioPadSpiHostD1PadOrient,
+      pad_orient_pkg::DioPadSpiHostD0PadOrient,
+      pad_orient_pkg::DioPadRramAnalogPadOrient,
+      pad_orient_pkg::DioPadCc2PadOrient,
+      pad_orient_pkg::DioPadCc1PadOrient,
+      pad_orient_pkg::DioPadUsbNPadOrient,
+      pad_orient_pkg::DioPadUsbPPadOrient,
+      pad_orient_pkg::DioPadPoraNPadOrient,
+      pad_orient_pkg::DioPadPorNPadOrient
+    }),
+    .MioPadOrient ({
+      pad_orient_pkg::MioPadIor13PadOrient,
+      pad_orient_pkg::MioPadIor12PadOrient,
+      pad_orient_pkg::MioPadIor11PadOrient,
+      pad_orient_pkg::MioPadIor10PadOrient,
+      pad_orient_pkg::MioPadIor7PadOrient,
+      pad_orient_pkg::MioPadIor6PadOrient,
+      pad_orient_pkg::MioPadIor5PadOrient,
+      pad_orient_pkg::MioPadIor4PadOrient,
+      pad_orient_pkg::MioPadIor3PadOrient,
+      pad_orient_pkg::MioPadIor2PadOrient,
+      pad_orient_pkg::MioPadIor1PadOrient,
+      pad_orient_pkg::MioPadIor0PadOrient,
+      pad_orient_pkg::MioPadIoc12PadOrient,
+      pad_orient_pkg::MioPadIoc11PadOrient,
+      pad_orient_pkg::MioPadIoc10PadOrient,
+      pad_orient_pkg::MioPadIoc9PadOrient,
+      pad_orient_pkg::MioPadIoc8PadOrient,
+      pad_orient_pkg::MioPadIoc7PadOrient,
+      pad_orient_pkg::MioPadIoc6PadOrient,
+      pad_orient_pkg::MioPadIoc5PadOrient,
+      pad_orient_pkg::MioPadIoc4PadOrient,
+      pad_orient_pkg::MioPadIoc3PadOrient,
+      pad_orient_pkg::MioPadIoc2PadOrient,
+      pad_orient_pkg::MioPadIoc1PadOrient,
+      pad_orient_pkg::MioPadIoc0PadOrient,
+      pad_orient_pkg::MioPadIob12PadOrient,
+      pad_orient_pkg::MioPadIob11PadOrient,
+      pad_orient_pkg::MioPadIob10PadOrient,
+      pad_orient_pkg::MioPadIob9PadOrient,
+      pad_orient_pkg::MioPadIob8PadOrient,
+      pad_orient_pkg::MioPadIob7PadOrient,
+      pad_orient_pkg::MioPadIob6PadOrient,
+      pad_orient_pkg::MioPadIob5PadOrient,
+      pad_orient_pkg::MioPadIob4PadOrient,
+      pad_orient_pkg::MioPadIob3PadOrient,
+      pad_orient_pkg::MioPadIob2PadOrient,
+      pad_orient_pkg::MioPadIob1PadOrient,
+      pad_orient_pkg::MioPadIob0PadOrient,
+      pad_orient_pkg::MioPadIoa8PadOrient,
+      pad_orient_pkg::MioPadIoa7PadOrient,
+      pad_orient_pkg::MioPadIoa6PadOrient,
+      pad_orient_pkg::MioPadIoa5PadOrient,
+      pad_orient_pkg::MioPadIoa4PadOrient,
+      pad_orient_pkg::MioPadIoa3PadOrient,
+      pad_orient_pkg::MioPadIoa2PadOrient,
+      pad_orient_pkg::MioPadIoa1PadOrient,
+      pad_orient_pkg::MioPadIoa0PadOrient
+    }),
     .DioPadBank ({
       IoBankVcc, // IOR9
       IoBankVcc, // IOR8
@@ -341,14 +481,12 @@ module chip_earlgrey_asic (
       IoBankVioa, // SPI_HOST_D2
       IoBankVioa, // SPI_HOST_D1
       IoBankVioa, // SPI_HOST_D0
-      IoBankVcc, // OTP_EXT_VOLT
-      IoBankVcc, // FLASH_TEST_MODE1
-      IoBankVcc, // FLASH_TEST_MODE0
-      IoBankVcc, // FLASH_TEST_VOLT
+      IoBankVcc, // RRAM_ANALOG
       IoBankAvcc, // CC2
       IoBankAvcc, // CC1
       IoBankVcc, // USB_N
       IoBankVcc, // USB_P
+      IoBankVioa, // PORA_N
       IoBankVcc  // POR_N
     }),
     .MioPadBank ({
@@ -415,14 +553,12 @@ module chip_earlgrey_asic (
       BidirStd, // SPI_HOST_D2
       BidirStd, // SPI_HOST_D1
       BidirStd, // SPI_HOST_D0
-      AnalogIn1, // OTP_EXT_VOLT
-      InputStd, // FLASH_TEST_MODE1
-      InputStd, // FLASH_TEST_MODE0
-      AnalogIn0, // FLASH_TEST_VOLT
-      InputStd, // CC2
-      InputStd, // CC1
-      BidirTol, // USB_N
-      BidirTol, // USB_P
+      AnalogIn0, // RRAM_ANALOG
+      BidirTol, // CC2
+      BidirTol, // CC1
+      DualBidirTol, // USB_N
+      DualBidirTol, // USB_P
+      InputStd, // PORA_N
       InputStd  // POR_N
     }),
     .MioPadType ({
@@ -475,10 +611,12 @@ module chip_earlgrey_asic (
       BidirStd  // IOA0
     })
   ) u_padring (
-  // This is only used for scan and DFT purposes
-    .clk_scan_i   ( ast_base_clks.clk_sys ),
-    .scanmode_i   ( scanmode              ),
-    .dio_in_raw_o ( ),
+    // This is only used for scan and DFT purposes
+    .clk_scan_i(padring_scan_clk),
+    .scanmode_i(scanmode),
+
+    .dio_in_raw_o (dio_in_raw ),
+
     // Chip IOs
     .dio_pad_io ({
       IOR9,
@@ -495,14 +633,20 @@ module chip_earlgrey_asic (
       SPI_HOST_D2,
       SPI_HOST_D1,
       SPI_HOST_D0,
-      OTP_EXT_VOLT,
-      FLASH_TEST_MODE1,
-      FLASH_TEST_MODE0,
-      FLASH_TEST_VOLT,
+      RRAM_ANALOG,
+`ifdef ANALOGSIM
+      '0,
+`else
       CC2,
+`endif
+`ifdef ANALOGSIM
+      '0,
+`else
       CC1,
+`endif
       USB_N,
       USB_P,
+      PORA_N,
       POR_N
     }),
 
@@ -550,111 +694,111 @@ module chip_earlgrey_asic (
       IOA6,
       IOA5,
       IOA4,
+`ifdef ANALOGSIM
+      '0,
+`else
       IOA3,
+`endif
+`ifdef ANALOGSIM
+      '0,
+`else
       IOA2,
+`endif
       IOA1,
       IOA0
     }),
 
     // Core-facing
     .dio_in_o ({
-        dio_in[DioSysrstCtrlAonFlashWpL],
-        dio_in[DioSysrstCtrlAonEcRstL],
+        dio_in[DioSysrstCtrlFlashWpL],
+        dio_in[DioSysrstCtrlEcRstL],
         dio_in[DioSpiDeviceCsb],
         dio_in[DioSpiDeviceSck],
         dio_in[DioSpiDeviceSd3],
         dio_in[DioSpiDeviceSd2],
         dio_in[DioSpiDeviceSd1],
         dio_in[DioSpiDeviceSd0],
-        dio_in[DioSpiHost0Csb],
+        dio_in[DioSpiHost0Csb0],
         dio_in[DioSpiHost0Sck],
         dio_in[DioSpiHost0Sd3],
         dio_in[DioSpiHost0Sd2],
         dio_in[DioSpiHost0Sd1],
         dio_in[DioSpiHost0Sd0],
-        manual_in_otp_ext_volt,
-        manual_in_flash_test_mode1,
-        manual_in_flash_test_mode0,
-        manual_in_flash_test_volt,
+        manual_in_rram_analog,
         manual_in_cc2,
         manual_in_cc1,
         manual_in_usb_n,
         manual_in_usb_p,
+        manual_in_pora_n,
         manual_in_por_n
       }),
     .dio_out_i ({
-        dio_out[DioSysrstCtrlAonFlashWpL],
-        dio_out[DioSysrstCtrlAonEcRstL],
+        dio_out[DioSysrstCtrlFlashWpL],
+        dio_out[DioSysrstCtrlEcRstL],
         dio_out[DioSpiDeviceCsb],
         dio_out[DioSpiDeviceSck],
         dio_out[DioSpiDeviceSd3],
         dio_out[DioSpiDeviceSd2],
         dio_out[DioSpiDeviceSd1],
         dio_out[DioSpiDeviceSd0],
-        dio_out[DioSpiHost0Csb],
+        dio_out[DioSpiHost0Csb0],
         dio_out[DioSpiHost0Sck],
         dio_out[DioSpiHost0Sd3],
         dio_out[DioSpiHost0Sd2],
         dio_out[DioSpiHost0Sd1],
         dio_out[DioSpiHost0Sd0],
-        manual_out_otp_ext_volt,
-        manual_out_flash_test_mode1,
-        manual_out_flash_test_mode0,
-        manual_out_flash_test_volt,
+        manual_out_rram_analog,
         manual_out_cc2,
         manual_out_cc1,
         manual_out_usb_n,
         manual_out_usb_p,
+        manual_out_pora_n,
         manual_out_por_n
       }),
     .dio_oe_i ({
-        dio_oe[DioSysrstCtrlAonFlashWpL],
-        dio_oe[DioSysrstCtrlAonEcRstL],
+        dio_oe[DioSysrstCtrlFlashWpL],
+        dio_oe[DioSysrstCtrlEcRstL],
         dio_oe[DioSpiDeviceCsb],
         dio_oe[DioSpiDeviceSck],
         dio_oe[DioSpiDeviceSd3],
         dio_oe[DioSpiDeviceSd2],
         dio_oe[DioSpiDeviceSd1],
         dio_oe[DioSpiDeviceSd0],
-        dio_oe[DioSpiHost0Csb],
+        dio_oe[DioSpiHost0Csb0],
         dio_oe[DioSpiHost0Sck],
         dio_oe[DioSpiHost0Sd3],
         dio_oe[DioSpiHost0Sd2],
         dio_oe[DioSpiHost0Sd1],
         dio_oe[DioSpiHost0Sd0],
-        manual_oe_otp_ext_volt,
-        manual_oe_flash_test_mode1,
-        manual_oe_flash_test_mode0,
-        manual_oe_flash_test_volt,
+        manual_oe_rram_analog,
         manual_oe_cc2,
         manual_oe_cc1,
         manual_oe_usb_n,
         manual_oe_usb_p,
+        manual_oe_pora_n,
         manual_oe_por_n
       }),
     .dio_attr_i ({
-        dio_attr[DioSysrstCtrlAonFlashWpL],
-        dio_attr[DioSysrstCtrlAonEcRstL],
+        dio_attr[DioSysrstCtrlFlashWpL],
+        dio_attr[DioSysrstCtrlEcRstL],
         dio_attr[DioSpiDeviceCsb],
         dio_attr[DioSpiDeviceSck],
         dio_attr[DioSpiDeviceSd3],
         dio_attr[DioSpiDeviceSd2],
         dio_attr[DioSpiDeviceSd1],
         dio_attr[DioSpiDeviceSd0],
-        dio_attr[DioSpiHost0Csb],
+        dio_attr[DioSpiHost0Csb0],
         dio_attr[DioSpiHost0Sck],
         dio_attr[DioSpiHost0Sd3],
         dio_attr[DioSpiHost0Sd2],
         dio_attr[DioSpiHost0Sd1],
         dio_attr[DioSpiHost0Sd0],
-        manual_attr_otp_ext_volt,
-        manual_attr_flash_test_mode1,
-        manual_attr_flash_test_mode0,
-        manual_attr_flash_test_volt,
+        manual_attr_rram_analog,
         manual_attr_cc2,
         manual_attr_cc1,
         manual_attr_usb_n,
         manual_attr_usb_p,
+        manual_attr_pora_n,
         manual_attr_por_n
       }),
 
@@ -666,291 +810,59 @@ module chip_earlgrey_asic (
   );
 
 
+  ////////////////////////
+  // AST related wiring //
+  ////////////////////////
 
+  logic clk_ast_ext;
+  prim_mubi_pkg::mubi4_t cg_en_ast_ext;
+  // This clock gate is never used inside the top. It is a topgen artifact of an external clock.
+  assign cg_en_ast_ext = prim_mubi_pkg::MuBi4False;
 
-
-  //////////////////////////////////
-  // AST - Common for all targets //
-  //////////////////////////////////
-
-  // pwrmgr interface
-  pwrmgr_pkg::pwr_ast_req_t base_ast_pwr;
-  pwrmgr_pkg::pwr_ast_rsp_t ast_base_pwr;
-
-  // assorted ast status
-  ast_pkg::ast_pwst_t ast_pwst;
-  ast_pkg::ast_pwst_t ast_pwst_h;
-
-  // TLUL interface
-  tlul_pkg::tl_h2d_t base_ast_bus;
-  tlul_pkg::tl_d2h_t ast_base_bus;
-
-  assign ast_base_pwr.main_pok = ast_pwst.main_pok;
-
-  // synchronization clocks / rests
-  clkmgr_pkg::clkmgr_out_t clkmgr_aon_clocks;
-  rstmgr_pkg::rstmgr_out_t rstmgr_aon_resets;
-
-  // external clock
-  logic ext_clk;
-
-  // monitored clock
-  logic sck_monitor;
-
-  // otp power sequence
-  otp_ctrl_pkg::otp_ast_req_t otp_ctrl_otp_ast_pwr_seq;
-  otp_ctrl_pkg::otp_ast_rsp_t otp_ctrl_otp_ast_pwr_seq_h;
-
-  logic usb_ref_pulse;
-  logic usb_ref_val;
-
-  // adc
-  ast_pkg::adc_ast_req_t adc_req;
-  ast_pkg::adc_ast_rsp_t adc_rsp;
-
-  // entropy source interface
-  // The entropy source pacakge definition should eventually be moved to es
-  entropy_src_pkg::entropy_src_rng_req_t es_rng_req;
-  entropy_src_pkg::entropy_src_rng_rsp_t es_rng_rsp;
-  logic es_rng_fips;
-
-  // entropy distribution network
-  edn_pkg::edn_req_t ast_edn_edn_req;
-  edn_pkg::edn_rsp_t ast_edn_edn_rsp;
-
-  // alerts interface
-  ast_pkg::ast_alert_rsp_t ast_alert_rsp;
-  ast_pkg::ast_alert_req_t ast_alert_req;
-
-  // Flash connections
-  lc_ctrl_pkg::lc_tx_t flash_bist_enable;
-  logic flash_power_down_h;
-  logic flash_power_ready_h;
-
-  // Life cycle clock bypass req/ack
-  lc_ctrl_pkg::lc_tx_t ast_clk_byp_req;
-  lc_ctrl_pkg::lc_tx_t ast_clk_byp_ack;
-
-  // DFT connections
-  logic scan_en;
-  lc_ctrl_pkg::lc_tx_t dft_en;
-  pinmux_pkg::dft_strap_test_req_t dft_strap_test;
+  ast_pkg::clks_osc_byp_t clks_osc_byp;
 
   // Debug connections
-  logic [ast_pkg::Ast2PadOutWidth-1:0] ast2pinmux;
-  logic [ast_pkg::Pad2AstInWidth-1:0] pad2ast;
-
-  // Jitter enable
-  logic jen;
-
-  // reset domain connections
-  import rstmgr_pkg::PowerDomains;
-  import rstmgr_pkg::DomainAonSel;
-  import rstmgr_pkg::Domain0Sel;
-
-  // Memory configuration connections
-  ast_pkg::spm_rm_t ast_ram_1p_cfg;
-  ast_pkg::spm_rm_t ast_rf_cfg;
-  ast_pkg::spm_rm_t ast_rom_cfg;
-  ast_pkg::dpm_rm_t ast_ram_2p_fcfg;
-  ast_pkg::dpm_rm_t ast_ram_2p_lcfg;
-
-  prim_ram_1p_pkg::ram_1p_cfg_t ram_1p_cfg;
-  prim_ram_2p_pkg::ram_2p_cfg_t ram_2p_cfg;
-  prim_rom_pkg::rom_cfg_t rom_cfg;
-
-  // conversion from ast structure to memory centric structures
-  assign ram_1p_cfg = '{
-    ram_cfg: '{
-                cfg_en: ast_ram_1p_cfg.marg_en,
-                cfg:    ast_ram_1p_cfg.marg
-              },
-    rf_cfg:  '{
-                cfg_en: ast_rf_cfg.marg_en,
-                cfg:    ast_rf_cfg.marg
-              }
-  };
-
-  assign ram_2p_cfg = '{
-    a_ram_fcfg: '{
-                   cfg_en: ast_ram_2p_fcfg.marg_en_a,
-                   cfg:    ast_ram_2p_fcfg.marg_a
-                 },
-    a_ram_lcfg: '{
-                   cfg_en: ast_ram_2p_lcfg.marg_en_a,
-                   cfg:    ast_ram_2p_lcfg.marg_a
-                 },
-    b_ram_fcfg: '{
-                   cfg_en: ast_ram_2p_fcfg.marg_en_b,
-                   cfg:    ast_ram_2p_fcfg.marg_b
-                 },
-    b_ram_lcfg: '{
-                   cfg_en: ast_ram_2p_lcfg.marg_en_b,
-                   cfg:    ast_ram_2p_lcfg.marg_b
-                 }
-  };
-
-  assign rom_cfg = '{
-    cfg_en: ast_rom_cfg.marg_en,
-    cfg: ast_rom_cfg.marg
-  };
-
-
-  //////////////////////////////////
-  // AST - Custom for targets     //
-  //////////////////////////////////
-
-
-
-  logic [ast_pkg::UsbCalibWidth-1:0] usb_io_pu_cal;
+  logic [ast_pkg::Pad2AstInWidth-1:0] padmux2ast;
 
   // external clock comes in at a fixed position
-  assign ext_clk = mio_in_raw[MioPadIoc6];
+  assign clk_ast_ext = mio_in_raw[MioPadIoc6];
 
-  assign pad2ast = {
-                     mio_in_raw[MioPadIoc3],
-                     mio_in_raw[MioPadIob8],
-                     mio_in_raw[MioPadIob7],
-                     mio_in_raw[MioPadIob2],
-                     mio_in_raw[MioPadIob1],
-                     mio_in_raw[MioPadIob0]
-                   };
+  // Bypass clocks are irrelevant for asic
+  assign clks_osc_byp = '0;
 
-  // AST does not use all clocks / resets forwarded to it
-  logic unused_slow_clk_en;
-  assign unused_slow_clk_en = base_ast_pwr.slow_clk_en;
-
-  logic unused_pwr_clamp;
-  assign unused_pwr_clamp = base_ast_pwr.pwr_clamp;
-
-  ast_pkg::ast_dif_t flash_alert;
-  ast_pkg::ast_dif_t otp_alert;
-  logic ast_init_done;
+  // Raw pad signals required by the ast
+  assign padmux2ast = `PAD2AST_WIRES ;
 
 
-  ast #(
-    .EntropyStreams(ast_pkg::EntropyStreams),
-    .AdcChannels(ast_pkg::AdcChannels),
-    .AdcDataWidth(ast_pkg::AdcDataWidth),
-    .UsbCalibWidth(ast_pkg::UsbCalibWidth),
-    .Ast2PadOutWidth(ast_pkg::Ast2PadOutWidth),
-    .Pad2AstInWidth(ast_pkg::Pad2AstInWidth)
-  ) u_ast (
-    // external POR
-    .por_ni                ( manual_in_por_n ),
+  // Tie-off supply voltage test signals
+  ast_pkg::ast_vx_supp_t ast_vx_supp;
+  assign ast_vx_supp = '{
+    vcc:    1'b1,
+    vcaon:  1'b1,
+    vcmain: 1'b1,
+    vioa:   1'b1,
+    viob:   1'b1
+  };
 
-    // USB IO Pull-up Calibration Setting
-    .usb_io_pu_cal_o       ( usb_io_pu_cal ),
+  // flash observation (only for englishbreakfast)
+  logic [7:0] flash_obs;
+  assign flash_obs = '0;
 
-    // adc
-    .adc_a0_ai             ( CC1 ),
-    .adc_a1_ai             ( CC2 ),
+  // Tie-off observation signals
+  ast_pkg::ast_obs_bus_t ast_obs;
+  logic usb_diff_rx_obs;
+  assign ast_obs = '{
+    fla_obs: flash_obs,
+    otp_obs: '0,
+    otm_obs: '0,
+    usb_obs: usb_diff_rx_obs
+  };
 
-    // Direct short to PAD
-    .pad2ast_t0_ai         ( IOA4 ),
-    .pad2ast_t1_ai         ( IOA5 ),
-    .ast2pad_t0_ao         ( IOA2 ),
-    .ast2pad_t1_ao         ( IOA3 ),
-    // clocks and resets supplied for detection
-    .sns_clks_i            ( clkmgr_aon_clocks    ),
-    .sns_rsts_i            ( rstmgr_aon_resets    ),
-    .sns_spi_ext_clk_i     ( sck_monitor          ),
-    // tlul
-    .tl_i                  ( base_ast_bus ),
-    .tl_o                  ( ast_base_bus ),
-    // init done indication
-    .ast_init_done_o       ( ast_init_done ),
-    // buffered clocks & resets
-    .clk_ast_tlul_i (clkmgr_aon_clocks.clk_io_div4_secure),
-    .clk_ast_adc_i (clkmgr_aon_clocks.clk_aon_secure),
-    .clk_ast_alert_i (clkmgr_aon_clocks.clk_io_div4_secure),
-    .clk_ast_es_i (clkmgr_aon_clocks.clk_main_secure),
-    .clk_ast_rng_i (clkmgr_aon_clocks.clk_main_secure),
-    .clk_ast_usb_i (clkmgr_aon_clocks.clk_usb_secure),
-    .rst_ast_tlul_ni (rstmgr_aon_resets.rst_lc_io_div4_n[rstmgr_pkg::Domain0Sel]),
-    .rst_ast_adc_ni (rstmgr_aon_resets.rst_sys_aon_n[rstmgr_pkg::Domain0Sel]),
-    .rst_ast_alert_ni (rstmgr_aon_resets.rst_lc_io_div4_n[rstmgr_pkg::Domain0Sel]),
-    .rst_ast_es_ni (rstmgr_aon_resets.rst_sys_n[rstmgr_pkg::Domain0Sel]),
-    .rst_ast_rng_ni (rstmgr_aon_resets.rst_sys_n[rstmgr_pkg::Domain0Sel]),
-    .rst_ast_usb_ni (rstmgr_aon_resets.rst_usbif_n[rstmgr_pkg::Domain0Sel]),
-    .clk_ast_ext_i         ( ext_clk ),
-
-    // pok test for FPGA
-    .vcc_supp_i            ( 1'b1 ),
-    .vcaon_supp_i          ( 1'b1 ),
-    .vcmain_supp_i         ( 1'b1 ),
-    .vioa_supp_i           ( 1'b1 ),
-    .viob_supp_i           ( 1'b1 ),
-    // pok
-    .ast_pwst_o            ( ast_pwst ),
-    .ast_pwst_h_o          ( ast_pwst_h ),
-    // main regulator
-    .main_env_iso_en_i     ( base_ast_pwr.pwr_clamp_env ),
-    .main_pd_ni            ( base_ast_pwr.main_pd_n ),
-    // pdm control (flash)/otp
-    .flash_power_down_h_o  ( flash_power_down_h ),
-    .flash_power_ready_h_o ( flash_power_ready_h ),
-    .otp_power_seq_i       ( otp_ctrl_otp_ast_pwr_seq ),
-    .otp_power_seq_h_o     ( otp_ctrl_otp_ast_pwr_seq_h ),
-    // system source clock
-    .clk_src_sys_en_i      ( base_ast_pwr.core_clk_en ),
-    // need to add function in clkmgr
-    .clk_src_sys_jen_i     ( jen ),
-    .clk_src_sys_o         ( ast_base_clks.clk_sys  ),
-    .clk_src_sys_val_o     ( ast_base_pwr.core_clk_val ),
-    // aon source clock
-    .clk_src_aon_o         ( ast_base_clks.clk_aon ),
-    .clk_src_aon_val_o     ( ast_base_pwr.slow_clk_val ),
-    // io source clock
-    .clk_src_io_en_i       ( base_ast_pwr.io_clk_en ),
-    .clk_src_io_o          ( ast_base_clks.clk_io ),
-    .clk_src_io_val_o      ( ast_base_pwr.io_clk_val ),
-    // usb source clock
-    .usb_ref_pulse_i       ( usb_ref_pulse ),
-    .usb_ref_val_i         ( usb_ref_val ),
-    .clk_src_usb_en_i      ( base_ast_pwr.usb_clk_en ),
-    .clk_src_usb_o         ( ast_base_clks.clk_usb ),
-    .clk_src_usb_val_o     ( ast_base_pwr.usb_clk_val ),
-    // adc
-    .adc_pd_i              ( adc_req.pd ),
-    .adc_chnsel_i          ( adc_req.channel_sel ),
-    .adc_d_o               ( adc_rsp.data ),
-    .adc_d_val_o           ( adc_rsp.data_valid ),
-    // rng
-    .rng_en_i              ( es_rng_req.rng_enable ),
-    .rng_fips_i            ( es_rng_fips ),
-    .rng_val_o             ( es_rng_rsp.rng_valid ),
-    .rng_b_o               ( es_rng_rsp.rng_b ),
-    // entropy
-    .entropy_rsp_i         ( ast_edn_edn_rsp ),
-    .entropy_req_o         ( ast_edn_edn_req ),
-    // alerts
-    .fla_alert_src_i       ( flash_alert    ),
-    .otp_alert_src_i       ( otp_alert      ),
-    .alert_rsp_i           ( ast_alert_rsp  ),
-    .alert_req_o           ( ast_alert_req  ),
-    // dft
-    .dft_strap_test_i      ( dft_strap_test   ),
-    .lc_dft_en_i           ( dft_en           ),
-    // pinmux related
-    .padmux2ast_i          ( pad2ast    ),
-    .ast2padmux_o          ( ast2pinmux ),
-    .lc_clk_byp_req_i      ( ast_clk_byp_req   ),
-    .lc_clk_byp_ack_o      ( ast_clk_byp_ack   ),
-    .flash_bist_en_o       ( flash_bist_enable ),
-    // Memory configuration connections
-    .dpram_rmf_o           ( ast_ram_2p_fcfg ),
-    .dpram_rml_o           ( ast_ram_2p_lcfg ),
-    .spram_rm_o            ( ast_ram_1p_cfg  ),
-    .sprgf_rm_o            ( ast_rf_cfg      ),
-    .sprom_rm_o            ( ast_rom_cfg     ),
-    // scan
-    .dft_scan_md_o         ( scanmode ),
-    .scan_shift_en_o       ( scan_en ),
-    .scan_reset_no         ( scan_rst_n )
-  );
-
-
+  // Unused AST power states
+  logic unused_ast_pwst_h;
+  assign unused_ast_pwst_h = ^{ast_pwst_h.vcc_pok,
+                               ast_pwst_h.main_pok,
+                               ast_pwst_h.io_pok};
 
 
   //////////////////////////////////
@@ -959,38 +871,43 @@ module chip_earlgrey_asic (
 
   assign manual_out_por_n = 1'b0;
   assign manual_oe_por_n = 1'b0;
+  assign manual_out_pora_n = 1'b0;
+  assign manual_oe_pora_n = 1'b0;
 
   assign manual_out_cc1 = 1'b0;
   assign manual_oe_cc1 = 1'b0;
   assign manual_out_cc2 = 1'b0;
   assign manual_oe_cc2 = 1'b0;
 
-  assign manual_out_flash_test_mode0 = 1'b0;
-  assign manual_oe_flash_test_mode0 = 1'b0;
-  assign manual_out_flash_test_mode1 = 1'b0;
-  assign manual_oe_flash_test_mode1 = 1'b0;
-  assign manual_out_flash_test_volt = 1'b0;
-  assign manual_oe_flash_test_volt = 1'b0;
-  assign manual_out_otp_ext_volt = 1'b0;
-  assign manual_oe_otp_ext_volt = 1'b0;
+  assign manual_out_rram_analog = 1'b0;
+  assign manual_oe_rram_analog = 1'b0;
 
-  // These pad attributes currently tied off permanently (these are all input-only pads).
-  assign manual_attr_por_n = '0;
-  assign manual_attr_cc1 = '0;
-  assign manual_attr_cc2 = '0;
-  assign manual_attr_flash_test_mode0 = '0;
-  assign manual_attr_flash_test_mode1 = '0;
-  assign manual_attr_flash_test_volt = '0;
-  assign manual_attr_otp_ext_volt = '0;
+  // Enable schmitt trigger on the POR pads for better signal integrity.
+  assign manual_attr_por_n  = '{schmitt_en: 1'b1, pull_en: 1'b1, pull_select: 1'b1, default: '0};
+  assign manual_attr_pora_n = '{schmitt_en: 1'b1, pull_en: 1'b1, pull_select: 1'b1, default: '0};
+
+  // These pad attributes are controlled through sensor_ctrl.  Update the description of
+  // `MANUAL_PAD_ATTR` in `sensor_ctrl.hjson` when you change or extend the mapping below.
+  prim_pad_wrapper_pkg::pad_attr_t [3:0] sensor_ctrl_manual_pad_attr;
+  assign manual_attr_cc1 = sensor_ctrl_manual_pad_attr[0];
+  assign manual_attr_cc2 = sensor_ctrl_manual_pad_attr[1];
+
+  // Indices 2 and 3 used to map to FLASH_TEST_MODE0/1, which no longer exist
+  // now that flash_ctrl has been removed from this top.
+  logic unused_sensor_ctrl_manual_pad_attr;
+  assign unused_sensor_ctrl_manual_pad_attr = ^{
+    sensor_ctrl_manual_pad_attr[2],
+    sensor_ctrl_manual_pad_attr[3]
+  };
+
+  // These pad attributes are currently tied off permanently (these are supply pads).
+  assign manual_attr_rram_analog = '0;
 
   logic unused_manual_sigs;
   assign unused_manual_sigs = ^{
     manual_in_cc2,
     manual_in_cc1,
-    manual_in_flash_test_volt,
-    manual_in_flash_test_mode0,
-    manual_in_flash_test_mode1,
-    manual_in_otp_ext_volt
+    manual_in_rram_analog
   };
 
   ///////////////////////////////
@@ -999,163 +916,102 @@ module chip_earlgrey_asic (
 
   // TODO: generalize this USB mux code and align with other tops.
 
-  // Connect the DP pad
-  assign dio_in[DioUsbdevDp] = manual_in_usb_p;
-  assign manual_out_usb_p = dio_out[DioUsbdevDp];
-  assign manual_oe_usb_p = dio_oe[DioUsbdevDp];
-  assign manual_attr_usb_p = dio_attr[DioUsbdevDp];
+  // Connect the D+ pad
+  // Note that we use two pads in parallel for the D+ channel to meet electrical specifications.
+  assign dio_in[DioUsbdevUsbDp] = manual_in_usb_p;
+  assign manual_out_usb_p = dio_out[DioUsbdevUsbDp];
+  assign manual_oe_usb_p = dio_oe[DioUsbdevUsbDp];
+  assign manual_attr_usb_p = dio_attr[DioUsbdevUsbDp];
 
-  // Connect the DN pad
-  assign dio_in[DioUsbdevDn] = manual_in_usb_n;
-  assign manual_out_usb_n = dio_out[DioUsbdevDn];
-  assign manual_oe_usb_n = dio_oe[DioUsbdevDn];
-  assign manual_attr_usb_n = dio_attr[DioUsbdevDn];
+  // Connect the D- pads
+  // Note that we use two pads in parallel for the D- channel to meet electrical specifications.
+  assign dio_in[DioUsbdevUsbDn] = manual_in_usb_n;
+  assign manual_out_usb_n = dio_out[DioUsbdevUsbDn];
+  assign manual_oe_usb_n = dio_oe[DioUsbdevUsbDn];
+  assign manual_attr_usb_n = dio_attr[DioUsbdevUsbDn];
 
-  // Pullups
-  logic usb_pullup_p_en, usb_pullup_n_en;
-  assign usb_pullup_p_en = dio_out[DioUsbdevDpPullup];
-  assign usb_pullup_n_en = dio_out[DioUsbdevDnPullup];
+  logic usb_rx_d;
 
+  // Pullups and differential receiver enable
+  logic usb_dp_pullup_en, usb_dn_pullup_en;
   logic usb_rx_enable;
-  assign usb_rx_enable = dio_out[DioUsbdevRxEnable];
+
+  logic [ast_pkg::UsbCalibWidth-1:0] usb_io_pu_cal;
 
   prim_usb_diff_rx #(
     .CalibW(ast_pkg::UsbCalibWidth)
   ) u_prim_usb_diff_rx (
-    .input_pi      ( USB_P                 ),
-    .input_ni      ( USB_N                 ),
-    .input_en_i    ( usb_rx_enable         ),
-    .core_pok_h_i  ( ast_pwst_h.aon_pok    ),
-    .pullup_p_en_i ( usb_pullup_p_en       ),
-    .pullup_n_en_i ( usb_pullup_n_en       ),
-    .calibration_i ( usb_io_pu_cal         ),
-    .input_o       ( dio_in[DioUsbdevD]    )
+    .input_pi         (USB_P             ),
+    .input_ni         (USB_N             ),
+    .input_en_i       (usb_rx_enable     ),
+    .core_pok_h_i     (ast_pwst_h.aon_pok),
+    .pullup_p_en_i    (usb_dp_pullup_en  ),
+    .pullup_n_en_i    (usb_dn_pullup_en  ),
+    .calibration_i    (usb_io_pu_cal     ),
+    .usb_diff_rx_obs_o(usb_diff_rx_obs   ),
+    .input_o          (usb_rx_d          )
   );
 
-  // Tie-off unused signals
-  assign dio_in[DioUsbdevSense] = 1'b0;
-  assign dio_in[DioUsbdevSe0] = 1'b0;
-  assign dio_in[DioUsbdevDpPullup] = 1'b0;
-  assign dio_in[DioUsbdevDnPullup] = 1'b0;
-  assign dio_in[DioUsbdevTxModeSe] = 1'b0;
-  assign dio_in[DioUsbdevSuspend] = 1'b0;
-  assign dio_in[DioUsbdevRxEnable] = 1'b0;
 
-  logic unused_usb_sigs;
-  assign unused_usb_sigs = ^{
-    // Sense
-    dio_out[DioUsbdevSense],
-    dio_oe[DioUsbdevSense],
-    dio_attr[DioUsbdevSense],
-    // SE0
-    dio_out[DioUsbdevSe0],
-    dio_oe[DioUsbdevSe0],
-    dio_attr[DioUsbdevSe0],
-    // TX Mode
-    dio_out[DioUsbdevTxModeSe],
-    dio_oe[DioUsbdevTxModeSe],
-    dio_attr[DioUsbdevTxModeSe],
-    // Suspend
-    dio_out[DioUsbdevSuspend],
-    dio_oe[DioUsbdevSuspend],
-    dio_attr[DioUsbdevSuspend],
-    // Rx enable
-    dio_oe[DioUsbdevRxEnable],
-    dio_attr[DioUsbdevRxEnable],
-    // D is used as an input only
-    dio_out[DioUsbdevD],
-    dio_oe[DioUsbdevD],
-    dio_attr[DioUsbdevD],
-    // Pullup/down
-    dio_oe[DioUsbdevDpPullup],
-    dio_oe[DioUsbdevDnPullup],
-    dio_attr[DioUsbdevDpPullup],
-    dio_attr[DioUsbdevDnPullup]
-  };
+  ///////////////////////////////////////
+  // top_earlgrey: power domains //
+  ///////////////////////////////////////
 
-  //////////////////////
-  // Top-level design //
-  //////////////////////
-
-  logic [rstmgr_pkg::PowerDomains-1:0] por_n;
-  assign por_n = {ast_pwst.main_pok, ast_pwst.aon_pok};
   top_earlgrey #(
-    .PinmuxAonTargetCfg(PinmuxTargetCfg)
+    .I2c0InputDelayCycles(1),
+    .I2c1InputDelayCycles(1),
+    .I2c2InputDelayCycles(1),
+    .SecAesAllowForcingMasks(1'b1),
+    .SecRomCtrlDisableScrambling(SecRomCtrlDisableScrambling),
+    .PinmuxTargetCfg(PinmuxTargetCfg)
   ) top_earlgrey (
-    // ast connections
-    .por_n_i                      ( por_n                      ),
-    .clk_main_i                   ( ast_base_clks.clk_sys      ),
-    .clk_io_i                     ( ast_base_clks.clk_io       ),
-    .clk_usb_i                    ( ast_base_clks.clk_usb      ),
-    .clk_aon_i                    ( ast_base_clks.clk_aon      ),
-    .clks_ast_o                   ( clkmgr_aon_clocks          ),
-    .clk_main_jitter_en_o         ( jen                        ),
-    .rsts_ast_o                   ( rstmgr_aon_resets          ),
-    .sck_monitor_o                ( sck_monitor                ),
-    .pwrmgr_ast_req_o             ( base_ast_pwr               ),
-    .pwrmgr_ast_rsp_i             ( ast_base_pwr               ),
-    .sensor_ctrl_ast_alert_req_i  ( ast_alert_req              ),
-    .sensor_ctrl_ast_alert_rsp_o  ( ast_alert_rsp              ),
-    .sensor_ctrl_ast_status_i     ( ast_pwst.io_pok            ),
-    .usbdev_usb_ref_val_o         ( usb_ref_pulse              ),
-    .usbdev_usb_ref_pulse_o       ( usb_ref_val                ),
-    .ast_tl_req_o                 ( base_ast_bus               ),
-    .ast_tl_rsp_i                 ( ast_base_bus               ),
-    .adc_req_o                    ( adc_req                    ),
-    .adc_rsp_i                    ( adc_rsp                    ),
-    .ast_edn_req_i                ( ast_edn_edn_req            ),
-    .ast_edn_rsp_o                ( ast_edn_edn_rsp            ),
-    .otp_ctrl_otp_ast_pwr_seq_o   ( otp_ctrl_otp_ast_pwr_seq   ),
-    .otp_ctrl_otp_ast_pwr_seq_h_i ( otp_ctrl_otp_ast_pwr_seq_h ),
-    .otp_alert_o                  ( otp_alert                  ),
-    .flash_bist_enable_i          ( flash_bist_enable          ),
-    .flash_power_down_h_i         ( flash_power_down_h         ),
-    .flash_power_ready_h_i        ( flash_power_ready_h        ),
-    .flash_alert_o                ( flash_alert                ),
-    .es_rng_req_o                 ( es_rng_req                 ),
-    .es_rng_rsp_i                 ( es_rng_rsp                 ),
-    .es_rng_fips_o                ( es_rng_fips                ),
-    .ast_clk_byp_req_o            ( ast_clk_byp_req            ),
-    .ast_clk_byp_ack_i            ( ast_clk_byp_ack            ),
-    .ast2pinmux_i                 ( ast2pinmux                 ),
-    .ast_init_done_i              ( ast_init_done              ),
+    // Unmanaged external clocks
+    .clk_ast_ext_i  (clk_ast_ext),
+    .cg_en_ast_ext_i(cg_en_ast_ext),
 
-    // Flash test mode voltages
-    .flash_test_mode_a_io         ( {FLASH_TEST_MODE1,
-                                     FLASH_TEST_MODE0}         ),
-    .flash_test_voltage_h_io      ( FLASH_TEST_VOLT            ),
-
-    // OTP external voltage
-    .otp_ext_voltage_h_io         ( OTP_EXT_VOLT               ),
+    // Manual DFT signals
+    .padring_scan_clk_o(padring_scan_clk),
 
     // Multiplexed I/O
-    .mio_in_i                     ( mio_in                     ),
-    .mio_out_o                    ( mio_out                    ),
-    .mio_oe_o                     ( mio_oe                     ),
+    .mio_in_i (mio_in ),
+    .mio_out_o(mio_out),
+    .mio_oe_o (mio_oe ),
 
     // Dedicated I/O
-    .dio_in_i                     ( dio_in                     ),
-    .dio_out_o                    ( dio_out                    ),
-    .dio_oe_o                     ( dio_oe                     ),
+    .dio_in_i (dio_in ),
+    .dio_out_o(dio_out),
+    .dio_oe_o (dio_oe ),
 
     // Pad attributes
-    .mio_attr_o                   ( mio_attr                   ),
-    .dio_attr_o                   ( dio_attr                   ),
+    .mio_attr_o(mio_attr),
+    .dio_attr_o(dio_attr),
 
-    // Memory attributes
-    .ram_1p_cfg_i                 ( ram_1p_cfg                 ),
-    .ram_2p_cfg_i                 ( ram_2p_cfg                 ),
-    .rom_cfg_i                    ( rom_cfg                    ),
-
-    // DFT signals
-    .ast_lc_dft_en_o              ( dft_en                     ),
-    .dft_strap_test_o             ( dft_strap_test             ),
-    .dft_hold_tap_sel_i           ( '0                         ),
-    .scan_rst_ni                  ( scan_rst_n                 ),
-    .scan_en_i                    ( scan_en                    ),
-    .scanmode_i                   ( scanmode                   )
+    // Regular ports (auto-generated)
+    .manual_in_por_n_i            (manual_in_por_n ),
+    .manual_in_pora_n_i           (manual_in_pora_n),
+    .scanmode_o                   (scanmode        ),
+    .scan_en_o                    (                ),
+    .scan_rst_n_o                 (                ),
+    .usb_io_pu_cal_o              (usb_io_pu_cal   ),
+    .padmux2ast_i                 (padmux2ast      ),
+    .ast_vx_supp_i                (ast_vx_supp     ),
+    .ast_obs_i                    (ast_obs         ),
+    .ast_adc_a0_a_i               (ast_adc_a0_a    ),
+    .ast_adc_a1_a_i               (ast_adc_a1_a    ),
+    .ast2pad_t0_a_o               (ast2pad_t0_a    ),
+    .ast2pad_t1_a_o               (ast2pad_t1_a    ),
+    .clks_osc_byp_i               (clks_osc_byp    ),
+    .ast_pwst_h_o                 (ast_pwst_h      ),
+    .dft_hold_tap_sel_i           ('0              ),
+    .usb_dp_pullup_en_o           (usb_dp_pullup_en),
+    .usb_dn_pullup_en_o           (usb_dn_pullup_en),
+    .rram_test_analog_io          (RRAM_ANALOG     ),
+    .sensor_ctrl_manual_pad_attr_o(sensor_ctrl_manual_pad_attr),
+    .usbdev_usb_rx_d_i            (usb_rx_d        ),
+    .usbdev_usb_tx_d_o            (                ),
+    .usbdev_usb_tx_se0_o          (                ),
+    .usbdev_usb_tx_use_d_se0_o    (                ),
+    .usbdev_usb_rx_enable_o       (usb_rx_enable   )
   );
 
-
-
-endmodule : chip_earlgrey_asic
+endmodule

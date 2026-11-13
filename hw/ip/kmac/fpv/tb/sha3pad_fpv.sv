@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -45,8 +45,9 @@ module sha3pad_fpv
 
   logic [1599:0] state [Share];
 
-  logic rand_valid, rand_consumed;
-  logic [1599:0] rand_data;
+  logic rand_valid, rand_early, rand_consumed;
+  logic [799:0] rand_data;
+  logic rand_aux;
 
   sha3pad #(
     .EnMasking(EnMasking)
@@ -93,7 +94,9 @@ module sha3pad_fpv
     .complete_o (keccak_complete),
 
     .rand_valid_i    (rand_valid),
+    .rand_early_i    (rand_early),
     .rand_data_i     (rand_data),
+    .rand_aux_i      (rand_aux),
     .rand_consumed_o (rand_consumed),
 
     .state_o    (state),

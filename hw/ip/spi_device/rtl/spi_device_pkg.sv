@@ -1,9 +1,11 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Serial Peripheral Interface (SPI) Device module.
 //
+
+`include "prim_assert.sv"
 
 package spi_device_pkg;
 
@@ -16,7 +18,6 @@ package spi_device_pkg;
     // Passthrough includes SCK also. The sck_en is pad out enable not CG
     // enable. The CG is placed in SPI_DEVICE IP.
     logic       sck;
-    logic       sck_gate_en; // TBD: place for CG?
     logic       sck_en;
 
     // CSb should be pull-up pad. In passthrough mode, CSb is directly connected
@@ -38,7 +39,6 @@ package spi_device_pkg;
   parameter passthrough_req_t PASSTHROUGH_REQ_DEFAULT = '{
     passthrough_en: 1'b 0,
     sck:            1'b 0,
-    sck_gate_en:    1'b 0,
     sck_en:         1'b 0,
     csb:            1'b 1,
     csb_en:         1'b 0,
@@ -81,36 +81,67 @@ package spi_device_pkg;
   localparam int unsigned AddrCntW = $clog2(MaxAddrBit);
 
   // Dummy
+
   localparam int unsigned MaxDummyBit = 8;
   localparam int unsigned DummyCntW = $clog2(MaxDummyBit);
+
+  // TPM
+  localparam int unsigned AccessRegSize    = 8; // times Locality
+  localparam int unsigned IntEnRegSize     = 32;
+  localparam int unsigned IntVectorRegSize = 8;
+  localparam int unsigned IntStsRegSize    = 32;
+  localparam int unsigned IntfCapRegSize   = 32;
+  localparam int unsigned StatusRegSize    = 32;
+  localparam int unsigned IdRegSize        = 32; // {DID; VID}
+  localparam int unsigned RidRegSize       = 8;
+  localparam int unsigned ActiveLocalityBitPos = 5; // Access[5
 
   typedef enum logic {
     PayloadIn  = 1'b 0,
     PayloadOut = 1'b 1
   } payload_dir_e;
+
+  // addr_mode_e: CMD_INFO.addr_mode informs HW if a command has address field,
+  // ADDR_MODE.addr_4b_en affected, or address is 3B/4B.
+  typedef enum logic [1:0] {
+    AddrDisabled = 2'b 00,
+    AddrCfg      = 2'b 01,
+    Addr3B       = 2'b 10,
+    Addr4B       = 2'b 11
+  } addr_mode_e;
+
+  typedef enum logic [1:0] {
+    RdPipeZeroStages        = 2'b 00,
+    RdPipeTwoStageHalfCycle = 2'b 01,
+    RdPipeTwoStageFullCycle = 2'b 10
+  } read_pipeline_mode_e;
+
   // cmd_info_t defines the command relevant information. SPI Device IP has
   // #NumCmdInfo cmd registers (default 16). A few of them are assigned to a
   // specific commands such as Read Status, Read SFDP.
   //
   // These fields are SW programmable via CSR interface.
   typedef struct packed {
+    // If 1, the cmd_info slot is in active and contains valid config.
+    logic valid;
+
     // opcode: Each cmd_info type has 8bit opcode. SPI_DEVICE has 16 command
     // slots. The logic compares the opcode and uses the command info when
     // opcode is matched. If same opcode exists, SPI_DEVICE uses the command
     // info slot having the lowest index among the matched ones.
     logic [7:0] opcode;
 
-    // set to 1 if the command has an address field following the opcode.
-    logic addr_en;
+    // Look at addr_mode_e description for details
+    // - 00: Address disabled
+    // - 01: Address is affected by CFG
+    // - 10: Address is 3 bytes field
+    // - 11: Address is 4 bytes field
+    addr_mode_e addr_mode;
 
     // swap_en is used in the passthrough logic. If this field is set to 1, the
     // address in the passthrough command is replaced to the preconfigured
     // value.
     logic addr_swap_en;
-
-    // If 1, the address size is affected by `cfg_addr_4b_en_i` configuration
-    // field.
-    logic addr_4b_affected;
 
     // Mbyte field exist. If set to 1, the command waits 1 byte before moving
     // to dummy field. This field data is ignored.
@@ -128,6 +159,22 @@ package spi_device_pkg;
     // payload_dir to PayloadOut.
     logic [3:0]   payload_en;
     payload_dir_e payload_dir;
+
+    // If payload_swap_en is set, the passthrough logic swaps the first
+    // 4 bytes of the write payload with PAYLOAD_SWAP_MASK and
+    // PAYLOAD_SWAP_DATA CSR.
+    //
+    // `payload_swap_en` only works with write data and SingleIO mode.
+    // `payload_en` should be 4'b 0001 && `payload_dir` to be PayloadIn.
+    logic payload_swap_en;
+
+    // If read_pipeline_mode is not set to 0 cycles, read commands will add a
+    // 2-stage pipeline between the read data and output pins. For passthrough,
+    // this will enable higher throughput / clock rates, due to the shortened
+    // path to a flop; the read data will first be latched inside spi_device,
+    // instead of needing to travel back to the upstream host in the same
+    // cycle.
+    read_pipeline_mode_e read_pipeline_mode;
 
     // upload: If upload field in the command info entry is set, the cmdparse
     // activates the upload submodule when the opcode is received. `addr_en`,
@@ -149,25 +196,35 @@ package spi_device_pkg;
   // CmdInfoInput parameter is the default value if no opcode in the cmd info
   // slot is matched to the received command opcode.
   parameter cmd_info_t CmdInfoInput = '{
-    opcode:           8'h 00,
-    addr_en:          1'b 0,
-    addr_swap_en:     1'b 0,
-    addr_4b_affected: 1'b 0,
-    mbyte_en:         1'b 0,
-    dummy_en:         1'b 0,
-    dummy_size:       3'h 0,
-    payload_en:       4'b 0001, // MOSI active
-    payload_dir:      PayloadIn,
-    upload:           1'b 0,
-    busy:             1'b 0
+    valid:                 1'b 0,
+    opcode:                8'h 00,
+    addr_mode:             AddrDisabled,
+    addr_swap_en:          1'b 0,
+    mbyte_en:              1'b 0,
+    dummy_en:              1'b 0,
+    dummy_size:            3'h 0,
+    payload_en:            4'b 0001, // MOSI active
+    payload_dir:           PayloadIn,
+    payload_swap_en:       1'b 0,
+    read_pipeline_mode:    RdPipeZeroStages,
+    upload:                1'b 0,
+    busy:                  1'b 0
   };
 
-  function automatic logic is_cmdinfo_addr_4b(cmd_info_t ci, logic addr_4b_en);
+  function automatic logic is_cmdinfo_addr_4b(addr_mode_e ci_addr_mode, logic addr_4b_en);
     logic result;
-    // TODO: Add force 4B
-    result = ci.addr_4b_affected ? addr_4b_en : 1'b 0;
+    result = ci_addr_mode == AddrCfg ? addr_4b_en : (ci_addr_mode == Addr4B);
     return result;
   endfunction : is_cmdinfo_addr_4b
+
+  // get_addr_mode removes AddrCfg.
+  // It returns {AddrDisabled, Addr3B, Addr4B}
+  function automatic addr_mode_e get_addr_mode(addr_mode_e ci_addr_mode, logic addr_4b_en);
+    addr_mode_e result;
+    result = (ci_addr_mode != AddrCfg) ? ci_addr_mode
+           : (addr_4b_en) ? Addr4B : Addr3B ;
+    return result;
+  endfunction : get_addr_mode
 
   // SPI_DEVICE HWIP has 16 command info slots. A few of them are pre-assigned.
   // (defined in the spi_device_pkg)
@@ -201,15 +258,31 @@ package spi_device_pkg;
     // "Manufacture/Device ID", etc.  They are not always Input mode. Some has
     // a dummy cycle followed by the output field.
     CmdInfoReserveStart = 11,
-    CmdInfoReserveEnd   = spi_device_reg_pkg::NumCmdInfo -1
+    CmdInfoReserveEnd   = spi_device_reg_pkg::NumCmdInfo - 1,
+    CmdInfoEn4B         = CmdInfoReserveEnd + 1,
+    CmdInfoEx4B         = CmdInfoEn4B + 1,
+    CmdInfoWrEn         = CmdInfoEx4B + 1,
+    CmdInfoWrDi         = CmdInfoWrEn + 1,
+    NumTotalCmdInfo
   } cmd_info_index_e;
 
   parameter int unsigned NumReadCmdInfo = CmdInfoReadCmdEnd - CmdInfoReadCmdStart + 1;
 
-  import spi_device_reg_pkg::NumCmdInfo;
-  export spi_device_reg_pkg::NumCmdInfo;
+  // NumCmdInfo adds two more entries (EN4B/ EX4B)
+  // or, add NumTotalCmdInfo inside cmd_info_index_e and use?
+  //parameter int unsigned NumFixedCmdInfo = 2;
+  //parameter int unsigned NumTotalCmdInfo = NumFixedCmdInfo
+  //                                       + spi_device_reg_pkg::NumCmdInfo;
 
-  parameter int unsigned CmdInfoIdxW = $clog2(NumCmdInfo);
+  parameter int unsigned CmdInfoIdxW = $clog2(NumTotalCmdInfo);
+
+  // Jedec Configuration Structure
+  typedef struct packed {
+    logic [7:0]  num_cc;    // continuation code repeat
+    logic [7:0]  cc;        // the value of CC (default 7Fh)
+    logic [7:0]  jedec_id;  // JEDEC Manufacturer ID
+    logic [15:0] device_id; // Device ID
+  } jedec_cfg_t ;
 
   // SPI Operation mode
   typedef enum logic [1:0] {
@@ -224,14 +297,14 @@ package spi_device_pkg;
     DualIO   = 2'h 1,
     QuadIO   = 2'h 2
   } io_mode_e;
+
   typedef enum int unsigned {
-    IoModeFw       = 0,
-    IoModeCmdParse = 1,
-    IoModeReadCmd  = 2,
-    IoModeStatus   = 3,
-    IoModeJedec    = 4,
-    IoModeUpload   = 5,
-    IoModeEnd      = 6 // Indicate of Length
+    IoModeCmdParse = 0,
+    IoModeReadCmd  = 1,
+    IoModeStatus   = 2,
+    IoModeJedec    = 3,
+    IoModeUpload   = 4,
+    IoModeEnd      = 5 // Indicate of Length
   } sub_io_mode_e;
 
   // SPI Line Mode (Mode0 <-> Mode3)
@@ -266,21 +339,26 @@ package spi_device_pkg;
 
   localparam int MEM_AW = 12; // Memory Address width (Byte based)
 
-  typedef enum logic [5:0] {
-    DpNone       = 'b 000000,
-    DpReadCmd    = 'b 000001,
-    DpReadStatus = 'b 000010,
-    DpReadSFDP   = 'b 000100,
-    DpReadJEDEC  = 'b 001000,
+  typedef enum logic [9:0] {
+    DpNone       = 'b 0000000000,
+    DpReadCmd    = 'b 0000000001,
+    DpReadStatus = 'b 0000000010,
+    DpReadSFDP   = 'b 0000000100,
+    DpReadJEDEC  = 'b 0000001000,
 
     // Command + Address only: e.g Block Erase
     // Command + Address + Paylod: Program
     // Command followed by direct payload
     // Write Status could be an example
     // Command only: Write Protect Enable / Chip Erase
-    DpUpload     = 'b 010000,
+    DpUpload     = 'b 0000010000,
+
+    DpEn4B       = 'b 0000100000,
+    DpEx4B       = 'b 0001000000,
+    DpWrEn       = 'b 0010000000,
+    DpWrDi       = 'b 0100000000,
     // Unrecognizable commands: Just handle this as DpPayload
-    DpUnknown    = 'b 100000
+    DpUnknown    = 'b 1000000000
   } sel_datapath_e;
 
   typedef enum spi_byte_t {
@@ -313,35 +391,64 @@ package spi_device_pkg;
     CmdWriteDisable = 8'h 04,
     CmdWriteEnable  = 8'h 06,
 
+    CmdEn4B = 8'h B7,
+    CmdEx4B = 8'h E9,
+
     CmdReadSfdp = 8'h 5A,
+
+    CmdChipErase = 8'h C7,
 
     CmdEnableReset = 8'h 66,
     CmdResetDevice = 8'h 99
   } spi_cmd_e;
 
+  typedef enum int unsigned {
+    SramType2p   = 0,  // True dual-port SRAM (2 RW ports)
+    SramType1r1w = 1   // Simple dual-port SRAM (1 RO port + 1 WO port)
+  } sram_type_e;
+
   // Sram parameters
-  parameter int unsigned SramDw    = 32;
-  parameter int unsigned SramStrbW = SramDw/8;
+  parameter sram_type_e DefaultSramType = SramType1r1w;
+  parameter int unsigned SramDw      = 32;
+  parameter int unsigned SramStrbW   = SramDw/8;
+  parameter int unsigned SramOffsetW = $clog2(SramStrbW);
 
   // Msg region is used for read cmd in Flash and Passthrough region
-  parameter int unsigned SramMsgDepth = 512; // 2kB
+  parameter int unsigned SramMsgDepth = spi_device_reg_pkg::SramReadBufferDepth;
+  parameter int unsigned SramMsgBytes = SramMsgDepth * SramStrbW;
 
-  parameter int unsigned SramMailboxDepth = 256; // 1kB for mailbox
+  // Address Width of a Buffer in bytes
+  parameter int unsigned SramBufferBytes = SramMsgBytes / 2; // Double Buffer
+  parameter int unsigned SramBufferAw    = $clog2(SramBufferBytes);
+
+  import spi_device_reg_pkg::SramMailboxDepth;
+  export spi_device_reg_pkg::SramMailboxDepth;
 
   // SPI Flash Discoverable Parameter is for host to get the device
   // information. It is a separate Command. The device provides a region in
   // DPSRAM for SW. The size is 256B
-  parameter int unsigned SramSfdpDepth = 64;
-  parameter int unsigned SramPayloadDepth = 64; // 256B for Program
-  parameter int unsigned SramCmdFifoDepth = 16; // 16 x 1B for Cmd
-  parameter int unsigned SramAddrFifoDepth = 16; // 16 x 4B for Addr
+  import spi_device_reg_pkg::SramSfdpDepth;
+  export spi_device_reg_pkg::SramSfdpDepth;
+  import spi_device_reg_pkg::SramPayloadDepth;
+  export spi_device_reg_pkg::SramPayloadDepth;
+  import spi_device_reg_pkg::SramCmdFifoDepth;
+  export spi_device_reg_pkg::SramCmdFifoDepth;
+  import spi_device_reg_pkg::SramAddrFifoDepth;
+  export spi_device_reg_pkg::SramAddrFifoDepth;
+  import spi_device_reg_pkg::SramTpmWrFifoDepth;
+  export spi_device_reg_pkg::SramTpmWrFifoDepth;
+  import spi_device_reg_pkg::SramTpmRdFifoDepth;
+  export spi_device_reg_pkg::SramTpmRdFifoDepth;
   parameter int unsigned SramTotalDepth = SramMsgDepth + SramMailboxDepth
-                                        + SramSfdpDepth + SramPayloadDepth
-                                        + SramCmdFifoDepth + SramAddrFifoDepth ;
+                                        + SramSfdpDepth + SramTpmRdFifoDepth
+                                        + SramPayloadDepth + SramCmdFifoDepth
+                                        + SramAddrFifoDepth + SramTpmWrFifoDepth;
 
   // Sram Depth is set to 1024 to satisfy DPSRAM parameter even though
   // SramTotalDepth above is 928.
   //parameter int unsigned SramDepth = 1024;
+  import spi_device_reg_pkg::SramDepth;
+  export spi_device_reg_pkg::SramDepth;
 
   parameter int unsigned SramAw = $clog2(spi_device_reg_pkg::SramDepth);
 
@@ -386,38 +493,69 @@ package spi_device_pkg;
   endfunction : sram_mask2strb
 
   // Calculate each space's base and size
-  parameter sram_addr_t SramReadBufferIdx  = sram_addr_t'(0);
+  // The egress buffer is located at the base of the SRAM address region, and
+  // the ingress buffer is higher in the map (controlled by reggen).
+  import spi_device_reg_pkg::SPI_DEVICE_EGRESS_BUFFER_OFFSET;
+  import spi_device_reg_pkg::SPI_DEVICE_INGRESS_BUFFER_OFFSET;
+  parameter int unsigned SramEgressByteOffset = 0;
+  parameter int unsigned SramIngressByteOffset =
+    SPI_DEVICE_INGRESS_BUFFER_OFFSET - SPI_DEVICE_EGRESS_BUFFER_OFFSET;
+
+  parameter sram_addr_t SramEgressIdx =
+    sram_addr_t'(SramEgressByteOffset[$clog2(SramDw / 8) +: SramAw]);
+  parameter sram_addr_t SramReadBufferIdx  = SramEgressIdx;
   parameter sram_addr_t SramReadBufferSize = sram_addr_t'(SramMsgDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckReadBufferOffset,
+      SramReadBufferIdx == spi_device_reg_pkg::SramReadBufferOffset)
 
   parameter sram_addr_t SramMailboxIdx  = SramReadBufferIdx + SramReadBufferSize;
   parameter sram_addr_t SramMailboxSize = sram_addr_t'(SramMailboxDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckMailboxOffset,
+      SramMailboxIdx == spi_device_reg_pkg::SramMailboxOffset)
 
   parameter sram_addr_t SramSfdpIdx  = SramMailboxIdx + SramMailboxSize;
   parameter sram_addr_t SramSfdpSize = sram_addr_t'(SramSfdpDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckSfdpOffset,
+      SramSfdpIdx == spi_device_reg_pkg::SramSfdpOffset)
 
-  parameter sram_addr_t SramPayloadIdx  = SramSfdpIdx + SramSfdpSize;
+  parameter sram_addr_t SramTpmRdFifoIdx  = SramSfdpIdx + SramSfdpSize;
+  parameter sram_addr_t SramTpmRdFifoSize = sram_addr_t'(SramTpmRdFifoDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckTpmRdFifoOffset,
+      SramTpmRdFifoIdx == spi_device_reg_pkg::SramTpmRdFifoOffset)
+
+  parameter sram_addr_t SramIngressIdx =
+    sram_addr_t'(SramIngressByteOffset[$clog2(SramDw / 8) +: SramAw]);
+  parameter sram_addr_t SramPayloadIdx  = SramIngressIdx;
   parameter sram_addr_t SramPayloadSize = sram_addr_t'(SramPayloadDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckPayloadOffset,
+      (SramPayloadIdx - SramIngressIdx) == spi_device_reg_pkg::SramPayloadOffset)
 
-  parameter sram_addr_t SramCmdFifoIdx  = SramPayloadIdx + SramPayloadSize ;
+  parameter sram_addr_t SramCmdFifoIdx  = SramPayloadIdx + SramPayloadSize;
   parameter sram_addr_t SramCmdFifoSize = sram_addr_t'(SramCmdFifoDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckCmdFifoOffset,
+      (SramCmdFifoIdx - SramIngressIdx) == spi_device_reg_pkg::SramCmdFifoOffset)
 
-  parameter sram_addr_t SramAddrFifoIdx  = SramCmdFifoIdx + SramCmdFifoSize ;
+  parameter sram_addr_t SramAddrFifoIdx  = SramCmdFifoIdx + SramCmdFifoSize;
   parameter sram_addr_t SramAddrFifoSize = sram_addr_t'(SramAddrFifoDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckAddrFifoOffset,
+      (SramAddrFifoIdx - SramIngressIdx) == spi_device_reg_pkg::SramAddrFifoOffset)
+
+  parameter sram_addr_t SramTpmWrFifoIdx  = SramAddrFifoIdx + SramAddrFifoSize;
+  parameter sram_addr_t SramTpmWrFifoSize = sram_addr_t'(SramTpmWrFifoDepth);
+  `ASSERT_STATIC_IN_PACKAGE(CheckTpmWrFifoOffset,
+      (SramTpmWrFifoIdx - SramIngressIdx) == spi_device_reg_pkg::SramTpmWrFifoOffset)
 
   // Max BitCount in a transaction
   parameter int unsigned BitLength = SramMsgDepth * 32;
   parameter int unsigned BitCntW   = $clog2(BitLength + 1);
 
   // spi device scanmode usage
-  typedef enum logic [3:0] {
+  typedef enum logic [2:0] {
     ClkInvSel,
     CsbRstMuxSel,
-    TxRstMuxSel,
-    RxRstMuxSel,
     ClkMuxSel,
-    ClkSramSel,
-    RstSramSel,
     TpmRstSel,
+    StatusFifoRstSel,
     ScanModeUseLast
   } scan_mode_e;
 
@@ -425,8 +563,16 @@ package spi_device_pkg;
   typedef struct packed {
     logic [7:0] rev;
     logic       locality;
-    logic [2:0] max_xfer_size;
+    logic [2:0] max_wr_size;
+    logic [2:0] max_rd_size;
   } tpm_cap_t;
+
+  typedef struct packed {
+    logic rnw;
+    logic rsvd;
+    logic [5:0] xfer_size_minus_one;
+    logic [23:0] address;
+  } tpm_cmdaddr_t;
   // TPM ----------------------------------------------------------------------
 
 endpackage : spi_device_pkg

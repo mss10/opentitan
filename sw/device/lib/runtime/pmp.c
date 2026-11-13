@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +10,7 @@
 
 #include "sw/device/lib/base/bitfield.h"
 #include "sw/device/lib/base/csr.h"
+#include "sw/device/lib/base/macros.h"
 
 // "Volume II: RISC-V Privileged Architectures V20190608-Priv-MSU-Ratified",
 // "3.6.1 Physical Memory Protection CSRs",
@@ -38,8 +39,42 @@ typedef enum pmp_csr_access_type {
 } pmp_csr_access_type_t;
 
 static const bitfield_field32_t kPmpCfgModeField = {
-    .mask = PMP_CFG_CSR_MODE_MASK, .index = PMP_CFG_CSR_A,
+    .mask = PMP_CFG_CSR_MODE_MASK,
+    .index = PMP_CFG_CSR_A,
 };
+
+/**
+ * This is an X-Macro used for automatically deriving switch statements which
+ * link PMP region identifiers to associated information including their
+ * configuration register identifier.
+ *
+ * This macro should be invoked with a macro argument with the following
+ * signature:
+ *
+ * @param region_id PMP Region Identifier.
+ * @param config_reg_id Configuration Register ID for a given PMP Region (for
+ * Ibex).
+ */
+#define PMP_REGIONS(X) \
+  X(0, 0)              \
+  X(1, 0)              \
+  X(2, 0)              \
+  X(3, 0)              \
+                       \
+  X(4, 1)              \
+  X(5, 1)              \
+  X(6, 1)              \
+  X(7, 1)              \
+                       \
+  X(8, 2)              \
+  X(9, 2)              \
+  X(10, 2)             \
+  X(11, 2)             \
+                       \
+  X(12, 3)             \
+  X(13, 3)             \
+  X(14, 3)             \
+  X(15, 3)
 
 /**
  * Reads the pmpcfg for a given region.
@@ -52,15 +87,16 @@ static const bitfield_field32_t kPmpCfgModeField = {
  * @return `true` if `pmp_region_index_t` is valid and value was read, `false`
  * otherwise.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static bool pmp_cfg_csr_read(pmp_region_index_t region, uint32_t *value) {
-  switch (region) {
-#define PMP_REGION(region_id, config_reg_id)        \
+#define PMP_READ_CONFIG_(region_id, config_reg_id)  \
   case region_id: {                                 \
     CSR_READ(CSR_REG_PMPCFG##config_reg_id, value); \
     return true;                                    \
   }
-#include "sw/device/lib/runtime/pmp_regions.def"
+
+  switch (region) {
+    PMP_REGIONS(PMP_READ_CONFIG_)
     default:
       return false;
   }
@@ -77,15 +113,16 @@ static bool pmp_cfg_csr_read(pmp_region_index_t region, uint32_t *value) {
  * @return `true` if `pmp_region_index_t` is valid and value was written,
  * `false` otherwise.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static bool pmp_cfg_csr_write(pmp_region_index_t region, uint32_t value) {
-  switch (region) {
-#define PMP_REGION(region_id, config_reg_id)         \
+#define PMP_WRITE_CONFIG_(region_id, config_reg_id)  \
   case region_id: {                                  \
     CSR_WRITE(CSR_REG_PMPCFG##config_reg_id, value); \
     return true;                                     \
   }
-#include "sw/device/lib/runtime/pmp_regions.def"
+
+  switch (region) {
+    PMP_REGIONS(PMP_WRITE_CONFIG_)
     default:
       return false;
   }
@@ -99,15 +136,16 @@ static bool pmp_cfg_csr_write(pmp_region_index_t region, uint32_t value) {
  * @return `true` if `pmp_region_index_t` is valid and value was read, `false`
  * otherwise.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static bool pmp_addr_csr_read(pmp_region_index_t region, uint32_t *value) {
-  switch (region) {
-#define PMP_REGION(region_id, _)                 \
+#define PMP_READ_ADDR_(region_id, _)             \
   case region_id: {                              \
     CSR_READ(CSR_REG_PMPADDR##region_id, value); \
     return true;                                 \
   }
-#include "sw/device/lib/runtime/pmp_regions.def"
+
+  switch (region) {
+    PMP_REGIONS(PMP_READ_ADDR_)
     default:
       return false;
   }
@@ -120,15 +158,16 @@ static bool pmp_addr_csr_read(pmp_region_index_t region, uint32_t *value) {
  * @param value Value to write into a CSR.
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static bool pmp_addr_csr_write(pmp_region_index_t region, uint32_t value) {
-  switch (region) {
-#define PMP_REGION(region_id, _)                  \
+#define PMP_WRITE_ADDR_(region_id, _)             \
   case region_id: {                               \
     CSR_WRITE(CSR_REG_PMPADDR##region_id, value); \
     return true;                                  \
   }
-#include "sw/device/lib/runtime/pmp_regions.def"
+
+  switch (region) {
+    PMP_REGIONS(PMP_WRITE_ADDR_)
     default:
       return false;
   }
@@ -143,7 +182,7 @@ static bool pmp_addr_csr_write(pmp_region_index_t region, uint32_t value) {
  * @param field_value Configuration information for the `region`.
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static pmp_region_configure_result_t pmp_csr_cfg_field_read(
     pmp_region_index_t region, uint32_t *field_value) {
   uint32_t cfg_csr_original;
@@ -153,7 +192,8 @@ static pmp_region_configure_result_t pmp_csr_cfg_field_read(
 
   size_t field_index = (region % PMP_CFG_FIELDS_PER_REG) * PMP_CFG_FIELD_WIDTH;
   bitfield_field32_t pmp_csr_cfg_field = {
-      .mask = PMP_CFG_FIELD_MASK, .index = field_index,
+      .mask = PMP_CFG_FIELD_MASK,
+      .index = field_index,
   };
 
   *field_value = bitfield_field32_read(cfg_csr_original, pmp_csr_cfg_field);
@@ -170,7 +210,7 @@ static pmp_region_configure_result_t pmp_csr_cfg_field_read(
  * @param field_value Configuration information for the `region`.
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static pmp_region_configure_result_t pmp_csr_cfg_field_write(
     pmp_region_index_t region, uint32_t field_value) {
   uint32_t cfg_csr_current;
@@ -181,7 +221,8 @@ static pmp_region_configure_result_t pmp_csr_cfg_field_write(
   // Determine the pmpcfg field index based on the `region`.
   size_t field_index = (region % PMP_CFG_FIELDS_PER_REG) * PMP_CFG_FIELD_WIDTH;
   bitfield_field32_t pmp_csr_cfg_field = {
-      .mask = PMP_CFG_FIELD_MASK, .index = field_index,
+      .mask = PMP_CFG_FIELD_MASK,
+      .index = field_index,
   };
 
   uint32_t cfg_csr_new =
@@ -246,7 +287,7 @@ pmp_region_configure_result_t pmp_csr_address_write(pmp_region_index_t region,
  * @param bitfield Bitfield to set.
  * @return `true` on success, `false` on failure.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static bool pmp_cfg_permissions_set(pmp_region_permissions_t perm,
                                     uint32_t *bitfield) {
   switch (perm) {
@@ -320,7 +361,7 @@ static bool pmp_address_aligned(uintptr_t address) {
  * @param pmp_address_napot Constructed NAPOT address.
  * @return `pmp_region_configure_napot_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 static pmp_region_configure_napot_result_t pmp_napot_address_construct(
     uintptr_t address, uint32_t size, uintptr_t *pmp_address_napot) {
   // Must be at least the size of the minimal alignment adjusted for
@@ -505,7 +546,29 @@ pmp_region_configure_result_t pmp_region_configure_tor(
   return kPmpRegionConfigureOk;
 }
 
-pmp_region_configure_result_t pmp_cfg_mode_lock_status_get(
+pmp_region_configure_result_t pmp_region_is_configured(
+    pmp_region_index_t region, bool *configured) {
+  if (region >= PMP_REGIONS_NUM) {
+    return kPmpRegionConfigureBadRegion;
+  }
+
+  if (configured == NULL) {
+    return kPmpRegionConfigureBadArg;
+  }
+
+  uint32_t field_value;
+  pmp_region_configure_result_t result =
+      pmp_csr_cfg_field_read(region, &field_value);
+  if (result != kPmpRegionConfigureOk) {
+    return result;
+  }
+
+  *configured = field_value != 0;
+
+  return kPmpRegionConfigureOk;
+}
+
+pmp_region_configure_result_t pmp_region_lock_status_get(
     pmp_region_index_t region, pmp_region_lock_t *lock) {
   if (region >= PMP_REGIONS_NUM) {
     return kPmpRegionConfigureBadRegion;

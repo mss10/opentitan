@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,28 +9,21 @@
 #include <vector>
 
 #include "gtest/gtest.h"
-#include "sw/device/silicon_creator/lib/base/mock_abs_mmio.h"
+#include "sw/device/lib/base/mock_abs_mmio.h"
 #include "sw/device/silicon_creator/lib/error.h"
-
-extern "C" {
-// Declared in the sec_mmio module.
-extern sec_mmio_ctx_t sec_mmio_ctx;
-}
+#include "sw/device/silicon_creator/testing/rom_test.h"
 
 namespace sec_mmio_unittest {
 namespace {
 using ::testing::Each;
 using ::testing::ElementsAreArray;
 using ::testing::Eq;
-using ::testing::Test;
 
-class SecMmioTest : public mask_rom_test::MaskRomTest {
+class SecMmioTest : public rom_test::RomTest {
  protected:
-  void SetUp() override {
-    sec_mmio_init(+[](rom_error_t) { std::abort(); });
-  }
+  void SetUp() override { sec_mmio_init(); }
   sec_mmio_ctx_t *ctx_ = &::sec_mmio_ctx;
-  mask_rom_test::MockAbsMmio mmio_;
+  rom_test::MockAbsMmio mmio_;
 };
 
 TEST_F(SecMmioTest, Initialize) {
@@ -40,7 +33,7 @@ TEST_F(SecMmioTest, Initialize) {
   ctx_->last_index = 1;
   ctx_->write_count = 1;
   ctx_->addrs[0] = 0;
-  sec_mmio_init(+[](rom_error_t) { std::abort(); });
+  sec_mmio_init();
 
   EXPECT_EQ(ctx_->check_count, 0);
   EXPECT_EQ(ctx_->expected_write_count, 0);
@@ -53,7 +46,8 @@ TEST_F(SecMmioTest, Initialize) {
 TEST_F(SecMmioTest, NextStageInitialize) {
   // Ensure the register file size is greater than zero to ensure checks are
   // performed on non-zero sized arrays.
-  static_assert(kSecMmioRegFileSize > 2);
+  static_assert(kSecMmioRegFileSize > 2,
+                "kSecMmioRegFileSize must be greater than 2");
   std::array<uint32_t, kSecMmioRegFileSize> expected_addrs;
   std::array<uint32_t, kSecMmioRegFileSize> expected_values;
 
@@ -79,7 +73,7 @@ TEST_F(SecMmioTest, NextStageInitialize) {
     expected_values[i] = UINT32_MAX;
   }
 
-  sec_mmio_next_stage_init(+[](rom_error_t) { std::abort(); });
+  sec_mmio_next_stage_init();
 
   EXPECT_EQ(ctx_->write_count, 6);
   EXPECT_EQ(ctx_->expected_write_count, 6);
@@ -129,14 +123,6 @@ TEST_F(SecMmioTest, Write32) {
   EXPECT_EQ(ctx_->last_index, 2);
 }
 
-TEST_F(SecMmioTest, CounterInc) {
-  sec_mmio_write_increment(5);
-  EXPECT_EQ(ctx_->expected_write_count, 5);
-
-  sec_mmio_write_increment(10);
-  EXPECT_EQ(ctx_->expected_write_count, 15);
-}
-
 TEST_F(SecMmioTest, CheckValues) {
   EXPECT_ABS_WRITE32(0, 0x12345678);
   EXPECT_ABS_READ32(0, 0x12345678);
@@ -155,25 +141,25 @@ TEST_F(SecMmioTest, CheckValues) {
   EXPECT_ABS_READ32(8, 0xa5a5a5a5);
   EXPECT_EQ(sec_mmio_read32(8), 0xa5a5a5a5);
 
-  // The expected permutation order for rnd_offset=0 is {1, 2, 0}.
+  // The expected permutation order for rnd_offset=0
+  EXPECT_ABS_READ32(0, 0x12345678);
   EXPECT_ABS_READ32(4, 0x87654321);
   EXPECT_ABS_READ32(8, 0xa5a5a5a5);
-  EXPECT_ABS_READ32(0, 0x12345678);
   sec_mmio_check_values(/*rnd_offset=*/0);
   EXPECT_EQ(ctx_->check_count, 1);
 
-  // The expected permutation order for rnd_offset=1 is {2, 0, 1}.
+  // The expected permutation order for rnd_offset=0x80000000
+  EXPECT_ABS_READ32(4, 0x87654321);
   EXPECT_ABS_READ32(8, 0xa5a5a5a5);
   EXPECT_ABS_READ32(0, 0x12345678);
-  EXPECT_ABS_READ32(4, 0x87654321);
-  sec_mmio_check_values(/*rnd_offset=*/1);
+  sec_mmio_check_values(/*rnd_offset=*/0x80000000);
   EXPECT_EQ(ctx_->check_count, 2);
 
-  // The expected permutation order for rnd_offset=32 is {0, 1, 2}.
+  // The expected permutation order for rnd_offset=0xf0000000
+  EXPECT_ABS_READ32(8, 0xa5a5a5a5);
   EXPECT_ABS_READ32(0, 0x12345678);
   EXPECT_ABS_READ32(4, 0x87654321);
-  EXPECT_ABS_READ32(8, 0xa5a5a5a5);
-  sec_mmio_check_values(/*rnd_offset=*/32);
+  sec_mmio_check_values(/*rnd_offset=*/0xf0000000);
   EXPECT_EQ(ctx_->check_count, 3);
 }
 
@@ -181,58 +167,61 @@ TEST_F(SecMmioTest, CheckCount) {
   EXPECT_ABS_WRITE32(0, 0x12345678);
   EXPECT_ABS_READ32(0, 0x12345678);
   sec_mmio_write32(0, 0x12345678);
-  sec_mmio_write_increment(1);
+  SEC_MMIO_WRITE_INCREMENT(1);
 
   sec_mmio_check_counters(/*expected_check_count=*/0);
   sec_mmio_check_counters(/*expected_check_count=*/1);
   EXPECT_EQ(ctx_->check_count, 2);
 }
 
-// Negative test cases trigger assertions, which are caugth by `ASSERT_DEATH`
-// calls. All test cases use lambda functions to wrap expectations and work
-// around issue google/googletest#1004.
+// Negative test cases trigger assertions, which are caugth by `EXPECT_DEATH`
+// calls.
 class SecMmioDeathTest : public SecMmioTest {};
 
 TEST_F(SecMmioDeathTest, Read32OrDieSimulatedFault) {
-  auto deadly_ops = [this] {
-    EXPECT_ABS_READ32(0, 0x12345678);
-    EXPECT_ABS_READ32(0, 0);
-    sec_mmio_read32(0);
-  };
-  ASSERT_DEATH(deadly_ops(), "");
+  EXPECT_DEATH(
+      {
+        EXPECT_ABS_READ32(0, 0x12345678);
+        EXPECT_ABS_READ32(0, 0);
+        OT_DISCARD(sec_mmio_read32(0));
+      },
+      "");
 }
 
 TEST_F(SecMmioDeathTest, Write32SimulatedFault) {
-  auto deadly_ops = [this] {
-    EXPECT_ABS_WRITE32(0, 0x12345678);
-    EXPECT_ABS_READ32(0, 0);
-    sec_mmio_write32(0, 0x12345678);
-  };
-  ASSERT_DEATH(deadly_ops(), "");
+  EXPECT_DEATH(
+      {
+        EXPECT_ABS_WRITE32(0, 0x12345678);
+        EXPECT_ABS_READ32(0, 0);
+        sec_mmio_write32(0, 0x12345678);
+      },
+      "");
 }
 
 TEST_F(SecMmioDeathTest, CheckValuesSimulatedFault) {
-  auto deadly_ops = [this] {
-    EXPECT_ABS_WRITE32(0, 0x12345678);
-    EXPECT_ABS_READ32(0, 0x12345678);
-    sec_mmio_write32(0, 0x12345678);
+  EXPECT_DEATH(
+      {
+        EXPECT_ABS_WRITE32(0, 0x12345678);
+        EXPECT_ABS_READ32(0, 0x12345678);
+        sec_mmio_write32(0, 0x12345678);
 
-    EXPECT_ABS_READ32(0, 0);
-    sec_mmio_check_values(/*rnd_offset=*/0);
-  };
-  ASSERT_DEATH(deadly_ops(), "");
+        EXPECT_ABS_READ32(0, 0);
+        sec_mmio_check_values(/*rnd_offset=*/0);
+      },
+      "");
 }
 
 TEST_F(SecMmioDeathTest, CheckCountWriteMismatch) {
-  auto deadly_ops = [this] {
-    EXPECT_ABS_WRITE32(0, 0x12345678);
-    EXPECT_ABS_READ32(0, 0x12345678);
-    sec_mmio_write32(0, 0x12345678);
-    sec_mmio_check_counters(/*expected_check_count=*/0);
-  };
   // The developer forgot to increment the write counter, or an attacker
   // glitched the sec write operation.
-  ASSERT_DEATH(deadly_ops(), "");
+  EXPECT_DEATH(
+      {
+        EXPECT_ABS_WRITE32(0, 0x12345678);
+        EXPECT_ABS_READ32(0, 0x12345678);
+        sec_mmio_write32(0, 0x12345678);
+        sec_mmio_check_counters(/*expected_check_count=*/0);
+      },
+      "");
 }
 
 }  // namespace

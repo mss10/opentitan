@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -58,7 +58,8 @@ module prim_ram_2p_async_adv import prim_ram_2p_pkg::*; #(
   output logic [1:0]       b_rerror_o, // Bit1: Uncorrectable, Bit0: Correctable
 
   // config
-  input ram_2p_cfg_t       cfg_i
+  input  ram_2p_cfg_req_t  cfg_i,
+  output ram_2p_cfg_rsp_t  cfg_o
 );
 
 
@@ -74,7 +75,7 @@ module prim_ram_2p_async_adv import prim_ram_2p_pkg::*; #(
                              (Width <= 120) ? 8 : 8 ;
   localparam int TotalWidth = Width + ParWidth;
 
-  // If byte parity is enabled, the write enable bits are used to write memory colums
+  // If byte parity is enabled, the write enable bits are used to write memory columns
   // with 8 + 1 = 9 bit width (data plus corresponding parity bit).
   // If ECC is enabled, the DataBitsPerMask is ignored.
   localparam int LocalDataBitsPerMask = (EnableParity) ? 9          :
@@ -129,7 +130,8 @@ module prim_ram_2p_async_adv import prim_ram_2p_pkg::*; #(
     .b_wmask_i  (b_wmask_q),
     .b_rdata_o  (b_rdata_sram),
 
-    .cfg_i
+    .cfg_i,
+    .cfg_o
   );
 
   always_ff @(posedge clk_a_i or negedge rst_a_ni) begin
@@ -181,42 +183,42 @@ module prim_ram_2p_async_adv import prim_ram_2p_pkg::*; #(
 
     if (Width == 32) begin : gen_secded_39_32
       if (HammingECC) begin : gen_hamming
-        prim_secded_hamming_39_32_enc u_enc_a (
+        prim_secded_inv_hamming_39_32_enc u_enc_a (
           .data_i(a_wdata_i),
           .data_o(a_wdata_d)
         );
-        prim_secded_hamming_39_32_dec u_dec_a (
+        prim_secded_inv_hamming_39_32_dec u_dec_a (
           .data_i     (a_rdata_sram),
           .data_o     (a_rdata_d[0+:Width]),
           .syndrome_o ( ),
           .err_o      (a_rerror_d)
         );
-        prim_secded_hamming_39_32_enc u_enc_b (
+        prim_secded_inv_hamming_39_32_enc u_enc_b (
           .data_i(b_wdata_i),
           .data_o(b_wdata_d)
         );
-        prim_secded_hamming_39_32_dec u_dec_b (
+        prim_secded_inv_hamming_39_32_dec u_dec_b (
           .data_i     (b_rdata_sram),
           .data_o     (b_rdata_d[0+:Width]),
           .syndrome_o ( ),
           .err_o      (b_rerror_d)
         );
       end else begin : gen_hsiao
-        prim_secded_39_32_enc u_enc_a (
+        prim_secded_inv_39_32_enc u_enc_a (
           .data_i(a_wdata_i),
           .data_o(a_wdata_d)
         );
-        prim_secded_39_32_dec u_dec_a (
+        prim_secded_inv_39_32_dec u_dec_a (
           .data_i     (a_rdata_sram),
           .data_o     (a_rdata_d[0+:Width]),
           .syndrome_o ( ),
           .err_o      (a_rerror_d)
         );
-        prim_secded_39_32_enc u_enc_b (
+        prim_secded_inv_39_32_enc u_enc_b (
           .data_i(b_wdata_i),
           .data_o(b_wdata_d)
         );
-        prim_secded_39_32_dec u_dec_b (
+        prim_secded_inv_39_32_dec u_dec_b (
           .data_i     (b_rdata_sram),
           .data_o     (b_rdata_d[0+:Width]),
           .syndrome_o ( ),

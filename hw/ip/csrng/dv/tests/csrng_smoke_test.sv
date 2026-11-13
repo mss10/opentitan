@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,10 +10,7 @@ class csrng_smoke_test extends csrng_base_test;
   function void configure_env();
     super.configure_env();
 
-    cfg.otp_en_cs_sw_app_read_pct = 100;
-    cfg.sw_app_enable_pct         = 100;
-
-    `DV_CHECK_RANDOMIZE_FATAL(cfg)
-    `uvm_info(`gfn, $sformatf("%s", cfg.convert2string()), UVM_LOW)
+    cfg.use_invalid_mubi = 0;
+    cfg.force_state_pct  = 100;
   endfunction
 endclass : csrng_smoke_test

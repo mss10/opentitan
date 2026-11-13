@@ -1,17 +1,18 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 """
 Generates the documentation for the register tool
 
 """
-from .access import SWACCESS_PERMITTED, HWACCESS_PERMITTED
-from reggen import (validate,
-                    ip_block, enum_entry, field,
-                    register, multi_register, window)
+from reggen.access import SWACCESS_PERMITTED, HWACCESS_PERMITTED
+from reggen import (validate, ip_block, enum_entry, field, register,
+                    multi_register, window)
+
+from typing import Any, Optional, TextIO
 
 
-def genout(outfile, msg):
+def genout(outfile: TextIO, msg: str) -> None:
     outfile.write(msg)
 
 
@@ -127,7 +128,7 @@ In all of these the swaccess parameter is inherited from the register
 level, and will be added so this key is always available to the
 backend. The RXS and ENRXS will default to zero reset value (unless
 something different is provided for the register) and will have the
-key added, but TXILVL expicitly sets its reset value as 2.
+key added, but TXILVL explicitly sets its reset value as 2.
 
 The missing bits 17 and 18 will be treated as reserved by the tool, as
 will any bits between 21 and the maximum in the register.
@@ -162,15 +163,16 @@ for things that are not registers (for example access to a buffer ram).
 regwen_intro = """
 
 Registers can protect themselves from software writes by using the
-register attribute regwen. When not an emptry string (the default
+register attribute regwen. When not an empty string (the default
 value), regwen indicates that another register must be true in order
-to allow writes to this register.  This is useful for the prevention
+to allow writes to this register. This is useful for the prevention
 of software modification.  The register-enable register (call it
-REGWEN) must be one bit in width, and should default to 1 and be rw1c
-for preferred security control.  This allows all writes to proceed
+REGWEN) must be either one bit or 4 bit in width to support a FI-protected
+multi-bit REGWEN. The default value should be true and be rw1c for
+preferred security control. This allows all writes to proceed
 until at some point software disables future modifications by clearing
 REGWEN. An error is reported if REGWEN does not exist, contains more
-than one bit, is not `rw1c` or does not default to 1. One REGWEN can
+than one bit, is not `rw1c` or does not default to true. One REGWEN can
 protect multiple registers. The REGWEN register must precede those
 registers that refer to it in the .hjson register list. An example:
 
@@ -200,8 +202,8 @@ doc_tail = """
 """
 
 
-def doc_tbl_head(outfile, use):
-    if use is not None:
+def doc_tbl_head(outfile: TextIO, use: bool) -> None:
+    if use:
         genout(outfile, "\nKey | Kind | Type | Description of Value\n")
         genout(outfile, "--- | ---- | ---- | --------------------\n")
     else:
@@ -209,10 +211,14 @@ def doc_tbl_head(outfile, use):
         genout(outfile, "--- | -----------\n")
 
 
-def doc_tbl_line(outfile, key, use, desc):
+def doc_tbl_line(outfile: TextIO, key: str, use: Optional[str],
+                 desc: Any) -> None:
     if use is not None:
         desc_key, desc_txt = desc
-        val_type = (validate.val_types[desc_key][0]
+        # A key that accepts more than one type lists its type codes separated
+        # by '|', e.g. 'l|g' for a key that is either a list or a group.
+        val_type = (' or '.join(validate.val_types[k][0]
+                                for k in desc_key.split('|'))
                     if desc_key is not None else None)
     else:
         assert isinstance(desc, str)
@@ -220,6 +226,7 @@ def doc_tbl_line(outfile, key, use, desc):
         desc_txt = desc
 
     if val_type is not None:
+        assert use is not None
         genout(
             outfile, '{} | {} | {} | {}\n'.format(key, validate.key_use[use],
                                                   val_type, desc_txt))
@@ -227,7 +234,7 @@ def doc_tbl_line(outfile, key, use, desc):
         genout(outfile, key + " | " + desc_txt + "\n")
 
 
-def document(outfile):
+def document(outfile: TextIO) -> None:
     genout(outfile, doc_intro)
     for x in validate.val_types:
         genout(
@@ -235,19 +242,19 @@ def document(outfile):
             validate.val_types[x][0] + " | " + validate.val_types[x][1] + "\n")
 
     genout(outfile, swaccess_intro)
-    doc_tbl_head(outfile, None)
+    doc_tbl_head(outfile, False)
     for key, value in SWACCESS_PERMITTED.items():
         doc_tbl_line(outfile, key, None, value[0])
 
     genout(outfile, hwaccess_intro)
-    doc_tbl_head(outfile, None)
-    for key, value in HWACCESS_PERMITTED.items():
-        doc_tbl_line(outfile, key, None, value[0])
+    doc_tbl_head(outfile, False)
+    for key, hw_value in HWACCESS_PERMITTED.items():
+        doc_tbl_line(outfile, key, None, hw_value[0])
 
     genout(
         outfile, "\n\nThe top level of the JSON is a group containing "
         "the following keys:\n")
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in ip_block.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
     for k, v in ip_block.OPTIONAL_FIELDS.items():
@@ -257,7 +264,7 @@ def document(outfile):
     genout(
         outfile, "\n\nThe list of registers includes register definition "
         "groups containing the following keys:\n")
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in register.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
     for k, v in register.OPTIONAL_FIELDS.items():
@@ -267,7 +274,7 @@ def document(outfile):
     genout(
         outfile, "\n\nIn the fields list each field definition is a group "
         "itself containing the following keys:\n")
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in field.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
     for k, v in field.OPTIONAL_FIELDS.items():
@@ -275,14 +282,14 @@ def document(outfile):
     genout(outfile, field_example)
 
     genout(outfile, "\n\nDefinitions in an enumeration group contain:\n")
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in enum_entry.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
 
     genout(
         outfile, "\n\nThe list of registers may include single entry groups "
         "to control the offset, open a window or generate registers:\n")
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for x in validate.list_optone:
         doc_tbl_line(outfile, x, 'o', validate.list_optone[x])
 
@@ -290,14 +297,14 @@ def document(outfile):
     genout(outfile, regwen_intro)
 
     genout(outfile, window_intro)
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in window.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
     for k, v in window.OPTIONAL_FIELDS.items():
         doc_tbl_line(outfile, k, 'o', v)
 
     genout(outfile, multi_intro)
-    doc_tbl_head(outfile, 1)
+    doc_tbl_head(outfile, True)
     for k, v in multi_register.REQUIRED_FIELDS.items():
         doc_tbl_line(outfile, k, 'r', v)
     for k, v in multi_register.OPTIONAL_FIELDS.items():

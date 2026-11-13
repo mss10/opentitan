@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -10,6 +10,7 @@ interface rom_ctrl_cov_if (
     input kmac_pkg::app_req_t         kmac_data_o,
     input logic                       exp_digest_de,
     input tlul_pkg::tl_h2d_t          rom_tl_i,
+    input tlul_pkg::tl_d2h_t          rom_tl_o,
     input tlul_pkg::tl_h2d_t          regs_tl_i,
     input rom_ctrl_pkg::pwrmgr_data_t pwrmgr_data_o
 );
@@ -20,7 +21,6 @@ interface rom_ctrl_cov_if (
 
   bit en_full_cov = 1'b1;
   bit en_intg_cov = 1'b1;
-
   /////////////////////////////////////
   // KMAC APP interface cover points //
   /////////////////////////////////////
@@ -31,17 +31,17 @@ interface rom_ctrl_cov_if (
     option.per_instance = 1;
 
     // Cover some basic stalling behavior on the kmac ready input
-    cp_kmac_ready: coverpoint kmac_data_i.ready iff (kmac_data_o.valid) {
+    cp_kmac_ready: coverpoint kmac_data_i.req_ready iff (kmac_data_o.req_valid) {
       bins zero_delay_5 = (1'b1[*5]);
       bins stall_1      = (1'b1 => 1'b0 => 1'b1);
       bins stall_long   = (1'b0[*5:10] => 1'b1);
       bins stall_repeat = (1'b0[*1:10] => 1'b1 => 1'b0[*1:10]);
     }
 
-    // Cover the different delays on the kmac done signal
-    cp_kmac_done: coverpoint {kmac_data_i.done, exp_digest_de} {
+    // Cover the different delays on the kmac response valid signal
+    cp_kmac_rsp_vs_digest_timing: coverpoint {kmac_data_i.rsp_valid, exp_digest_de} {
       bins kmac_first = {2'b11}; // kmac responds while still reading digest
-      bins rom_first  = (2'b00 => 2'b10); // kmac responds after digest read
+      bins rom_first  = (2'b00 => 2'b10); // kmac responds after digest has been read
       bins same_cycle = (2'b01 => 2'b10); // kmac responds as digest read completes
     }
 
@@ -59,16 +59,22 @@ interface rom_ctrl_cov_if (
 
     // Cover rom requests around the time of check completion
     cp_rom_req_check: coverpoint {rom_tl_i.a_valid, pwrmgr_data_o.done} {
-      bins req_before_done = (2'b10 => 2'b11);
-      bins req_and_done    = (2'b00 => 2'b11);
-      bins req_after_done  = (2'b01 => 2'b10);
+      bins req_before_done  = ({1'b1, prim_mubi_pkg::MuBi4False} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
+      bins req_and_done     = ({1'b0, prim_mubi_pkg::MuBi4False} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
+      bins req_after_done   = ({1'b0, prim_mubi_pkg::MuBi4True} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
     }
 
     // Cover csr requests around the time of check completion
     cp_regs_req_check: coverpoint {regs_tl_i.a_valid, pwrmgr_data_o.done} {
-      bins req_before_done = (2'b10 => 2'b11);
-      bins req_and_done    = (2'b00 => 2'b11);
-      bins req_after_done  = (2'b01 => 2'b10);
+      bins req_before_done  = ({1'b1, prim_mubi_pkg::MuBi4False} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
+      bins req_and_done     = ({1'b0, prim_mubi_pkg::MuBi4False} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
+      bins req_after_done   = ({1'b0, prim_mubi_pkg::MuBi4True} =>
+                               {1'b1, prim_mubi_pkg::MuBi4True});
     }
 
   endgroup
@@ -84,9 +90,10 @@ interface rom_ctrl_cov_if (
     option.per_instance = 1;
 
     // Cover the check pass and fail case
-    cp_rom_check_condition: coverpoint pwrmgr_data_o.good iff (pwrmgr_data_o.done) {
-      bins check_pass = {1'b1};
-      bins check_fail = {1'b0};
+    cp_rom_check_condition: coverpoint pwrmgr_data_o.good
+      iff (pwrmgr_data_o.done == prim_mubi_pkg::MuBi4True) {
+      bins check_pass = {prim_mubi_pkg::MuBi4True};
+      bins check_fail = {prim_mubi_pkg::MuBi4False};
     }
 
   endgroup

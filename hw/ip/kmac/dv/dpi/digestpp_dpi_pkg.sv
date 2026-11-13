@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,27 +12,27 @@ package digestpp_dpi_pkg;
 
   // DPI-C imports
   import "DPI-C" context function void c_dpi_sha3_224(
-    input bit[7:0]      msg[],
-    input int unsigned  msg_len,
-    output bit[7:0]     digest[]
+    input bit[7:0]          msg[],
+    input longint unsigned  msg_len,
+    output bit[7:0]         digest[]
   );
 
   import "DPI-C" context function void c_dpi_sha3_256(
-    input bit[7:0]      msg[],
-    input int unsigned  msg_len,
-    output bit[7:0]     digest[]
+    input bit[7:0]          msg[],
+    input longint unsigned  msg_len,
+    output bit[7:0]         digest[]
   );
 
   import "DPI-C" context function void c_dpi_sha3_384(
-    input bit[7:0]      msg[],
-    input int unsigned  msg_len,
-    output bit[7:0]     digest[]
+    input bit[7:0]          msg[],
+    input longint unsigned  msg_len,
+    output bit[7:0]         digest[]
   );
 
   import "DPI-C" context function void c_dpi_sha3_512(
-    input bit[7:0]      msg[],
-    input int unsigned  msg_len,
-    output bit[7:0]     digest[]
+    input bit[7:0]          msg[],
+    input longint unsigned  msg_len,
+    output bit[7:0]         digest[]
   );
 
   import "DPI-C" context function void c_dpi_shake128(

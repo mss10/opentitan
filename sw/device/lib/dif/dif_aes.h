@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,7 +21,7 @@ extern "C" {
 /**
  *
  * @file
- * @brief <a href="/hw/ip/aes/doc/">AES</a> Device Interface Functions
+ * @brief <a href="/book/hw/ip/aes/">AES</a> Device Interface Functions
  *
  * This API assumes transactional nature of work, where the peripheral is
  * configured once per message (data consisting of 1..N 128-bit blocks), and
@@ -43,7 +43,7 @@ extern "C" {
  * AES registers must be securely cleared, by calling `dif_aes_end`.
  *
  * Please see the following documentation for further information:
- * https://docs.opentitan.org/hw/ip/aes/doc/
+ * https://opentitan.org/book/hw/ip/aes/
  * https://csrc.nist.gov/csrc/media/publications/fips/197/final/documents/fips-197.pdf
  * https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf
  */
@@ -82,95 +82,207 @@ typedef struct dif_aes_data {
 } dif_aes_data_t;
 
 /**
+ * AES operation.
+ */
+typedef enum dif_aes_operation {
+  /**
+   * AES encryption.
+   */
+  kDifAesOperationEncrypt = 1,
+  /**
+   * AES decryption.
+   */
+  kDifAesOperationDecrypt = 2,
+} dif_aes_operation_t;
+
+/**
+ * AES block cipher mode of operation.
+ */
+typedef enum dif_aes_mode {
+  /**
+   * The Electronic Codebook Mode.
+   * In ECB cipher mode the key must be changed for every new block of data.
+   * This is the only secure way to use ECB cipher mode.
+   *
+   * Note: The ECB cipher mode doesn't use the iv parameter of the
+   * `dif_aes_start` function.
+   *
+   * Note: it is discouraged to use this cipher mode, due to impractical amount
+   *       of different keys required to encrypt/decrypt multi-block messages.
+   */
+  kDifAesModeEcb = 1,
+
+  /**
+   * The Cipher Block Chaining Mode.
+   *
+   * In CBC cipher mode, the same key can be used for all messages, however
+   * new Initialisation Vector (IV) must be generated for any new message. The
+   * following condition must be true:
+   *     The IV must be unpredictable (it must not be possible to predict the IV
+   *     that will be associated to the plaintext in advance of the generation
+   * of the IV).
+   *
+   * With key length less than 256 bits, the excess portion of the `key` can be
+   * written with any data (preferably random).
+   */
+  kDifAesModeCbc = (1 << 1),
+
+  /**
+   * The Cipher Feedback Mode.
+   *
+   * In CFB cipher mode, the same key can be used for all messages, however
+   * new Initialisation Vector (IV) must be generated for any new message. The
+   * following condition must be true:
+   *     The IV must be unpredictable (it must not be possible to predict the IV
+   *     that will be associated to the plaintext in advance of the generation
+   * of the IV).
+   *
+   * With key length less than 256 bits, the excess portion of the `key` can be
+   * written with any data (preferably random).
+   */
+  kDifAesModeCfb = (1 << 2),
+
+  /**
+   * The Output Feedback Mode.
+   *
+   * In OFB cipher mode, the same key can be used for all messages, and the
+   * Initialization Vector (IV) need NOT be unpredictable. The following
+   * conditions must be true:
+   *     OFB mode requires a unique initialization vector for every message that
+   *     is ever encrypted under a given key, across all messages.
+   *
+   * With key length less than 256 bits, the excess portion of the `key` can be
+   * written with any data (preferably random).
+   */
+  kDifAesModeOfb = (1 << 3),
+
+  /**
+   * The Counter Mode.
+   *
+   * In CTR cipher mode, the same key can be used for all messages, if the
+   * following condition is true:
+   *     CTR mode requires a unique counter block for each plaintext block that
+   *     is ever encrypted under a given key, across all messages.
+   *
+   * With key length less than 256 bits, the excess portion of the `key` can be
+   * written with any data (preferably random).
+   */
+  kDifAesModeCtr = (1 << 4),
+
+  /**
+   * The Galois/Counter Mode.
+   */
+  kDifAesModeGcm = (1 << 5),
+} dif_aes_mode_t;
+
+/**
  * AES key length in bits.
  */
 typedef enum dif_aes_key_length {
   /**
    * 128 bit wide AES key.
    */
-  kDifAesKey128 = 0,
+  kDifAesKey128 = 1,
   /**
    * 192 bit wide AES key.
    */
-  kDifAesKey192,
+  kDifAesKey192 = (1 << 1),
   /**
    * 256 bit wide AES key.
    */
-  kDifAesKey256,
+  kDifAesKey256 = (1 << 2)
 } dif_aes_key_length_t;
 
 /**
- * AES mode.
+ * AES manual operation.
  */
-typedef enum dif_aes_mode {
-  /**
-   * AES encryption mode.
-   */
-  kDifAesModeEncrypt = 0,
-  /**
-   * AES decryption mode.
-   */
-  kDifAesModeDecrypt,
-} dif_aes_mode_t;
-
-/**
- * AES operation.
- */
-typedef enum dif_aes_operation {
+typedef enum dif_aes_manual_operation {
   /**
    * AES operates in automatic mode - which means that the encryption/decryption
    * is automatically triggered on every successful `dif_aes_*_load_data()`.
    */
-  kDifAesOperationAuto = 0,
+  kDifAesManualOperationAuto = 0,
   /**
    * AES operates in manual mode - which means that the encryption/decryption
    * is manually triggered by `dif_aes_trigger(kDifAesTriggerStart)`.
    */
-  kDifAesOperationManual,
-} dif_aes_operation_t;
+  kDifAesManualOperationManual,
+} dif_aes_manual_operation_t;
 
 /**
- * AES masking.
+ * AES key sideloaded.
  *
- * NOTE:
- * This should only be used for development purpose (SCA), and expected to be
- * removed before the production version.
+ * Controls whether the AES uses the key provided by the key manager or
+ * software.
  */
-typedef enum dif_aes_masking {
+typedef enum dif_aes_key_provider {
   /**
-   * Pseudo-random generator is used for masking.
+   * The key is provided by software via `dif_aes_key_share_t`.
    */
-  kDifAesMaskingInternalPrng = 0,
+  kDifAesKeySoftwareProvided = 0,
   /**
-   * Completely disables masking by forcing all masks to zero.
+   * The key be provided by the key manager.
    */
-  kDifAesMaskingForceZero,
-} dif_aes_masking_t;
+  kDifAesKeySideload,
+} dif_aes_key_provider_t;
+
+/**
+ * AES reseeding rate
+ *
+ * Controls the reseeding rate of the internal pseudo-random number generator
+ * (PRNG) used for masking.
+ */
+typedef enum dif_aes_mask_reseeding {
+  /**
+   * The masking PRNG will be reseed every block.
+   */
+  kDifAesReseedPerBlock = 1 << 0,
+  /**
+   * The masking PRNG will be reseed every 64 blocks.
+   */
+  kDifAesReseedPer64Block = 1 << 1,
+  /**
+   * The masking PRNG will be reseed every 8192 blocks.
+   */
+  kDifAesReseedPer8kBlock = 1 << 2,
+} dif_aes_mask_reseeding_t;
 
 /**
  * Parameters for an AES transaction.
  */
 typedef struct dif_aes_transaction {
-  dif_aes_key_length_t key_len;
-  dif_aes_mode_t mode;
   dif_aes_operation_t operation;
-  dif_aes_masking_t masking;
+  dif_aes_mode_t mode;
+  dif_aes_key_length_t key_len;
+  dif_aes_manual_operation_t manual_operation;
+  dif_aes_key_provider_t key_provider;
+  dif_aes_mask_reseeding_t mask_reseeding;
+  /**
+   * If true, the internal pseudo-random number generators used for clearing and
+   * masking will be reseeded every time the key changes.
+   */
+  bool reseed_on_key_change;
+  /**
+   * If true, the internal pseudo-random number generator used for masking is
+   * not advancing leading to constant masks.
+   *
+   * NOTE: This should only be used for development purpose (SCA), and is
+   * expected to be removed for the production version.
+   */
+  bool force_masks;
+  /**
+   * If true, the module will continuously run encryption/decryption when
+   * configured in manual mode.
+   *
+   * NOTE: This should only be used for power virus testing.
+   */
+  bool keep_start_trigger_high;
+  /**
+   * If true, `reseed_on_key_change`, `force_masks` and
+   * `keep_start_trigger_high` will be locked until the device is reset.
+   */
+  bool ctrl_aux_lock;
 } dif_aes_transaction_t;
-
-/**
- * An AES alert type.
- */
-typedef enum dif_aes_alert {
-  /**
-   * Fatal alert conditions include i) storage errors in the Control Register,
-   * and ii) if any internal FSM enters an invalid state.
-   */
-  kDifAlertFatalFault = 0,
-  /**
-   * Recoverable alert conditions include update errors in the Control Register.
-   */
-  kDifAlertRecovCtrlUpdateErr,
-} dif_aes_alert_t;
 
 /**
  * Resets an instance of AES.
@@ -184,81 +296,27 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_aes_reset(const dif_aes_t *aes);
 
 /**
- * Begins an AES transaction in ECB mode.
- *
- * In ECB cipher mode the key must be changed for every new block of data. This
- * is the only secure way to use ECB cipher mode.
+ * Begins an AES transaction in the mode selected by the `transaction->mode`.
  *
  * Each call to this function should be sequenced with a call to
  * `dif_aes_end()`.
- *
- * Note: it is discouraged to use this cipher mode, due to inpractical amount
- *       of different keys required to encrypt/decrypt multi-block messages.
  *
  * The peripheral must be in IDLE state for this operation to take effect, and
  * will return `kDifAesBusy` if this condition is not met.
  *
  * @param aes AES state data.
  * @param transaction Configuration data.
+ * @param key Encryption/decryption key when `kDifAesKeySoftwareProvided`, can
+ * be `NULL` otherwise.
+ * @param iv Initialization vector when the mode isn't `kDifAesModeEcb`, can be
+ * `NULL` otherwise.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
-dif_result_t dif_aes_start_ecb(const dif_aes_t *aes,
-                               const dif_aes_transaction_t *transaction,
-                               dif_aes_key_share_t key);
-
-/**
- * Begins an AES transaction in CBC mode.
- *
- * In CBC cipher mode, the same key can be used for all messages, however
- * new Initialisation Vector (IV) must be generated for any new message. The
- * following condition must be true:
- *     The IV must be unpredictable (it must not be possible to predict the IV
- *     that will be associated to the plaintext in advance of the generation of
- *     the IV).
- *
- * With key length less than 256 bits, the excess portion of the `key` can be
- * written with any data (preferably random).
- *
- * The peripheral must be in IDLE state for this operation to take effect, and
- * will return `kDifAesStartBusy` if this condition is not met.
- *
- * @param aes AES state data.
- * @param transaction Configuration data.
- * @param key Masked AES key.
- * @param iv AES Initialisation Vector.
- * @return The result of the operation.
- */
-OT_WARN_UNUSED_RESULT
-dif_result_t dif_aes_start_cbc(const dif_aes_t *aes,
-                               const dif_aes_transaction_t *transaction,
-                               dif_aes_key_share_t key, dif_aes_iv_t iv);
-
-/**
- * Begins an AES transaction in CTR mode.
- *
- * In CTR cipher mode, the same key can be used for all messages, if the
- * following condition is true:
- *     CTR mode requires a unique counter block for each plaintext block that
- *     is ever encrypted under a given key, across all messages.
- *
- * With key length less than 256 bits, the excess portion of the `key` can be
- * written with any data (preferably random).
- *
- * The peripheral must be in IDLE state for this operation to take effect, and
- * will return `kDifAesStartBusy` if this condition is not met.
- *
- * @param aes AES state data.
- * @param transaction Configuration data.
- * @param key Masked AES key.
- * @param iv AES Initial Counter Value.
- * @return The result of the operation.
- */
-OT_WARN_UNUSED_RESULT
-dif_result_t dif_aes_start_ctr(const dif_aes_t *aes,
-                               const dif_aes_transaction_t *transaction,
-                               dif_aes_key_share_t key, dif_aes_iv_t iv);
-
+dif_result_t dif_aes_start(const dif_aes_t *aes,
+                           const dif_aes_transaction_t *transaction,
+                           const dif_aes_key_share_t *key,
+                           const dif_aes_iv_t *iv);
 /**
  * Ends an AES transaction.
  *
@@ -303,6 +361,51 @@ dif_result_t dif_aes_load_data(const dif_aes_t *aes, const dif_aes_data_t data);
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_aes_read_output(const dif_aes_t *aes, dif_aes_data_t *data);
+
+/**
+ * Puts the AES GCM into the provided phase.
+ *
+ * @param aes AES state data.
+ * @param phase The AES GCM phase we want to enter.
+ * @param num_valid_bytes The number of valid bytes for the AES block.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aes_set_gcm_phase(const dif_aes_t *aes, uint32_t phase,
+                                   size_t num_valid_bytes);
+
+/**
+ * Loads len(aad) || len(ptx) into the AES-GCM.
+ *
+ * @param aes AES state data.
+ * @param len_ptx Number of plaintext bits.
+ * @param len_aad Number of AAD bits.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aes_load_gcm_tag_len(const dif_aes_t *aes, uint64_t len_ptx,
+                                      uint64_t len_aad);
+
+/**
+ * Process a stream of data containing the plain text and output a stream of
+ * data with the cipher text.
+ *
+ * This function should be used when performance is desired. It requires the
+ * automatic operation mode activated.
+ *
+ * The peripheral must be able to accept the input (INPUT_READY set), and
+ * will return `kDifAesLoadDataBusy` if this condition is not met.
+ *
+ * @param aes AES handle.
+ * @param plain_text AES Input Data.
+ * @param cipher_text AES Output Data.
+ * @param block_amount The amount of blocks to be encrypted.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aes_process_data(const dif_aes_t *aes,
+                                  const dif_aes_data_t *plain_text,
+                                  dif_aes_data_t *cipher_text,
+                                  size_t block_amount);
 
 /**
  * AES Trigger flags.
@@ -385,7 +488,7 @@ typedef enum dif_aes_status {
  *
  * @param aes AES state data.
  * @param flag Status flag to query.
- * @param set Flag state (set/unset).
+ * @param[out] set Flag state (set/unset).
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
@@ -393,15 +496,29 @@ dif_result_t dif_aes_get_status(const dif_aes_t *aes, dif_aes_status_t flag,
                                 bool *set);
 
 /**
- * Forces a particular alert, causing it to be serviced as if hardware had
- * asserted it.
+ * Read the current initialization vector from its register.
  *
- * @param aes AES state data.
- * @param alert An alert type.
+ * @param aes AES handle.
+ * @param iv The pointer to receive the initialization vector.
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
-dif_result_t dif_aes_alert_force(const dif_aes_t *aes, dif_aes_alert_t alert);
+dif_result_t dif_aes_read_iv(const dif_aes_t *aes, dif_aes_iv_t *iv);
+
+/**
+ * Loads AES IV.
+ *
+ * This function will load the provided IV into the AES.
+ *
+ * The peripheral must be idle and will return `kDifUnavailable` if this
+ * condition is not met.
+ *
+ * @param aes AES state data.
+ * @param data AES Input Data.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_aes_load_iv(const dif_aes_t *aes, const dif_aes_iv_t iv);
 
 #ifdef __cplusplus
 }  // extern "C"

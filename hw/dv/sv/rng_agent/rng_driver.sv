@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,15 +12,6 @@ class rng_driver extends dv_base_driver #(.ITEM_T(rng_item),
   // rng_agent_cfg: cfg
 
   `uvm_component_new
-
-  virtual task run_phase(uvm_phase phase);
-    // base class forks off reset_signals() and get_and_drive() tasks
-    super.run_phase(phase);
-  endtask
-
-  // reset signals
-  virtual task reset_signals();
-  endtask
 
   // drive outputs based on inputs
   virtual task get_and_drive();

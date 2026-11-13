@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,11 +7,13 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/sram_ctrl/doc/">SRAM Controller</a> Device Interface
+ * @brief <a href="/book/hw/ip/sram_ctrl/">SRAM Controller</a> Device Interface
  * Functions
  */
 
 #include <stdint.h>
+
+#include "sw/device/lib/base/multibits.h"
 
 #include "sw/device/lib/dif/autogen/dif_sram_ctrl_autogen.h"
 
@@ -91,10 +93,16 @@ typedef enum dif_sram_ctrl_lock {
    * of the chip (EN_SRAM_IFETCH fuse).
    */
   kDifSramCtrlLockExec,
+  /**
+   * Readback feature lock. When locked, disabling or enabling the SRAM readback
+   * feature is not available anymore. Includes the following API:
+   * `dif_sram_ctrl_readback_set`.
+   */
+  kDifSramCtrlLockReadback,
 } dif_sram_ctrl_lock_t;
 
 /**
- * Performs SRAM scrambling.
+ * Performs blocking SRAM scrambling operation.
  *
  * This function should only be called when the data is no longer used.
  *
@@ -107,13 +115,10 @@ typedef enum dif_sram_ctrl_lock {
  * values or predictable data that could potentially make "unscrambling"
  * easier.
  *
- * This operation is expected to take a significant amount of CPU cycles. The
- * status can be checked via `dif_sram_ctrl_scramble_is_busy`, which is useful
- * when a non-blocking work flow is desirable. Otherwise any SRAM access will
- * automatically block until this operation has finished.
- *
- * The equivalent effect can be achieved by calling
- * `dif_sram_ctrl_request_new_key`, followed by `dif_sram_ctrl_wipe`.
+ * This operation is expected to take a significant amount of CPU cycles. If
+ * a non-blocking alternative is required, then `dif_sram_ctrl_request_new_key`,
+ * should be used followed by `dif_sram_ctrl_wipe`. The status of these
+ * operations can be found through `dif_sram_ctrl_get_status`.
  *
  * Note: when dealing with the Main RAM, additional implication is that the
  *       C runtime can be invalidated by the call to this function, and must be
@@ -124,19 +129,6 @@ typedef enum dif_sram_ctrl_lock {
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_sram_ctrl_scramble(const dif_sram_ctrl_t *sram_ctrl);
-
-/**
- * Checks whether SRAM scramble is still progress.
- *
- * Useful when a non-blocking work flow is desirable.
- *
- * @param sram_ctrl A SRAM Controller handle.
- * @param[out] is_busy Out-param for the busy state.
- * @return The result of the operation.
- */
-OT_WARN_UNUSED_RESULT
-dif_result_t dif_sram_ctrl_scramble_is_busy(const dif_sram_ctrl_t *sram_ctrl,
-                                            bool *is_busy);
 
 /**
  * Requests a new scrambling key.
@@ -158,6 +150,9 @@ dif_result_t dif_sram_ctrl_scramble_is_busy(const dif_sram_ctrl_t *sram_ctrl,
  *       C runtime can be invalidated by the call to this function, and must be
  *       re-configured prior to any C code execution.
  *
+ * Note: during an ongoing memory initialization, the hardware ignores the key
+ *       request.
+ *
  * @param sram_ctrl A SRAM Controller handle.
  * @return The result of the operation.
  */
@@ -177,6 +172,9 @@ dif_result_t dif_sram_ctrl_request_new_key(const dif_sram_ctrl_t *sram_ctrl);
  * Note: when dealing with the Main RAM, additional implication is that the
  *       C runtime can be invalidated by the call to this function, and must be
  *       re-configured prior to any C code execution.
+ *
+ * Note: during this memory initialization, the hardware ignores key requests
+ *       that are issued while this operation is pending.
  *
  * @param sram_ctrl A SRAM Controller handle.
  * @return The result of the operation.
@@ -207,6 +205,17 @@ dif_result_t dif_sram_ctrl_exec_set_enabled(const dif_sram_ctrl_t *sram_ctrl,
                                             dif_toggle_t state);
 
 /**
+ * Sets whether the SRAM readback feature is enabled or disabled.
+ *
+ * @param sram_ctrl A SRAM Controller handle.
+ * @param state The new toggle state for the SRAM readback feature.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_sram_ctrl_readback_set(const dif_sram_ctrl_t *sram_ctrl,
+                                        dif_toggle_t state);
+
+/**
  * Queries the SRAM Controller status.
  *
  * `dif_sram_ctrl_status_t` is used to then extract individual status bits.
@@ -220,19 +229,10 @@ dif_result_t dif_sram_ctrl_get_status(const dif_sram_ctrl_t *sram_ctrl,
                                       dif_sram_ctrl_status_bitfield_t *status);
 
 /**
- * Forces a fatal error.
- *
- * @param sram_ctrl A SRAM Controller handle.
- * @return The result of the operation.
- */
-OT_WARN_UNUSED_RESULT
-dif_result_t dif_sram_ctrl_alert_test(const dif_sram_ctrl_t *sram_ctrl);
-
-/**
  * Locks out requested SRAM Controller functionality.
  *
  * This function is reentrant: calling it while functionality is locked will
- * have no effect and return `kDifSramCtrlOk`.
+ * have no effect and return `kDifOk`.
  *
  * @param sram_ctrl A SRAM Controller handle.
  * @param lock SRAM functionality to lock.
@@ -254,6 +254,26 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_sram_ctrl_is_locked(const dif_sram_ctrl_t *sram_ctrl,
                                      dif_sram_ctrl_lock_t lock,
                                      bool *is_locked);
+
+/**
+ * Checks whether requested SRAM Controller successfully obtained a new key.
+ *
+ * success is set to kMultiBitBool4True if a key rotation was successful.
+ *
+ * The clear parameter can be set to kMultiBitBool4True in order to clear
+ * the key rotation state back to kMultiBitBool4False after reading it.
+ * If the state should not be cleared, set clear to kMultiBitBool4False.
+ *
+ * @param sram_ctrl A SRAM Controller handle.
+ * @param[out] success Outparam for the success state.
+ * @param clear Parameter indicating whether to CSR should be cleared after
+ *              reading.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_sram_ctrl_scr_key_rotated(const dif_sram_ctrl_t *sram_ctrl,
+                                           multi_bit_bool_t *success,
+                                           multi_bit_bool_t clear);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -12,38 +12,46 @@ module tb;
   import spi_host_reg_pkg::*;
   import lc_ctrl_pkg::*;
 
+  import spi_device_pkg::passthrough_req_t;
+  import spi_device_pkg::passthrough_rsp_t;
+
   // macro includes
   `include "uvm_macros.svh"
   `include "dv_macros.svh"
 
   wire clk, rst_n;
-  wire clk_core, rst_core_n;
-  wire devmode;
   wire [NUM_MAX_INTERRUPTS-1:0] interrupts;
+  wire [3:0]                    si_pulldown;
+  wire [3:0]                    so_pulldown;
+  wire [3:0]                    sio;
 
-  lc_tx_t           scanmode_i;
-  wire              cio_sck_o;
-  wire              cio_sck_en_o;
-  wire  [MaxCS-1:0] cio_csb_o;
-  wire  [MaxCS-1:0] cio_csb_en_o;
-  logic [3:0]       cio_sd_o;
-  logic [3:0]       cio_sd_en_o;
-  logic [3:0]       cio_sd_i;
-  logic             intr_error;
-  logic             intr_event;
+  lc_tx_t                       scanmode_i;
+  logic                         cio_sck_o;
+  logic                         cio_sck_en_o;
+  logic [SPI_HOST_NUM_CS-1:0]   cio_csb_o;
+  logic [SPI_HOST_NUM_CS-1:0]   cio_csb_en_o;
+  logic [3:0]                   cio_sd_o;
+  logic [3:0]                   cio_sd_en_o;
+  logic [3:0]                   cio_sd_i;
+  logic                         intr_error;
+  logic                         intr_event;
+
+  passthrough_req_t             passthrough_i;
+  passthrough_rsp_t             passthrough_o;
 
   // interfaces
   clk_rst_if   clk_rst_if(.clk(clk), .rst_n(rst_n));
-  clk_rst_if   clk_rst_core_if(.clk(clk_core), .rst_n(rst_core_n));
-  pins_if #(1) devmode_if(devmode);
   pins_if #(NUM_MAX_INTERRUPTS) intr_if(.pins(interrupts));
   tl_if        tl_if(.clk(clk), .rst_n(rst_n));
-  spi_if       spi_if(.rst_n(rst_core_n));
+  spi_if       spi_if(.rst_n(rst_n), .sio(sio));
+  spi_passthrough_if       spi_passthrough_if(.rst_n(rst_n));
 
-  `DV_ALERT_IF_CONNECT
+  `DV_ALERT_IF_CONNECT()
 
   // dut
-  spi_host spi_host (
+  spi_host # (
+    .NumCS(SPI_HOST_NUM_CS)
+  ) dut (
     .clk_i                (clk),
     .rst_ni               (rst_n),
 
@@ -53,10 +61,6 @@ module tb;
     // alerts
     .alert_rx_i           (alert_rx),
     .alert_tx_o           (alert_tx),
-    // scan mode
-    .clk_core_i           (clk_core),
-    .rst_core_ni          (rst_core_n),
-    .scanmode_i           (scanmode_i),
     // spi i/o
     .cio_sck_o            (cio_sck_o),
     .cio_sck_en_o         (cio_sck_en_o),
@@ -65,38 +69,92 @@ module tb;
     .cio_sd_o             (cio_sd_o),
     .cio_sd_en_o          (cio_sd_en_o),
     .cio_sd_i             (cio_sd_i),
+    // passthrough i/o
+    .passthrough_i        (passthrough_i),
+    .passthrough_o        (passthrough_o),
+    // lsio trigger to the DMA
+    .lsio_trigger_o       (),
+    // racl i/o
+    .racl_policies_i      (top_racl_pkg::RACL_POLICY_VEC_DEFAULT),
+    .racl_error_o         (),
     // intr i/f
     .intr_error_o         (intr_error),
     .intr_spi_event_o     (intr_event)
   );
 
-  assign spi_if.sck = (cio_sck_en_o) ? cio_sck_o : 1'b0;
-  initial begin
-    for (int i = 0; i < 4; i++) begin
-      if (cio_sd_en_o[i] == 1'b1) begin
-        spi_if.sio[i] = cio_sd_o[i];
-      end else begin
-        cio_sd_i[i] = spi_if.sio[i];
-      end
-      spi_if.csb[i] = (cio_csb_en_o == 1'b1 && i < MaxCS) ? cio_csb_o[i] : 1'b1;
+  assign passthrough_i.passthrough_en = spi_passthrough_if.passthrough_en;
+  assign passthrough_i.sck_en         = spi_passthrough_if.sck_en;
+  assign passthrough_i.csb_en         = spi_passthrough_if.csb_en;
+  assign passthrough_i.s_en           = spi_passthrough_if.s_en;
+  assign passthrough_i.csb            = spi_passthrough_if.csb;
+  assign passthrough_i.sck            = spi_passthrough_if.sck;
+
+  assign passthrough_i.s                 = spi_passthrough_if.is;
+  assign spi_passthrough_if.os           = passthrough_o.s;
+  assign spi_passthrough_if.cio_sck_o    = cio_sck_o;
+  assign spi_passthrough_if.cio_sck_en_o = cio_sck_en_o;
+  assign spi_passthrough_if.cio_csb_o    = cio_csb_o;
+  assign spi_passthrough_if.cio_csb_en_o = cio_csb_en_o;
+  assign spi_passthrough_if.cio_sd_en_o  = cio_sd_en_o;
+  assign spi_passthrough_if.cio_sd_o     = cio_sd_o;
+
+  assign cio_sd_i = spi_passthrough_if.passthrough_en ? spi_passthrough_if.cio_sd_i : si_pulldown;
+
+  // configure spi_if i/o
+  assign spi_if.sck = (cio_sck_en_o) ? cio_sck_o : 1'bz;
+  for (genvar i = 0; i < 4; i++) begin : gen_tri_state
+    pullup (weak1) pd_in_i (si_pulldown[i]);
+    pullup (weak1) pd_out_i (so_pulldown[i]);
+    assign sio[i]  = (cio_sd_en_o[i]) ? cio_sd_o[i] : 'z;
+    assign (highz0, pull1) sio[i] = !cio_sd_en_o[i];
+    assign si_pulldown[i] = sio[i];
+  end
+
+  // Chip select lines of the SPI agent that the DUT does not have are inactive.
+  for (genvar i = 0; i < spi_agent_pkg::CSB_WIDTH; i++) begin : gen_drive_csb
+    if (i < SPI_HOST_NUM_CS) begin : gen_dut_csb
+      assign spi_if.csb[i] = cio_csb_en_o[i] ? cio_csb_o[i] : 1'b1;
+    end else begin : gen_unused_csb
+      assign spi_if.csb[i] = 1'b1;
     end
   end
 
   assign interrupts[SpiHostError] = intr_error;
   assign interrupts[SpiHostEvent] = intr_event;
-  
+
+  // Bind
+  bind dut.u_spi_core spi_host_fsm_if fast_prescaler_bound_if();
+
   initial begin
     // drive clk and rst_n from clk_if
     clk_rst_if.set_active();
-    clk_rst_core_if.set_active();
     uvm_config_db#(virtual clk_rst_if)::set(null, "*.env", "clk_rst_vif", clk_rst_if);
-    uvm_config_db#(virtual clk_rst_if)::set(null, "*.env", "clk_rst_core_vif", clk_rst_core_if);
     uvm_config_db#(intr_vif)::set(null, "*.env", "intr_vif", intr_if);
-    uvm_config_db#(devmode_vif)::set(null, "*.env", "devmode_vif", devmode_if);
+    uvm_config_db#(virtual spi_passthrough_if)::set(null, "*.env", "spi_passthrough_vif",
+                                                 spi_passthrough_if);
     uvm_config_db#(virtual tl_if)::set(null, "*.env.m_tl_agent*", "vif", tl_if);
     uvm_config_db#(virtual spi_if)::set(null, "*.env.m_spi_agent*", "vif", spi_if);
+
+    uvm_config_db#(virtual spi_host_fsm_if)::set(null, "*.env", "fast_prescaler_bound_if",
+                                                 dut.u_spi_core.fast_prescaler_bound_if);
     $timeformat(-12, 0, " ps", 12);
     run_test();
   end
+
+  `ASSERT(Sck_A,   passthrough_i.passthrough_en -> passthrough_i.sck == cio_sck_o, clk, !rst_n)
+  `ASSERT(Sck_En_A,passthrough_i.passthrough_en -> passthrough_i.sck_en == cio_sck_en_o,
+          clk, !rst_n)
+  `ASSERT(Csb_A,   passthrough_i.passthrough_en -> passthrough_i.csb == cio_csb_o[0], clk, !rst_n)
+  `ASSERT(Csb_En_A,passthrough_i.passthrough_en -> passthrough_i.csb_en == cio_csb_en_o[0],
+          clk, !rst_n)
+  // Passthrough uses CSB[0] only, so the other CSB lines are inactive.  The passthrough_mode vseq
+  // checks that their output enables follow CONTROL.OUTPUT_EN.
+  if (SPI_HOST_NUM_CS > 1) begin : gen_other_csb_asserts
+    `ASSERT(OtherCsb_A,   passthrough_i.passthrough_en -> &cio_csb_o[SPI_HOST_NUM_CS-1:1],
+            clk, !rst_n)
+  end
+  `ASSERT(S_En_A,  passthrough_i.passthrough_en -> passthrough_i.s_en == cio_sd_en_o, clk, !rst_n)
+  `ASSERT(Sd_O_A,  passthrough_i.passthrough_en -> passthrough_i.s == cio_sd_o, clk, !rst_n)
+  `ASSERT(Sd_I_A,  passthrough_i.passthrough_en -> passthrough_o.s == cio_sd_i, clk, !rst_n)
 
 endmodule

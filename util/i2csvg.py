@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 r"""Command-line tool to convert i2c to svg
@@ -9,8 +9,6 @@ import argparse
 import logging as log
 import sys
 from pathlib import PurePath
-
-import pkg_resources  # part of setuptools
 
 from i2csvg import convert
 from reggen import version
@@ -94,19 +92,16 @@ def main():
 
     if args.nosvg:
         makehtml = False
-        outext = '.txt'
     elif extrainfo:
         makehtml = True
-        outext = '.html'
     else:
         makehtml = False
-        outext = '.svg'
 
     with outfile:
         for filename in args.srcfile:
             if (filename == '-'):
                 if (done_stdin):
-                    log.warn("Ignore stdin after first use\n")
+                    log.warning("Ignore stdin after first use\n")
                     continue
                 done_stdin = True
                 infile = sys.stdin

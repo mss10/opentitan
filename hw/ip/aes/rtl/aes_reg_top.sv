@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,22 +9,23 @@
 module aes_reg_top (
   input clk_i,
   input rst_ni,
+  input rst_shadowed_ni,
   input  tlul_pkg::tl_h2d_t tl_i,
   output tlul_pkg::tl_d2h_t tl_o,
   // To HW
   output aes_reg_pkg::aes_reg2hw_t reg2hw, // Write
   input  aes_reg_pkg::aes_hw2reg_t hw2reg, // Read
 
-  // Integrity check errors
-  output logic intg_err_o,
+  output logic shadowed_storage_err_o,
+  output logic shadowed_update_err_o,
 
-  // Config
-  input devmode_i // If 1, explicit error return for unmapped register access
+  // Integrity check errors
+  output logic intg_err_o
 );
 
   import aes_reg_pkg::* ;
 
-  localparam int AW = 7;
+  localparam int AW = 8;
   localparam int DW = 32;
   localparam int DBW = DW/8;                    // Byte Width
 
@@ -53,18 +54,31 @@ module aes_reg_top (
     .err_o(intg_err)
   );
 
-  logic intg_err_q;
+  // also check for spurious write enables
+  logic reg_we_err;
+  logic [34:0] reg_we_check;
+  prim_reg_we_check #(
+    .OneHotWidth(35)
+  ) u_prim_reg_we_check (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .oh_i  (reg_we_check),
+    .en_i  (reg_we && !addrmiss),
+    .err_o (reg_we_err)
+  );
+
+  logic err_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      intg_err_q <= '0;
-    end else if (intg_err) begin
-      intg_err_q <= 1'b1;
+      err_q <= '0;
+    end else if (intg_err || reg_we_err) begin
+      err_q <= 1'b1;
     end
   end
 
   // integrity error output is permanent and should be used for alert generation
   // register errors are transactional
-  assign intg_err_o = intg_err_q | intg_err;
+  assign intg_err_o = err_q | intg_err | reg_we_err;
 
   // outgoing integrity generation
   tlul_pkg::tl_d2h_t tl_o_pre;
@@ -90,6 +104,9 @@ module aes_reg_top (
     .tl_i (tl_reg_h2d),
     .tl_o (tl_reg_d2h),
 
+    .en_ifetch_i(prim_mubi_pkg::MuBi4False),
+    .intg_error_o(),
+
     .we_o    (reg_we),
     .re_o    (reg_re),
     .addr_o  (reg_addr),
@@ -103,7 +120,7 @@ module aes_reg_top (
   // cdc oversampling signals
 
   assign reg_rdata = reg_rdata_next ;
-  assign reg_error = (devmode_i & addrmiss) | wr_err | intg_err;
+  assign reg_error = addrmiss | wr_err | intg_err;
 
   // Define SW related signals
   // Format: <reg>_<field>_{wd|we|qs}
@@ -111,6 +128,8 @@ module aes_reg_top (
   logic alert_test_we;
   logic alert_test_recov_ctrl_update_err_wd;
   logic alert_test_fatal_fault_wd;
+  logic alert_test_regwen_qs;
+  logic alert_test_regwen_wd;
   logic key_share0_0_we;
   logic [31:0] key_share0_0_wd;
   logic key_share0_1_we;
@@ -143,13 +162,21 @@ module aes_reg_top (
   logic [31:0] key_share1_6_wd;
   logic key_share1_7_we;
   logic [31:0] key_share1_7_wd;
+  logic iv_0_re;
   logic iv_0_we;
+  logic [31:0] iv_0_qs;
   logic [31:0] iv_0_wd;
+  logic iv_1_re;
   logic iv_1_we;
+  logic [31:0] iv_1_qs;
   logic [31:0] iv_1_wd;
+  logic iv_2_re;
   logic iv_2_we;
+  logic [31:0] iv_2_qs;
   logic [31:0] iv_2_wd;
+  logic iv_3_re;
   logic iv_3_we;
+  logic [31:0] iv_3_qs;
   logic [31:0] iv_3_wd;
   logic data_in_0_we;
   logic [31:0] data_in_0_wd;
@@ -169,22 +196,43 @@ module aes_reg_top (
   logic [31:0] data_out_3_qs;
   logic ctrl_shadowed_re;
   logic ctrl_shadowed_we;
-  logic ctrl_shadowed_operation_qs;
-  logic ctrl_shadowed_operation_wd;
+  logic [1:0] ctrl_shadowed_operation_qs;
+  logic [1:0] ctrl_shadowed_operation_wd;
   logic [5:0] ctrl_shadowed_mode_qs;
   logic [5:0] ctrl_shadowed_mode_wd;
   logic [2:0] ctrl_shadowed_key_len_qs;
   logic [2:0] ctrl_shadowed_key_len_wd;
   logic ctrl_shadowed_sideload_qs;
   logic ctrl_shadowed_sideload_wd;
+  logic [2:0] ctrl_shadowed_prng_reseed_rate_qs;
+  logic [2:0] ctrl_shadowed_prng_reseed_rate_wd;
   logic ctrl_shadowed_manual_operation_qs;
   logic ctrl_shadowed_manual_operation_wd;
-  logic ctrl_shadowed_force_zero_masks_qs;
-  logic ctrl_shadowed_force_zero_masks_wd;
+  logic ctrl_aux_shadowed_re;
+  logic ctrl_aux_shadowed_we;
+  logic ctrl_aux_shadowed_key_touch_forces_reseed_qs;
+  logic ctrl_aux_shadowed_key_touch_forces_reseed_wd;
+  logic ctrl_aux_shadowed_key_touch_forces_reseed_storage_err;
+  logic ctrl_aux_shadowed_key_touch_forces_reseed_update_err;
+  logic ctrl_aux_shadowed_force_masks_qs;
+  logic ctrl_aux_shadowed_force_masks_wd;
+  logic ctrl_aux_shadowed_force_masks_storage_err;
+  logic ctrl_aux_shadowed_force_masks_update_err;
+  logic ctrl_aux_shadowed_keep_start_trigger_high_qs;
+  logic ctrl_aux_shadowed_keep_start_trigger_high_wd;
+  logic ctrl_aux_shadowed_keep_start_trigger_high_storage_err;
+  logic ctrl_aux_shadowed_keep_start_trigger_high_update_err;
+  logic ctrl_aux_regwen_we;
+  logic ctrl_aux_regwen_qs;
+  logic ctrl_aux_regwen_wd;
   logic trigger_we;
+  logic trigger_start_qs;
   logic trigger_start_wd;
+  logic trigger_key_iv_data_in_clear_qs;
   logic trigger_key_iv_data_in_clear_wd;
+  logic trigger_data_out_clear_qs;
   logic trigger_data_out_clear_wd;
+  logic trigger_prng_reseed_qs;
   logic trigger_prng_reseed_wd;
   logic status_idle_qs;
   logic status_stall_qs;
@@ -193,40 +241,87 @@ module aes_reg_top (
   logic status_input_ready_qs;
   logic status_alert_recov_ctrl_update_err_qs;
   logic status_alert_fatal_fault_qs;
+  logic ctrl_gcm_shadowed_re;
+  logic ctrl_gcm_shadowed_we;
+  logic [5:0] ctrl_gcm_shadowed_phase_qs;
+  logic [5:0] ctrl_gcm_shadowed_phase_wd;
+  logic [4:0] ctrl_gcm_shadowed_num_valid_bytes_qs;
+  logic [4:0] ctrl_gcm_shadowed_num_valid_bytes_wd;
 
   // Register instances
   // R[alert_test]: V(True)
+  logic alert_test_qe;
+  logic [2:0] alert_test_flds_we;
+  assign alert_test_qe = &alert_test_flds_we;
+  // Create REGWEN-gated WE signal
+  logic alert_test_gated_we;
+  assign alert_test_gated_we = alert_test_we && alert_test_regwen_qs;
   //   F[recov_ctrl_update_err]: 0:0
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_recov_ctrl_update_err (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_recov_ctrl_update_err_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.recov_ctrl_update_err.qe),
+    .qe     (alert_test_flds_we[0]),
     .q      (reg2hw.alert_test.recov_ctrl_update_err.q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.alert_test.recov_ctrl_update_err.qe = alert_test_qe;
 
   //   F[fatal_fault]: 1:1
   prim_subreg_ext #(
     .DW    (1)
   ) u_alert_test_fatal_fault (
     .re     (1'b0),
-    .we     (alert_test_we),
+    .we     (alert_test_gated_we),
     .wd     (alert_test_fatal_fault_wd),
     .d      ('0),
     .qre    (),
-    .qe     (reg2hw.alert_test.fatal_fault.qe),
+    .qe     (alert_test_flds_we[1]),
     .q      (reg2hw.alert_test.fatal_fault.q),
+    .ds     (),
     .qs     ()
+  );
+  assign reg2hw.alert_test.fatal_fault.qe = alert_test_qe;
+
+  //   F[regwen]: 31:31
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_alert_test_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (alert_test_we),
+    .wd     (alert_test_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (alert_test_flds_we[2]),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (alert_test_regwen_qs)
   );
 
 
   // Subregister 0 of Multireg key_share0
   // R[key_share0_0]: V(True)
+  logic key_share0_0_qe;
+  logic [0:0] key_share0_0_flds_we;
+  assign key_share0_0_qe = &key_share0_0_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_0 (
@@ -235,14 +330,19 @@ module aes_reg_top (
     .wd     (key_share0_0_wd),
     .d      (hw2reg.key_share0[0].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[0].qe),
+    .qe     (key_share0_0_flds_we[0]),
     .q      (reg2hw.key_share0[0].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[0].qe = key_share0_0_qe;
 
 
   // Subregister 1 of Multireg key_share0
   // R[key_share0_1]: V(True)
+  logic key_share0_1_qe;
+  logic [0:0] key_share0_1_flds_we;
+  assign key_share0_1_qe = &key_share0_1_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_1 (
@@ -251,14 +351,19 @@ module aes_reg_top (
     .wd     (key_share0_1_wd),
     .d      (hw2reg.key_share0[1].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[1].qe),
+    .qe     (key_share0_1_flds_we[0]),
     .q      (reg2hw.key_share0[1].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[1].qe = key_share0_1_qe;
 
 
   // Subregister 2 of Multireg key_share0
   // R[key_share0_2]: V(True)
+  logic key_share0_2_qe;
+  logic [0:0] key_share0_2_flds_we;
+  assign key_share0_2_qe = &key_share0_2_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_2 (
@@ -267,14 +372,19 @@ module aes_reg_top (
     .wd     (key_share0_2_wd),
     .d      (hw2reg.key_share0[2].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[2].qe),
+    .qe     (key_share0_2_flds_we[0]),
     .q      (reg2hw.key_share0[2].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[2].qe = key_share0_2_qe;
 
 
   // Subregister 3 of Multireg key_share0
   // R[key_share0_3]: V(True)
+  logic key_share0_3_qe;
+  logic [0:0] key_share0_3_flds_we;
+  assign key_share0_3_qe = &key_share0_3_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_3 (
@@ -283,14 +393,19 @@ module aes_reg_top (
     .wd     (key_share0_3_wd),
     .d      (hw2reg.key_share0[3].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[3].qe),
+    .qe     (key_share0_3_flds_we[0]),
     .q      (reg2hw.key_share0[3].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[3].qe = key_share0_3_qe;
 
 
   // Subregister 4 of Multireg key_share0
   // R[key_share0_4]: V(True)
+  logic key_share0_4_qe;
+  logic [0:0] key_share0_4_flds_we;
+  assign key_share0_4_qe = &key_share0_4_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_4 (
@@ -299,14 +414,19 @@ module aes_reg_top (
     .wd     (key_share0_4_wd),
     .d      (hw2reg.key_share0[4].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[4].qe),
+    .qe     (key_share0_4_flds_we[0]),
     .q      (reg2hw.key_share0[4].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[4].qe = key_share0_4_qe;
 
 
   // Subregister 5 of Multireg key_share0
   // R[key_share0_5]: V(True)
+  logic key_share0_5_qe;
+  logic [0:0] key_share0_5_flds_we;
+  assign key_share0_5_qe = &key_share0_5_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_5 (
@@ -315,14 +435,19 @@ module aes_reg_top (
     .wd     (key_share0_5_wd),
     .d      (hw2reg.key_share0[5].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[5].qe),
+    .qe     (key_share0_5_flds_we[0]),
     .q      (reg2hw.key_share0[5].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[5].qe = key_share0_5_qe;
 
 
   // Subregister 6 of Multireg key_share0
   // R[key_share0_6]: V(True)
+  logic key_share0_6_qe;
+  logic [0:0] key_share0_6_flds_we;
+  assign key_share0_6_qe = &key_share0_6_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_6 (
@@ -331,14 +456,19 @@ module aes_reg_top (
     .wd     (key_share0_6_wd),
     .d      (hw2reg.key_share0[6].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[6].qe),
+    .qe     (key_share0_6_flds_we[0]),
     .q      (reg2hw.key_share0[6].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[6].qe = key_share0_6_qe;
 
 
   // Subregister 7 of Multireg key_share0
   // R[key_share0_7]: V(True)
+  logic key_share0_7_qe;
+  logic [0:0] key_share0_7_flds_we;
+  assign key_share0_7_qe = &key_share0_7_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share0_7 (
@@ -347,14 +477,19 @@ module aes_reg_top (
     .wd     (key_share0_7_wd),
     .d      (hw2reg.key_share0[7].d),
     .qre    (),
-    .qe     (reg2hw.key_share0[7].qe),
+    .qe     (key_share0_7_flds_we[0]),
     .q      (reg2hw.key_share0[7].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share0[7].qe = key_share0_7_qe;
 
 
   // Subregister 0 of Multireg key_share1
   // R[key_share1_0]: V(True)
+  logic key_share1_0_qe;
+  logic [0:0] key_share1_0_flds_we;
+  assign key_share1_0_qe = &key_share1_0_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_0 (
@@ -363,14 +498,19 @@ module aes_reg_top (
     .wd     (key_share1_0_wd),
     .d      (hw2reg.key_share1[0].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[0].qe),
+    .qe     (key_share1_0_flds_we[0]),
     .q      (reg2hw.key_share1[0].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[0].qe = key_share1_0_qe;
 
 
   // Subregister 1 of Multireg key_share1
   // R[key_share1_1]: V(True)
+  logic key_share1_1_qe;
+  logic [0:0] key_share1_1_flds_we;
+  assign key_share1_1_qe = &key_share1_1_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_1 (
@@ -379,14 +519,19 @@ module aes_reg_top (
     .wd     (key_share1_1_wd),
     .d      (hw2reg.key_share1[1].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[1].qe),
+    .qe     (key_share1_1_flds_we[0]),
     .q      (reg2hw.key_share1[1].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[1].qe = key_share1_1_qe;
 
 
   // Subregister 2 of Multireg key_share1
   // R[key_share1_2]: V(True)
+  logic key_share1_2_qe;
+  logic [0:0] key_share1_2_flds_we;
+  assign key_share1_2_qe = &key_share1_2_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_2 (
@@ -395,14 +540,19 @@ module aes_reg_top (
     .wd     (key_share1_2_wd),
     .d      (hw2reg.key_share1[2].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[2].qe),
+    .qe     (key_share1_2_flds_we[0]),
     .q      (reg2hw.key_share1[2].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[2].qe = key_share1_2_qe;
 
 
   // Subregister 3 of Multireg key_share1
   // R[key_share1_3]: V(True)
+  logic key_share1_3_qe;
+  logic [0:0] key_share1_3_flds_we;
+  assign key_share1_3_qe = &key_share1_3_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_3 (
@@ -411,14 +561,19 @@ module aes_reg_top (
     .wd     (key_share1_3_wd),
     .d      (hw2reg.key_share1[3].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[3].qe),
+    .qe     (key_share1_3_flds_we[0]),
     .q      (reg2hw.key_share1[3].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[3].qe = key_share1_3_qe;
 
 
   // Subregister 4 of Multireg key_share1
   // R[key_share1_4]: V(True)
+  logic key_share1_4_qe;
+  logic [0:0] key_share1_4_flds_we;
+  assign key_share1_4_qe = &key_share1_4_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_4 (
@@ -427,14 +582,19 @@ module aes_reg_top (
     .wd     (key_share1_4_wd),
     .d      (hw2reg.key_share1[4].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[4].qe),
+    .qe     (key_share1_4_flds_we[0]),
     .q      (reg2hw.key_share1[4].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[4].qe = key_share1_4_qe;
 
 
   // Subregister 5 of Multireg key_share1
   // R[key_share1_5]: V(True)
+  logic key_share1_5_qe;
+  logic [0:0] key_share1_5_flds_we;
+  assign key_share1_5_qe = &key_share1_5_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_5 (
@@ -443,14 +603,19 @@ module aes_reg_top (
     .wd     (key_share1_5_wd),
     .d      (hw2reg.key_share1[5].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[5].qe),
+    .qe     (key_share1_5_flds_we[0]),
     .q      (reg2hw.key_share1[5].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[5].qe = key_share1_5_qe;
 
 
   // Subregister 6 of Multireg key_share1
   // R[key_share1_6]: V(True)
+  logic key_share1_6_qe;
+  logic [0:0] key_share1_6_flds_we;
+  assign key_share1_6_qe = &key_share1_6_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_6 (
@@ -459,14 +624,19 @@ module aes_reg_top (
     .wd     (key_share1_6_wd),
     .d      (hw2reg.key_share1[6].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[6].qe),
+    .qe     (key_share1_6_flds_we[0]),
     .q      (reg2hw.key_share1[6].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[6].qe = key_share1_6_qe;
 
 
   // Subregister 7 of Multireg key_share1
   // R[key_share1_7]: V(True)
+  logic key_share1_7_qe;
+  logic [0:0] key_share1_7_flds_we;
+  assign key_share1_7_qe = &key_share1_7_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_key_share1_7 (
@@ -475,85 +645,120 @@ module aes_reg_top (
     .wd     (key_share1_7_wd),
     .d      (hw2reg.key_share1[7].d),
     .qre    (),
-    .qe     (reg2hw.key_share1[7].qe),
+    .qe     (key_share1_7_flds_we[0]),
     .q      (reg2hw.key_share1[7].q),
+    .ds     (),
     .qs     ()
   );
+  assign reg2hw.key_share1[7].qe = key_share1_7_qe;
 
 
   // Subregister 0 of Multireg iv
   // R[iv_0]: V(True)
+  logic iv_0_qe;
+  logic [0:0] iv_0_flds_we;
+  assign iv_0_qe = &iv_0_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_iv_0 (
-    .re     (1'b0),
+    .re     (iv_0_re),
     .we     (iv_0_we),
     .wd     (iv_0_wd),
     .d      (hw2reg.iv[0].d),
     .qre    (),
-    .qe     (reg2hw.iv[0].qe),
+    .qe     (iv_0_flds_we[0]),
     .q      (reg2hw.iv[0].q),
-    .qs     ()
+    .ds     (),
+    .qs     (iv_0_qs)
   );
+  assign reg2hw.iv[0].qe = iv_0_qe;
 
 
   // Subregister 1 of Multireg iv
   // R[iv_1]: V(True)
+  logic iv_1_qe;
+  logic [0:0] iv_1_flds_we;
+  assign iv_1_qe = &iv_1_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_iv_1 (
-    .re     (1'b0),
+    .re     (iv_1_re),
     .we     (iv_1_we),
     .wd     (iv_1_wd),
     .d      (hw2reg.iv[1].d),
     .qre    (),
-    .qe     (reg2hw.iv[1].qe),
+    .qe     (iv_1_flds_we[0]),
     .q      (reg2hw.iv[1].q),
-    .qs     ()
+    .ds     (),
+    .qs     (iv_1_qs)
   );
+  assign reg2hw.iv[1].qe = iv_1_qe;
 
 
   // Subregister 2 of Multireg iv
   // R[iv_2]: V(True)
+  logic iv_2_qe;
+  logic [0:0] iv_2_flds_we;
+  assign iv_2_qe = &iv_2_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_iv_2 (
-    .re     (1'b0),
+    .re     (iv_2_re),
     .we     (iv_2_we),
     .wd     (iv_2_wd),
     .d      (hw2reg.iv[2].d),
     .qre    (),
-    .qe     (reg2hw.iv[2].qe),
+    .qe     (iv_2_flds_we[0]),
     .q      (reg2hw.iv[2].q),
-    .qs     ()
+    .ds     (),
+    .qs     (iv_2_qs)
   );
+  assign reg2hw.iv[2].qe = iv_2_qe;
 
 
   // Subregister 3 of Multireg iv
   // R[iv_3]: V(True)
+  logic iv_3_qe;
+  logic [0:0] iv_3_flds_we;
+  assign iv_3_qe = &iv_3_flds_we;
   prim_subreg_ext #(
     .DW    (32)
   ) u_iv_3 (
-    .re     (1'b0),
+    .re     (iv_3_re),
     .we     (iv_3_we),
     .wd     (iv_3_wd),
     .d      (hw2reg.iv[3].d),
     .qre    (),
-    .qe     (reg2hw.iv[3].qe),
+    .qe     (iv_3_flds_we[0]),
     .q      (reg2hw.iv[3].q),
-    .qs     ()
+    .ds     (),
+    .qs     (iv_3_qs)
   );
+  assign reg2hw.iv[3].qe = iv_3_qe;
 
 
   // Subregister 0 of Multireg data_in
   // R[data_in_0]: V(False)
+  logic data_in_0_qe;
+  logic [0:0] data_in_0_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_data_in0_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&data_in_0_flds_we),
+    .q_o(data_in_0_qe)
+  );
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_data_in_0 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (data_in_0_we),
@@ -564,23 +769,38 @@ module aes_reg_top (
     .d      (hw2reg.data_in[0].d),
 
     // to internal hardware
-    .qe     (reg2hw.data_in[0].qe),
+    .qe     (data_in_0_flds_we[0]),
     .q      (reg2hw.data_in[0].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     ()
   );
+  assign reg2hw.data_in[0].qe = data_in_0_qe;
 
 
   // Subregister 1 of Multireg data_in
   // R[data_in_1]: V(False)
+  logic data_in_1_qe;
+  logic [0:0] data_in_1_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_data_in1_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&data_in_1_flds_we),
+    .q_o(data_in_1_qe)
+  );
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_data_in_1 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (data_in_1_we),
@@ -591,23 +811,38 @@ module aes_reg_top (
     .d      (hw2reg.data_in[1].d),
 
     // to internal hardware
-    .qe     (reg2hw.data_in[1].qe),
+    .qe     (data_in_1_flds_we[0]),
     .q      (reg2hw.data_in[1].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     ()
   );
+  assign reg2hw.data_in[1].qe = data_in_1_qe;
 
 
   // Subregister 2 of Multireg data_in
   // R[data_in_2]: V(False)
+  logic data_in_2_qe;
+  logic [0:0] data_in_2_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_data_in2_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&data_in_2_flds_we),
+    .q_o(data_in_2_qe)
+  );
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_data_in_2 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (data_in_2_we),
@@ -618,23 +853,38 @@ module aes_reg_top (
     .d      (hw2reg.data_in[2].d),
 
     // to internal hardware
-    .qe     (reg2hw.data_in[2].qe),
+    .qe     (data_in_2_flds_we[0]),
     .q      (reg2hw.data_in[2].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     ()
   );
+  assign reg2hw.data_in[2].qe = data_in_2_qe;
 
 
   // Subregister 3 of Multireg data_in
   // R[data_in_3]: V(False)
+  logic data_in_3_qe;
+  logic [0:0] data_in_3_flds_we;
+  prim_flop #(
+    .Width(1),
+    .ResetValue(0)
+  ) u_data_in3_qe (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .d_i(&data_in_3_flds_we),
+    .q_o(data_in_3_qe)
+  );
   prim_subreg #(
     .DW      (32),
     .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (32'h0)
+    .RESVAL  (32'h0),
+    .Mubi    (1'b0)
   ) u_data_in_3 (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (data_in_3_we),
@@ -645,12 +895,14 @@ module aes_reg_top (
     .d      (hw2reg.data_in[3].d),
 
     // to internal hardware
-    .qe     (reg2hw.data_in[3].qe),
+    .qe     (data_in_3_flds_we[0]),
     .q      (reg2hw.data_in[3].q),
+    .ds     (),
 
     // to register interface (read)
     .qs     ()
   );
+  assign reg2hw.data_in[3].qe = data_in_3_qe;
 
 
   // Subregister 0 of Multireg data_out
@@ -665,6 +917,7 @@ module aes_reg_top (
     .qre    (reg2hw.data_out[0].re),
     .qe     (),
     .q      (reg2hw.data_out[0].q),
+    .ds     (),
     .qs     (data_out_0_qs)
   );
 
@@ -681,6 +934,7 @@ module aes_reg_top (
     .qre    (reg2hw.data_out[1].re),
     .qe     (),
     .q      (reg2hw.data_out[1].q),
+    .ds     (),
     .qs     (data_out_1_qs)
   );
 
@@ -697,6 +951,7 @@ module aes_reg_top (
     .qre    (reg2hw.data_out[2].re),
     .qe     (),
     .q      (reg2hw.data_out[2].q),
+    .ds     (),
     .qs     (data_out_2_qs)
   );
 
@@ -713,26 +968,32 @@ module aes_reg_top (
     .qre    (reg2hw.data_out[3].re),
     .qe     (),
     .q      (reg2hw.data_out[3].q),
+    .ds     (),
     .qs     (data_out_3_qs)
   );
 
 
   // R[ctrl_shadowed]: V(True)
-  //   F[operation]: 0:0
+  logic ctrl_shadowed_qe;
+  logic [5:0] ctrl_shadowed_flds_we;
+  assign ctrl_shadowed_qe = &ctrl_shadowed_flds_we;
+  //   F[operation]: 1:0
   prim_subreg_ext #(
-    .DW    (1)
+    .DW    (2)
   ) u_ctrl_shadowed_operation (
     .re     (ctrl_shadowed_re),
     .we     (ctrl_shadowed_we),
     .wd     (ctrl_shadowed_operation_wd),
     .d      (hw2reg.ctrl_shadowed.operation.d),
     .qre    (reg2hw.ctrl_shadowed.operation.re),
-    .qe     (reg2hw.ctrl_shadowed.operation.qe),
+    .qe     (ctrl_shadowed_flds_we[0]),
     .q      (reg2hw.ctrl_shadowed.operation.q),
+    .ds     (),
     .qs     (ctrl_shadowed_operation_qs)
   );
+  assign reg2hw.ctrl_shadowed.operation.qe = ctrl_shadowed_qe;
 
-  //   F[mode]: 6:1
+  //   F[mode]: 7:2
   prim_subreg_ext #(
     .DW    (6)
   ) u_ctrl_shadowed_mode (
@@ -741,12 +1002,14 @@ module aes_reg_top (
     .wd     (ctrl_shadowed_mode_wd),
     .d      (hw2reg.ctrl_shadowed.mode.d),
     .qre    (reg2hw.ctrl_shadowed.mode.re),
-    .qe     (reg2hw.ctrl_shadowed.mode.qe),
+    .qe     (ctrl_shadowed_flds_we[1]),
     .q      (reg2hw.ctrl_shadowed.mode.q),
+    .ds     (),
     .qs     (ctrl_shadowed_mode_qs)
   );
+  assign reg2hw.ctrl_shadowed.mode.qe = ctrl_shadowed_qe;
 
-  //   F[key_len]: 9:7
+  //   F[key_len]: 10:8
   prim_subreg_ext #(
     .DW    (3)
   ) u_ctrl_shadowed_key_len (
@@ -755,12 +1018,14 @@ module aes_reg_top (
     .wd     (ctrl_shadowed_key_len_wd),
     .d      (hw2reg.ctrl_shadowed.key_len.d),
     .qre    (reg2hw.ctrl_shadowed.key_len.re),
-    .qe     (reg2hw.ctrl_shadowed.key_len.qe),
+    .qe     (ctrl_shadowed_flds_we[2]),
     .q      (reg2hw.ctrl_shadowed.key_len.q),
+    .ds     (),
     .qs     (ctrl_shadowed_key_len_qs)
   );
+  assign reg2hw.ctrl_shadowed.key_len.qe = ctrl_shadowed_qe;
 
-  //   F[sideload]: 10:10
+  //   F[sideload]: 11:11
   prim_subreg_ext #(
     .DW    (1)
   ) u_ctrl_shadowed_sideload (
@@ -769,12 +1034,30 @@ module aes_reg_top (
     .wd     (ctrl_shadowed_sideload_wd),
     .d      (hw2reg.ctrl_shadowed.sideload.d),
     .qre    (reg2hw.ctrl_shadowed.sideload.re),
-    .qe     (reg2hw.ctrl_shadowed.sideload.qe),
+    .qe     (ctrl_shadowed_flds_we[3]),
     .q      (reg2hw.ctrl_shadowed.sideload.q),
+    .ds     (),
     .qs     (ctrl_shadowed_sideload_qs)
   );
+  assign reg2hw.ctrl_shadowed.sideload.qe = ctrl_shadowed_qe;
 
-  //   F[manual_operation]: 11:11
+  //   F[prng_reseed_rate]: 14:12
+  prim_subreg_ext #(
+    .DW    (3)
+  ) u_ctrl_shadowed_prng_reseed_rate (
+    .re     (ctrl_shadowed_re),
+    .we     (ctrl_shadowed_we),
+    .wd     (ctrl_shadowed_prng_reseed_rate_wd),
+    .d      (hw2reg.ctrl_shadowed.prng_reseed_rate.d),
+    .qre    (reg2hw.ctrl_shadowed.prng_reseed_rate.re),
+    .qe     (ctrl_shadowed_flds_we[4]),
+    .q      (reg2hw.ctrl_shadowed.prng_reseed_rate.q),
+    .ds     (),
+    .qs     (ctrl_shadowed_prng_reseed_rate_qs)
+  );
+  assign reg2hw.ctrl_shadowed.prng_reseed_rate.qe = ctrl_shadowed_qe;
+
+  //   F[manual_operation]: 15:15
   prim_subreg_ext #(
     .DW    (1)
   ) u_ctrl_shadowed_manual_operation (
@@ -783,23 +1066,153 @@ module aes_reg_top (
     .wd     (ctrl_shadowed_manual_operation_wd),
     .d      (hw2reg.ctrl_shadowed.manual_operation.d),
     .qre    (reg2hw.ctrl_shadowed.manual_operation.re),
-    .qe     (reg2hw.ctrl_shadowed.manual_operation.qe),
+    .qe     (ctrl_shadowed_flds_we[5]),
     .q      (reg2hw.ctrl_shadowed.manual_operation.q),
+    .ds     (),
     .qs     (ctrl_shadowed_manual_operation_qs)
   );
+  assign reg2hw.ctrl_shadowed.manual_operation.qe = ctrl_shadowed_qe;
 
-  //   F[force_zero_masks]: 12:12
-  prim_subreg_ext #(
-    .DW    (1)
-  ) u_ctrl_shadowed_force_zero_masks (
-    .re     (ctrl_shadowed_re),
-    .we     (ctrl_shadowed_we),
-    .wd     (ctrl_shadowed_force_zero_masks_wd),
-    .d      (hw2reg.ctrl_shadowed.force_zero_masks.d),
-    .qre    (reg2hw.ctrl_shadowed.force_zero_masks.re),
-    .qe     (reg2hw.ctrl_shadowed.force_zero_masks.qe),
-    .q      (reg2hw.ctrl_shadowed.force_zero_masks.q),
-    .qs     (ctrl_shadowed_force_zero_masks_qs)
+
+  // R[ctrl_aux_shadowed]: V(False)
+  // Create REGWEN-gated WE signal
+  logic ctrl_aux_shadowed_gated_we;
+  assign ctrl_aux_shadowed_gated_we = ctrl_aux_shadowed_we & ctrl_aux_regwen_qs;
+  //   F[key_touch_forces_reseed]: 0:0
+  prim_subreg_shadow #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_ctrl_aux_shadowed_key_touch_forces_reseed (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .rst_shadowed_ni (rst_shadowed_ni),
+
+    // from register interface
+    .re     (ctrl_aux_shadowed_re),
+    .we     (ctrl_aux_shadowed_gated_we),
+    .wd     (ctrl_aux_shadowed_key_touch_forces_reseed_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.ctrl_aux_shadowed.key_touch_forces_reseed.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_aux_shadowed_key_touch_forces_reseed_qs),
+
+    // Shadow register phase. Relevant for hwext only.
+    .phase  (),
+
+    // Shadow register error conditions
+    .err_update  (ctrl_aux_shadowed_key_touch_forces_reseed_update_err),
+    .err_storage (ctrl_aux_shadowed_key_touch_forces_reseed_storage_err)
+  );
+
+  //   F[force_masks]: 1:1
+  prim_subreg_shadow #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_ctrl_aux_shadowed_force_masks (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .rst_shadowed_ni (rst_shadowed_ni),
+
+    // from register interface
+    .re     (ctrl_aux_shadowed_re),
+    .we     (ctrl_aux_shadowed_gated_we),
+    .wd     (ctrl_aux_shadowed_force_masks_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.ctrl_aux_shadowed.force_masks.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_aux_shadowed_force_masks_qs),
+
+    // Shadow register phase. Relevant for hwext only.
+    .phase  (),
+
+    // Shadow register error conditions
+    .err_update  (ctrl_aux_shadowed_force_masks_update_err),
+    .err_storage (ctrl_aux_shadowed_force_masks_storage_err)
+  );
+
+  //   F[keep_start_trigger_high]: 2:2
+  prim_subreg_shadow #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessRW),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
+  ) u_ctrl_aux_shadowed_keep_start_trigger_high (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .rst_shadowed_ni (rst_shadowed_ni),
+
+    // from register interface
+    .re     (ctrl_aux_shadowed_re),
+    .we     (ctrl_aux_shadowed_gated_we),
+    .wd     (ctrl_aux_shadowed_keep_start_trigger_high_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (reg2hw.ctrl_aux_shadowed.keep_start_trigger_high.q),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_aux_shadowed_keep_start_trigger_high_qs),
+
+    // Shadow register phase. Relevant for hwext only.
+    .phase  (),
+
+    // Shadow register error conditions
+    .err_update  (ctrl_aux_shadowed_keep_start_trigger_high_update_err),
+    .err_storage (ctrl_aux_shadowed_keep_start_trigger_high_storage_err)
+  );
+
+
+  // R[ctrl_aux_regwen]: V(False)
+  prim_subreg #(
+    .DW      (1),
+    .SwAccess(prim_subreg_pkg::SwAccessW0C),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
+  ) u_ctrl_aux_regwen (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
+
+    // from register interface
+    .we     (ctrl_aux_regwen_we),
+    .wd     (ctrl_aux_regwen_wd),
+
+    // from internal hardware
+    .de     (1'b0),
+    .d      ('0),
+
+    // to internal hardware
+    .qe     (),
+    .q      (),
+    .ds     (),
+
+    // to register interface (read)
+    .qs     (ctrl_aux_regwen_qs)
   );
 
 
@@ -807,11 +1220,13 @@ module aes_reg_top (
   //   F[start]: 0:0
   prim_subreg #(
     .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (1'h0)
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_trigger_start (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (trigger_we),
@@ -824,19 +1239,22 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.trigger.start.q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     ()
+    .qs     (trigger_start_qs)
   );
 
   //   F[key_iv_data_in_clear]: 1:1
   prim_subreg #(
     .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (1'h1)
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
   ) u_trigger_key_iv_data_in_clear (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (trigger_we),
@@ -849,19 +1267,22 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.trigger.key_iv_data_in_clear.q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     ()
+    .qs     (trigger_key_iv_data_in_clear_qs)
   );
 
   //   F[data_out_clear]: 2:2
   prim_subreg #(
     .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (1'h1)
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
   ) u_trigger_data_out_clear (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (trigger_we),
@@ -874,19 +1295,22 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.trigger.data_out_clear.q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     ()
+    .qs     (trigger_data_out_clear_qs)
   );
 
   //   F[prng_reseed]: 3:3
   prim_subreg #(
     .DW      (1),
-    .SwAccess(prim_subreg_pkg::SwAccessWO),
-    .RESVAL  (1'h1)
+    .SwAccess(prim_subreg_pkg::SwAccessW1S),
+    .RESVAL  (1'h1),
+    .Mubi    (1'b0)
   ) u_trigger_prng_reseed (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (trigger_we),
@@ -899,9 +1323,10 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.trigger.prng_reseed.q),
+    .ds     (),
 
     // to register interface (read)
-    .qs     ()
+    .qs     (trigger_prng_reseed_qs)
   );
 
 
@@ -910,10 +1335,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_idle (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -925,7 +1352,8 @@ module aes_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (),
+    .q      (reg2hw.status.idle.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_idle_qs)
@@ -935,10 +1363,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_stall (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -951,6 +1381,7 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_stall_qs)
@@ -960,10 +1391,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_output_lost (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -976,6 +1409,7 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (reg2hw.status.output_lost.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_output_lost_qs)
@@ -985,10 +1419,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_output_valid (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1000,7 +1436,8 @@ module aes_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (),
+    .q      (reg2hw.status.output_valid.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_output_valid_qs)
@@ -1010,10 +1447,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_input_ready (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1025,7 +1464,8 @@ module aes_reg_top (
 
     // to internal hardware
     .qe     (),
-    .q      (),
+    .q      (reg2hw.status.input_ready.q),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_input_ready_qs)
@@ -1035,10 +1475,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_alert_recov_ctrl_update_err (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1051,6 +1493,7 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_alert_recov_ctrl_update_err_qs)
@@ -1060,10 +1503,12 @@ module aes_reg_top (
   prim_subreg #(
     .DW      (1),
     .SwAccess(prim_subreg_pkg::SwAccessRO),
-    .RESVAL  (1'h0)
+    .RESVAL  (1'h0),
+    .Mubi    (1'b0)
   ) u_status_alert_fatal_fault (
     .clk_i   (clk_i),
     .rst_ni  (rst_ni),
+    .reinit_i(1'b0),
 
     // from register interface
     .we     (1'b0),
@@ -1076,16 +1521,53 @@ module aes_reg_top (
     // to internal hardware
     .qe     (),
     .q      (),
+    .ds     (),
 
     // to register interface (read)
     .qs     (status_alert_fatal_fault_qs)
   );
 
 
+  // R[ctrl_gcm_shadowed]: V(True)
+  logic ctrl_gcm_shadowed_qe;
+  logic [1:0] ctrl_gcm_shadowed_flds_we;
+  assign ctrl_gcm_shadowed_qe = &ctrl_gcm_shadowed_flds_we;
+  //   F[phase]: 5:0
+  prim_subreg_ext #(
+    .DW    (6)
+  ) u_ctrl_gcm_shadowed_phase (
+    .re     (ctrl_gcm_shadowed_re),
+    .we     (ctrl_gcm_shadowed_we),
+    .wd     (ctrl_gcm_shadowed_phase_wd),
+    .d      (hw2reg.ctrl_gcm_shadowed.phase.d),
+    .qre    (reg2hw.ctrl_gcm_shadowed.phase.re),
+    .qe     (ctrl_gcm_shadowed_flds_we[0]),
+    .q      (reg2hw.ctrl_gcm_shadowed.phase.q),
+    .ds     (),
+    .qs     (ctrl_gcm_shadowed_phase_qs)
+  );
+  assign reg2hw.ctrl_gcm_shadowed.phase.qe = ctrl_gcm_shadowed_qe;
 
-  logic [31:0] addr_hit;
+  //   F[num_valid_bytes]: 10:6
+  prim_subreg_ext #(
+    .DW    (5)
+  ) u_ctrl_gcm_shadowed_num_valid_bytes (
+    .re     (ctrl_gcm_shadowed_re),
+    .we     (ctrl_gcm_shadowed_we),
+    .wd     (ctrl_gcm_shadowed_num_valid_bytes_wd),
+    .d      (hw2reg.ctrl_gcm_shadowed.num_valid_bytes.d),
+    .qre    (reg2hw.ctrl_gcm_shadowed.num_valid_bytes.re),
+    .qe     (ctrl_gcm_shadowed_flds_we[1]),
+    .q      (reg2hw.ctrl_gcm_shadowed.num_valid_bytes.q),
+    .ds     (),
+    .qs     (ctrl_gcm_shadowed_num_valid_bytes_qs)
+  );
+  assign reg2hw.ctrl_gcm_shadowed.num_valid_bytes.qe = ctrl_gcm_shadowed_qe;
+
+
+
+  logic [34:0] addr_hit;
   always_comb begin
-    addr_hit = '0;
     addr_hit[ 0] = (reg_addr == AES_ALERT_TEST_OFFSET);
     addr_hit[ 1] = (reg_addr == AES_KEY_SHARE0_0_OFFSET);
     addr_hit[ 2] = (reg_addr == AES_KEY_SHARE0_1_OFFSET);
@@ -1116,8 +1598,11 @@ module aes_reg_top (
     addr_hit[27] = (reg_addr == AES_DATA_OUT_2_OFFSET);
     addr_hit[28] = (reg_addr == AES_DATA_OUT_3_OFFSET);
     addr_hit[29] = (reg_addr == AES_CTRL_SHADOWED_OFFSET);
-    addr_hit[30] = (reg_addr == AES_TRIGGER_OFFSET);
-    addr_hit[31] = (reg_addr == AES_STATUS_OFFSET);
+    addr_hit[30] = (reg_addr == AES_CTRL_AUX_SHADOWED_OFFSET);
+    addr_hit[31] = (reg_addr == AES_CTRL_AUX_REGWEN_OFFSET);
+    addr_hit[32] = (reg_addr == AES_TRIGGER_OFFSET);
+    addr_hit[33] = (reg_addr == AES_STATUS_OFFSET);
+    addr_hit[34] = (reg_addr == AES_CTRL_GCM_SHADOWED_OFFSET);
   end
 
   assign addrmiss = (reg_re || reg_we) ? ~|addr_hit : 1'b0 ;
@@ -1156,13 +1641,20 @@ module aes_reg_top (
                (addr_hit[28] & (|(AES_PERMIT[28] & ~reg_be))) |
                (addr_hit[29] & (|(AES_PERMIT[29] & ~reg_be))) |
                (addr_hit[30] & (|(AES_PERMIT[30] & ~reg_be))) |
-               (addr_hit[31] & (|(AES_PERMIT[31] & ~reg_be)))));
+               (addr_hit[31] & (|(AES_PERMIT[31] & ~reg_be))) |
+               (addr_hit[32] & (|(AES_PERMIT[32] & ~reg_be))) |
+               (addr_hit[33] & (|(AES_PERMIT[33] & ~reg_be))) |
+               (addr_hit[34] & (|(AES_PERMIT[34] & ~reg_be)))));
   end
+
+  // Generate write-enables
   assign alert_test_we = addr_hit[0] & reg_we & !reg_error;
 
   assign alert_test_recov_ctrl_update_err_wd = reg_wdata[0];
 
   assign alert_test_fatal_fault_wd = reg_wdata[1];
+
+  assign alert_test_regwen_wd = reg_wdata[31];
   assign key_share0_0_we = addr_hit[1] & reg_we & !reg_error;
 
   assign key_share0_0_wd = reg_wdata[31:0];
@@ -1211,15 +1703,19 @@ module aes_reg_top (
   assign key_share1_7_we = addr_hit[16] & reg_we & !reg_error;
 
   assign key_share1_7_wd = reg_wdata[31:0];
+  assign iv_0_re = addr_hit[17] & reg_re & !reg_error;
   assign iv_0_we = addr_hit[17] & reg_we & !reg_error;
 
   assign iv_0_wd = reg_wdata[31:0];
+  assign iv_1_re = addr_hit[18] & reg_re & !reg_error;
   assign iv_1_we = addr_hit[18] & reg_we & !reg_error;
 
   assign iv_1_wd = reg_wdata[31:0];
+  assign iv_2_re = addr_hit[19] & reg_re & !reg_error;
   assign iv_2_we = addr_hit[19] & reg_we & !reg_error;
 
   assign iv_2_wd = reg_wdata[31:0];
+  assign iv_3_re = addr_hit[20] & reg_re & !reg_error;
   assign iv_3_we = addr_hit[20] & reg_we & !reg_error;
 
   assign iv_3_wd = reg_wdata[31:0];
@@ -1242,18 +1738,29 @@ module aes_reg_top (
   assign ctrl_shadowed_re = addr_hit[29] & reg_re & !reg_error;
   assign ctrl_shadowed_we = addr_hit[29] & reg_we & !reg_error;
 
-  assign ctrl_shadowed_operation_wd = reg_wdata[0];
+  assign ctrl_shadowed_operation_wd = reg_wdata[1:0];
 
-  assign ctrl_shadowed_mode_wd = reg_wdata[6:1];
+  assign ctrl_shadowed_mode_wd = reg_wdata[7:2];
 
-  assign ctrl_shadowed_key_len_wd = reg_wdata[9:7];
+  assign ctrl_shadowed_key_len_wd = reg_wdata[10:8];
 
-  assign ctrl_shadowed_sideload_wd = reg_wdata[10];
+  assign ctrl_shadowed_sideload_wd = reg_wdata[11];
 
-  assign ctrl_shadowed_manual_operation_wd = reg_wdata[11];
+  assign ctrl_shadowed_prng_reseed_rate_wd = reg_wdata[14:12];
 
-  assign ctrl_shadowed_force_zero_masks_wd = reg_wdata[12];
-  assign trigger_we = addr_hit[30] & reg_we & !reg_error;
+  assign ctrl_shadowed_manual_operation_wd = reg_wdata[15];
+  assign ctrl_aux_shadowed_re = addr_hit[30] & reg_re & !reg_error;
+  assign ctrl_aux_shadowed_we = addr_hit[30] & reg_we & !reg_error;
+
+  assign ctrl_aux_shadowed_key_touch_forces_reseed_wd = reg_wdata[0];
+
+  assign ctrl_aux_shadowed_force_masks_wd = reg_wdata[1];
+
+  assign ctrl_aux_shadowed_keep_start_trigger_high_wd = reg_wdata[2];
+  assign ctrl_aux_regwen_we = addr_hit[31] & reg_we & !reg_error;
+
+  assign ctrl_aux_regwen_wd = reg_wdata[0];
+  assign trigger_we = addr_hit[32] & reg_we & !reg_error;
 
   assign trigger_start_wd = reg_wdata[0];
 
@@ -1262,6 +1769,51 @@ module aes_reg_top (
   assign trigger_data_out_clear_wd = reg_wdata[2];
 
   assign trigger_prng_reseed_wd = reg_wdata[3];
+  assign ctrl_gcm_shadowed_re = addr_hit[34] & reg_re & !reg_error;
+  assign ctrl_gcm_shadowed_we = addr_hit[34] & reg_we & !reg_error;
+
+  assign ctrl_gcm_shadowed_phase_wd = reg_wdata[5:0];
+
+  assign ctrl_gcm_shadowed_num_valid_bytes_wd = reg_wdata[10:6];
+
+  // Assign write-enables to checker logic vector.
+  always_comb begin
+    reg_we_check[0] = alert_test_we;
+    reg_we_check[1] = key_share0_0_we;
+    reg_we_check[2] = key_share0_1_we;
+    reg_we_check[3] = key_share0_2_we;
+    reg_we_check[4] = key_share0_3_we;
+    reg_we_check[5] = key_share0_4_we;
+    reg_we_check[6] = key_share0_5_we;
+    reg_we_check[7] = key_share0_6_we;
+    reg_we_check[8] = key_share0_7_we;
+    reg_we_check[9] = key_share1_0_we;
+    reg_we_check[10] = key_share1_1_we;
+    reg_we_check[11] = key_share1_2_we;
+    reg_we_check[12] = key_share1_3_we;
+    reg_we_check[13] = key_share1_4_we;
+    reg_we_check[14] = key_share1_5_we;
+    reg_we_check[15] = key_share1_6_we;
+    reg_we_check[16] = key_share1_7_we;
+    reg_we_check[17] = iv_0_we;
+    reg_we_check[18] = iv_1_we;
+    reg_we_check[19] = iv_2_we;
+    reg_we_check[20] = iv_3_we;
+    reg_we_check[21] = data_in_0_we;
+    reg_we_check[22] = data_in_1_we;
+    reg_we_check[23] = data_in_2_we;
+    reg_we_check[24] = data_in_3_we;
+    reg_we_check[25] = 1'b0;
+    reg_we_check[26] = 1'b0;
+    reg_we_check[27] = 1'b0;
+    reg_we_check[28] = 1'b0;
+    reg_we_check[29] = ctrl_shadowed_we;
+    reg_we_check[30] = ctrl_aux_shadowed_gated_we;
+    reg_we_check[31] = ctrl_aux_regwen_we;
+    reg_we_check[32] = trigger_we;
+    reg_we_check[33] = 1'b0;
+    reg_we_check[34] = ctrl_gcm_shadowed_we;
+  end
 
   // Read data return
   always_comb begin
@@ -1270,6 +1822,7 @@ module aes_reg_top (
       addr_hit[0]: begin
         reg_rdata_next[0] = '0;
         reg_rdata_next[1] = '0;
+        reg_rdata_next[31] = alert_test_regwen_qs;
       end
 
       addr_hit[1]: begin
@@ -1337,19 +1890,19 @@ module aes_reg_top (
       end
 
       addr_hit[17]: begin
-        reg_rdata_next[31:0] = '0;
+        reg_rdata_next[31:0] = iv_0_qs;
       end
 
       addr_hit[18]: begin
-        reg_rdata_next[31:0] = '0;
+        reg_rdata_next[31:0] = iv_1_qs;
       end
 
       addr_hit[19]: begin
-        reg_rdata_next[31:0] = '0;
+        reg_rdata_next[31:0] = iv_2_qs;
       end
 
       addr_hit[20]: begin
-        reg_rdata_next[31:0] = '0;
+        reg_rdata_next[31:0] = iv_3_qs;
       end
 
       addr_hit[21]: begin
@@ -1385,22 +1938,32 @@ module aes_reg_top (
       end
 
       addr_hit[29]: begin
-        reg_rdata_next[0] = ctrl_shadowed_operation_qs;
-        reg_rdata_next[6:1] = ctrl_shadowed_mode_qs;
-        reg_rdata_next[9:7] = ctrl_shadowed_key_len_qs;
-        reg_rdata_next[10] = ctrl_shadowed_sideload_qs;
-        reg_rdata_next[11] = ctrl_shadowed_manual_operation_qs;
-        reg_rdata_next[12] = ctrl_shadowed_force_zero_masks_qs;
+        reg_rdata_next[1:0] = ctrl_shadowed_operation_qs;
+        reg_rdata_next[7:2] = ctrl_shadowed_mode_qs;
+        reg_rdata_next[10:8] = ctrl_shadowed_key_len_qs;
+        reg_rdata_next[11] = ctrl_shadowed_sideload_qs;
+        reg_rdata_next[14:12] = ctrl_shadowed_prng_reseed_rate_qs;
+        reg_rdata_next[15] = ctrl_shadowed_manual_operation_qs;
       end
 
       addr_hit[30]: begin
-        reg_rdata_next[0] = '0;
-        reg_rdata_next[1] = '0;
-        reg_rdata_next[2] = '0;
-        reg_rdata_next[3] = '0;
+        reg_rdata_next[0] = ctrl_aux_shadowed_key_touch_forces_reseed_qs;
+        reg_rdata_next[1] = ctrl_aux_shadowed_force_masks_qs;
+        reg_rdata_next[2] = ctrl_aux_shadowed_keep_start_trigger_high_qs;
       end
 
       addr_hit[31]: begin
+        reg_rdata_next[0] = ctrl_aux_regwen_qs;
+      end
+
+      addr_hit[32]: begin
+        reg_rdata_next[0] = trigger_start_qs;
+        reg_rdata_next[1] = trigger_key_iv_data_in_clear_qs;
+        reg_rdata_next[2] = trigger_data_out_clear_qs;
+        reg_rdata_next[3] = trigger_prng_reseed_qs;
+      end
+
+      addr_hit[33]: begin
         reg_rdata_next[0] = status_idle_qs;
         reg_rdata_next[1] = status_stall_qs;
         reg_rdata_next[2] = status_output_lost_qs;
@@ -1408,6 +1971,11 @@ module aes_reg_top (
         reg_rdata_next[4] = status_input_ready_qs;
         reg_rdata_next[5] = status_alert_recov_ctrl_update_err_qs;
         reg_rdata_next[6] = status_alert_fatal_fault_qs;
+      end
+
+      addr_hit[34]: begin
+        reg_rdata_next[5:0] = ctrl_gcm_shadowed_phase_qs;
+        reg_rdata_next[10:6] = ctrl_gcm_shadowed_num_valid_bytes_qs;
       end
 
       default: begin
@@ -1418,20 +1986,41 @@ module aes_reg_top (
 
   // shadow busy
   logic shadow_busy;
-  assign shadow_busy = 1'b0;
-
-  // register busy
-  logic reg_busy_sel;
-  assign reg_busy = reg_busy_sel | shadow_busy;
-  always_comb begin
-    reg_busy_sel = '0;
-    unique case (1'b1)
-      default: begin
-        reg_busy_sel  = '0;
-      end
-    endcase
+  logic rst_done;
+  logic shadow_rst_done;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      rst_done <= '0;
+    end else begin
+      rst_done <= 1'b1;
+    end
   end
 
+  always_ff @(posedge clk_i or negedge rst_shadowed_ni) begin
+    if (!rst_shadowed_ni) begin
+      shadow_rst_done <= '0;
+    end else begin
+      shadow_rst_done <= 1'b1;
+    end
+  end
+
+  // both shadow and normal resets have been released
+  assign shadow_busy = ~(rst_done & shadow_rst_done);
+
+  // Collect up storage and update errors
+  assign shadowed_storage_err_o = |{
+    ctrl_aux_shadowed_key_touch_forces_reseed_storage_err,
+    ctrl_aux_shadowed_force_masks_storage_err,
+    ctrl_aux_shadowed_keep_start_trigger_high_storage_err
+  };
+  assign shadowed_update_err_o = |{
+    ctrl_aux_shadowed_key_touch_forces_reseed_update_err,
+    ctrl_aux_shadowed_force_masks_update_err,
+    ctrl_aux_shadowed_keep_start_trigger_high_update_err
+  };
+
+  // register busy
+  assign reg_busy = shadow_busy;
 
   // Unused signal tieoff
 

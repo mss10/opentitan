@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -6,7 +6,7 @@ import random
 from typing import Optional, Sequence, Tuple
 
 from shared.insn_yaml import InsnsFile
-from shared.operand import ImmOperandType, RegOperandType
+from shared.operand import ImmOperandType
 
 from .jump import Jump
 from ..config import Config
@@ -24,21 +24,6 @@ class Branch(SnippetGen):
         self.jump_gen = Jump(cfg, insns_file)
         self.beq = self._get_named_insn(insns_file, 'beq')
         self.bne = self._get_named_insn(insns_file, 'bne')
-
-        # beq and bne expect operands: grs1, grs2, offset
-        for insn in [self.beq, self.bne]:
-            if not (len(insn.operands) == 3 and
-                    isinstance(insn.operands[0].op_type, RegOperandType) and
-                    insn.operands[0].op_type.reg_type == 'gpr' and
-                    not insn.operands[0].op_type.is_dest() and
-                    isinstance(insn.operands[1].op_type, RegOperandType) and
-                    insn.operands[1].op_type.reg_type == 'gpr' and
-                    not insn.operands[1].op_type.is_dest() and
-                    isinstance(insn.operands[2].op_type, ImmOperandType) and
-                    insn.operands[2].op_type.signed):
-                raise RuntimeError('{} instruction from instructions file is not '
-                                   'the shape expected by the Branch generator.'
-                                   .format(insn.mnemonic))
 
         self.beq_prob = 0.5
 
@@ -139,7 +124,7 @@ class Branch(SnippetGen):
             psnip.insert_into_program(program)
             model.update_for_insn(branch_insn)
             model.pc += 4
-            return (psnip, False, model)
+            return (psnip, model)
 
         # Decide how much of our remaining fuel to give the code below the
         # branch. Each side gets the same amount because only one side appears
@@ -238,7 +223,7 @@ class Branch(SnippetGen):
             if jump_ret is None:
                 return None
 
-            jmp_insn, jmp_snippet, model0 = jump_ret
+            _jmp_insn, jmp_snippet, model0 = jump_ret
             snippet0 = Snippet.cons_option(snippet0, jmp_snippet)
         else:
             # Add the jump to go from branch 1 to branch 0
@@ -248,7 +233,7 @@ class Branch(SnippetGen):
             if jump_ret is None:
                 return None
 
-            jmp_insn, jmp_snippet, model1 = jump_ret
+            _jmp_insn, jmp_snippet, model1 = jump_ret
             snippet1 = Snippet.cons_option(snippet1, jmp_snippet)
 
         assert model0.pc == model1.pc
@@ -256,4 +241,4 @@ class Branch(SnippetGen):
 
         snippet = BranchSnippet(model.pc, branch_insn, snippet0, snippet1)
         snippet.insert_into_program(program)
-        return (snippet, False, model0)
+        return (snippet, model0)

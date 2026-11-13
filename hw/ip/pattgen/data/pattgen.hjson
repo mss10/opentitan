@@ -1,8 +1,33 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-{ name: "pattgen",
+{
+  name:               "pattgen",
+  human_name:         "Pattern Generator",
+  one_line_desc:      "Transmission of short time-dependent data patterns on two clock-parallel output channels",
+  one_paragraph_desc: '''
+  Pattern Generator transmits short time-dependent data patterns on two clock-parallel channels.
+  Each channel consists of one clock and one data line.
+  The channels are configured using the following parameters: clock divider ratio, clock polarity, pattern length, pattern data, and repetition count.
+  Effectively, Pattern Generator outputs the pattern data a specified number of times with the corresponding clock and then raises an interrupt when it is done.
+  '''
+  // Unique comportable IP identifier defined under KNOWN_CIP_IDS in the regtool.
+  cip_id:             "17",
+  design_spec:        "../doc",
+  dv_doc:             "../doc/dv",
+  hw_checklist:       "../doc/checklist",
+  sw_checklist:       "/sw/device/lib/dif/dif_pattgen",
+  revisions: [
+    {
+      version:            "1.1.0",
+      life_stage:         "L1",
+      design_stage:       "D2S",
+      verification_stage: "V2S",
+      dif_stage:          "S2",
+      notes:              ""
+    }
+  ]
   clocking: [{clock: "clk_i", reset: "rst_ni"}],
   bus_interfaces: [
     { protocol: "tlul", direction: "device" }
@@ -39,6 +64,38 @@
       local:   "true"
     }
   ],
+  features: [
+    { name: "PATTGEN.CHANNEL.ONE",
+      desc: "Pattern generator can generate patterns on two separate channels, this is the first one."
+    },
+    { name: "PATTGEN.CHANNEL.TWO",
+      desc: "Pattern generator can generate patterns on two separate channels, this is the second one."
+    },
+    { name: "PATTGEN.CONFIG.PATTERN",
+      desc: "Each channel can be programmed with a pattern with a length of between 1 and 64 bits, inclusive."
+    },
+    { name: "PATTGEN.CONFIG.DIVIDER",
+      desc: "Each channel has an independent clock divider."
+    },
+    { name: "PATTGEN.CONFIG.REPEAT",
+      desc: "Each channel can be configured to repeat the pattern up to 1024 times."
+    },
+    { name: "PATTGEN.CONFIG.POLARITY",
+      desc: "Each channel's clock can be inverted."
+    },
+    { name: "PATTGEN.CONFIG.INACTIVE_LEVEL",
+      desc: "The inactive level of clock and data output of each channel can be configured separately."
+    }
+    { name: "PATTGEN.COMPLETE",
+      desc: "Once a pattern is finished, an interrupt is raised."
+    }
+  ],
+  countermeasures: [
+    { name: "BUS.INTEGRITY",
+      desc: "End-to-end bus integrity scheme."
+    }
+  ]
+
   // REGISTER definition
   registers: [
     // CTRL register
@@ -71,7 +128,39 @@
         { bits: "3",
           resval: "0",
           name: "POLARITY_CH1",
-          desc: "Clock (`pcl`) polarity for Channel 1.  If high, `pda` signal changes on falling edge of `pcl` signal, otherwise pda changes on rising edge. Note that writes to a channel's configuration registers have no effect while the channel is enabled."
+          desc: "Clock (`pcl`) polarity for Channel 1.  If low, `pda` signal changes on falling edge of `pcl` signal, otherwise pda changes on rising edge. Note that writes to a channel's configuration registers have no effect while the channel is enabled."
+        }
+        { bits: "4"
+          resval: "0",
+          name: "INACTIVE_LEVEL_PCL_CH0",
+          desc: '''
+                If 0, `pcl` is low when pattgen is not actively sending data bits (i.e., when pattgen is disabled or all data bits have been sent).
+                If 1, `pcl` is high when pattgen is not actively sending data bits.
+                ''',
+        }
+        { bits: "5"
+          resval: "0",
+          name: "INACTIVE_LEVEL_PDA_CH0",
+          desc: '''
+                If 0, `pda` is low when pattgen is not actively sending data bits (i.e., when pattgen is disabled or all data bits have been sent).
+                If 1, `pda` is high when pattgen is not actively sending data bits.
+                ''',
+        }
+        { bits: "6"
+          resval: "0",
+          name: "INACTIVE_LEVEL_PCL_CH1",
+          desc: '''
+                If 0, `pcl` is low when pattgen is not actively sending data bits (i.e., when pattgen is disabled or all data bits have been sent).
+                If 1, `pcl` is high when pattgen is not actively sending data bits.
+                ''',
+        }
+        { bits: "7"
+          resval: "0",
+          name: "INACTIVE_LEVEL_PDA_CH1",
+          desc: '''
+                If 0, `pda` is low when pattgen is not actively sending data bits (i.e., when pattgen is disabled or all data bits have been sent).
+                If 1, `pda` is high when pattgen is not actively sending data bits.
+                ''',
         }
       ]
     }

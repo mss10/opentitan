@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,8 +7,8 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/pwrmgr/doc/">Power Manager</a> Device Interface
- * Functions
+ * @brief <a href="/book/hw/top_earlgrey/ip_autogen/pwrmgr/">Power Manager</a>
+ * Device Interface Functions
  */
 
 #include <stdint.h>
@@ -54,6 +54,7 @@ typedef enum dif_pwrmgr_domain_option {
    * Enable input/output (IO) clock in low power state.
    */
   kDifPwrmgrDomainOptionIoClockInLowPower = (1u << 1),
+#if defined(OPENTITAN_IS_EARLGREY) || defined(OPENTITAN_IS_ENGLISHBREAKFAST)
   /**
    * Enable USB clock in low power state.
    */
@@ -66,6 +67,14 @@ typedef enum dif_pwrmgr_domain_option {
    * Enable main power domain in low power state.
    */
   kDifPwrmgrDomainOptionMainPowerInLowPower = (1u << 4),
+#elif defined(OPENTITAN_IS_DARJEELING)
+  /**
+   * Enable main power domain in low power state.
+   */
+  kDifPwrmgrDomainOptionMainPowerInLowPower = (1u << 2),
+#else /* OPENTITAN_IS_ */
+#error "dif_pwrmgr does not support this top"
+#endif /* OPENTITAN_IS_ */
 } dif_pwrmgr_domain_option_t;
 
 /**
@@ -79,48 +88,14 @@ typedef enum dif_pwrmgr_domain_option {
 typedef uint8_t dif_pwrmgr_domain_config_t;
 
 /**
- * A wakeup request source.
- *
- * Constants below are bitmasks that can be used to define sets of wakeup
- * request sources.
- *
- * See also: `dif_pwrmgr_request_sources_t`.
- *
- * Note: This needs to be updated once the HW is finalized.
- */
-typedef enum dif_pwrmgr_wakeup_request_source {
-  kDifPwrmgrWakeupRequestSourceOne = (1u << 0),
-  kDifPwrmgrWakeupRequestSourceTwo = (1u << 1),
-  kDifPwrmgrWakeupRequestSourceThree = (1u << 2),
-  kDifPwrmgrWakeupRequestSourceFour = (1u << 3),
-  kDifPwrmgrWakeupRequestSourceFive = (1u << 4),
-  kDifPwrmgrWakeupRequestSourceSix = (1u << 5),
-} dif_pwrmgr_wakeup_request_source_t;
-
-/**
- * A reset request source.
- *
- * Constants below are bitmasks that can be used to define sets of reset
- * request sources.
- *
- * See also: `dif_pwrmgr_request_sources_t`.
- *
- * Note: This needs to be updated once the HW is finalized.
- */
-typedef enum dif_pwrmgr_reset_request_source {
-  kDifPwrmgrResetRequestSourceOne = (1u << 0),
-  kDifPwrmgrResetRequestSourceTwo = (1u << 1),
-} dif_pwrmgr_reset_request_source_t;
-
-/**
  * A set of request sources.
  *
  * This type is used for specifying which request sources are enabled for a
  * particular request type, i.e. wakeup or reset, as well querying wakeup
  * reasons.
  *
- * See also: `dif_pwrmgr_wakeup_request_source_t`,
- * `dif_pwrmgr_reset_request_source_t`.
+ * See also: `dt_pwrmgr_wakeup_src_t`, `dt_pwrmgr_reset_req_src_t` and
+ * associated functions.
  */
 typedef uint32_t dif_pwrmgr_request_sources_t;
 
@@ -158,6 +133,28 @@ typedef enum dif_pwrmgr_wakeup_type {
  */
 typedef uint8_t dif_pwrmgr_wakeup_types_t;
 
+typedef enum dif_pwrmgr_fatal_err_type {
+  /**
+   * A fatal error for regfile integrity.
+   */
+  kDifPwrmgrFatalErrTypeRegfileIntegrity = 1u << 0,
+  /**
+   * A fatal error for escalation timeout.
+   */
+  kDifPwrmgrFatalErrTypeEscalationTimeout = 1u << 1,
+  /**
+   * A fatal error for main power glitch.
+   */
+  kDifPwrmgrFatalErrTypeMainPowerGlitch = 1u << 2,
+} dif_pwrmgr_fatal_err_type_t;
+
+/**
+ * A set of fatal errors.
+ *
+ * This type is used to read the fatal error codes.
+ */
+typedef uint32_t dif_pwrmgr_fatal_err_codes_t;
+
 /**
  * Wakeup types and requests from sources since the last time recording started.
  */
@@ -173,15 +170,50 @@ typedef struct dif_pwrmgr_wakeup_reason {
 } dif_pwrmgr_wakeup_reason_t;
 
 /**
- * Power manager alerts.
+ * Obtain a bit mask of wakeups/reset requests for a device.
+ *
+ * Given a module instance (identified by its instance ID) and a wakeup
+ * or reset request index from this module, return a bitmask of sources which
+ * can be used with the pwrmgr DIF or testutils.
+ *
+ * Example (find request source of the aon_timer wakeup):
+ * ```c
+ * dif_pwrmgr_request_sources_t wakeup_sources;
+ * CHECK_DIF_OK(dif_pwrmgr_find_request_source(
+ *   pwrmgr,
+ *   kDifPwrmgrReqTypeWakeup,
+ *   dt_aon_timer_instance_id(kDtAonTimer),
+ *   kDtAonTimerWakeupWkupReq,
+ *   &wakeup_sources));
+ * ```
+ *
+ * @param pwrmgr A power manager handle.
+ * @param req_type Request type (wake up or reset request).
+ * @param inst_id An instance ID.
+ * @param idx Signal index.
+ * @param[out] sources The bitmask corresponding to the wakeup or reset
+ * requested.
+ * @return `kDifError` if no signal matches the description or the DIF
+ * was not initialized by DT, `kDifOk` otherwise.
  */
-typedef enum dif_pwrmgr_alert {
-  /**
-   * A fatal alert is triggered when a fatal TL-UL bus integrity fault is
-   * detected.
-   */
-  kDifPwrmgrAlertFatalFault = 0,
-} dif_pwrmgr_alert_t;
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_pwrmgr_find_request_source(
+    const dif_pwrmgr_t *pwrmgr, dif_pwrmgr_req_type_t req_type,
+    dt_instance_id_t inst_id, size_t idx,
+    dif_pwrmgr_request_sources_t *sources);
+
+/**
+ * Obtain a bit mask of all wakeups/reset requests.
+ *
+ * @param pwrmgr A power manager handle.
+ * @param req_type Request type (wake up or reset request).
+ * @param[out] sources The bitmask corresponding to all wakeups or resets
+ * @return `kDifError` if no DIF was not initialized by DT, `kDifOk` otherwise.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_pwrmgr_get_all_request_sources(
+    const dif_pwrmgr_t *pwrmgr, dif_pwrmgr_req_type_t req_type,
+    dif_pwrmgr_request_sources_t *sources);
 
 /**
  * Enables or disables low power state.
@@ -191,16 +223,19 @@ typedef enum dif_pwrmgr_alert {
  * corresponding bit automatically, this function must be called before each
  * transition to low power state.
  *
- * Note: This function also syncs changes to the slow clock domain for them to
- * take effect.
+ * This function can be configured to skip synchronization to the slow clock
+ * domain, under the assumption that timely synchronization will be performed
+ * by some of the other functions that can trigger it.
  *
  * @param pwrmgr A power manager handle.
  * @param new_state Whether low power state is enabled.
+ * @param sync_state Whether to wait for state to transfer to slow domain
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_pwrmgr_low_power_set_enabled(const dif_pwrmgr_t *pwrmgr,
-                                              dif_toggle_t new_state);
+                                              dif_toggle_t new_state,
+                                              dif_toggle_t sync_state);
 
 /**
  * Checks whether low power state is enabled.
@@ -217,16 +252,19 @@ dif_result_t dif_pwrmgr_low_power_get_enabled(const dif_pwrmgr_t *pwrmgr,
  * Configures power manager to enable/disable various clock and power domains in
  * low and active power states.
  *
- * Note: This function also syncs changes to the slow clock domain for them to
- * take effect.
+ * This function can be configured to skip synchronization to the slow clock
+ * domain, under the assumption that timely synchronization will be performed
+ * by some of the other functions that can trigger it.
  *
  * @param pwrmgr A power manager handle.
  * @param config A domain configuration.
+ * @param sync_state Whether to wait for state to transfer to slow domain
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_pwrmgr_set_domain_config(const dif_pwrmgr_t *pwrmgr,
-                                          dif_pwrmgr_domain_config_t config);
+                                          dif_pwrmgr_domain_config_t config,
+                                          dif_toggle_t sync_state);
 
 /**
  * Gets current power manager configuration.
@@ -246,18 +284,20 @@ dif_result_t dif_pwrmgr_get_domain_config(const dif_pwrmgr_t *pwrmgr,
  * watchdog timer, USB, etc. This function sets which sources are enabled for a
  * particular request type.
  *
- * Note: This function also syncs changes to the slow clock domain for them to
- * take effect.
+ * This function can be configured to skip synchronization to the slow clock
+ * domain, under the assumption that timely synchronization will be performed
+ * by some of the other functions that can trigger it.
  *
  * @param pwrmgr A power manager handle.
  * @param req_type A request type.
  * @param sources Sources enabled for the given request type.
+ * @param sync_state Whether to wait for state to transfer to slow domain
  * @return The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_pwrmgr_set_request_sources(
     const dif_pwrmgr_t *pwrmgr, dif_pwrmgr_req_type_t req_type,
-    dif_pwrmgr_request_sources_t sources);
+    dif_pwrmgr_request_sources_t sources, dif_toggle_t sync_state);
 
 /**
  * Gets sources enabled for a request type.
@@ -371,16 +411,15 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_pwrmgr_wakeup_reason_clear(const dif_pwrmgr_t *pwrmgr);
 
 /**
- * Forces a particular alert, causing it to be serviced as if hardware had
- * asserted it.
+ * Read the fatal error codes.
  *
- * @param pwrmgr A power manager handle.
- * @param alert A power manager alert type.
- * @return The result of the operation.
+ * @param pwrmgr Power Manager Handle.
+ * @param[out] codes The fatal error codes.
+ * @returns The result of the operation.
  */
 OT_WARN_UNUSED_RESULT
-dif_result_t dif_pwrmgr_alert_force(const dif_pwrmgr_t *pwrmgr,
-                                    dif_pwrmgr_alert_t alert);
+dif_result_t dif_pwrmgr_fatal_err_code_get_codes(
+    const dif_pwrmgr_t *pwrmgr, dif_pwrmgr_fatal_err_codes_t *codes);
 
 #ifdef __cplusplus
 }  // extern "C"

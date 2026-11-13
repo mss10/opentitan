@@ -1,10 +1,8 @@
----
-title: "Hello World"
----
+# Hello World Example
 
 ## Overview
 
-`Hello_world` is the demo program used to show case basic functionality of the system.
+`Hello_world` is the demo program used to showcase basic functionality of the system.
 The test itself does 2 main things:
 * Echo pin changes over UART.
 * Echo SPI input over UART.

@@ -1,9 +1,9 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
-"""TileLink-Uncached Lightweight Xbar self document
-"""
-import logging as log
+"""Generate self-documentation for a TL-UL crossbar."""
+
+from typing import Any, Dict
 
 from reggen.validate import val_types
 
@@ -19,12 +19,11 @@ Type | Description
 """
 
 
-def print_control(control, heading):
-    """Print a control group and its subgroup recursively
-    """
+def print_control(control: Dict[Any, Any], heading: int) -> str:
+    """Print a control group and its subgroup recursively."""
     subgroup = []  # added if the field hit sub control group
 
-    outstr = '#' * heading + ' ' + control['name'] + '\n'
+    outstr: str = '#' * heading + ' ' + control['name'] + '\n'
     outstr += '\n'
 
     outstr += control['description']
@@ -49,7 +48,6 @@ Field | Kind | Type | Description
 
         if v[0] == 'lg':
             subgroup.append(v[1])
-            log.error(val_types[v[0]])
             outstr += '{} | {} | {} | List of {} group\n'.format(
                 k, kind, v_type, k)
             continue
@@ -71,7 +69,8 @@ Field | Kind | Type | Description
     return outstr
 
 
-def selfdoc(heading, cmd=""):
+def selfdoc(heading: int, cmd: str = "") -> str:
+    """Return self-documentation for TL crossbar."""
     # heading : Markdown header depth
     # value type
     outstr = doc_intro

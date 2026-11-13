@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -20,7 +20,7 @@ py-libs    := $(filter-out $(py-scripts),$(py-files))
 lint-stamps := $(foreach scr,$(py-scripts),$(build-dir)/$(scr).stamp)
 
 $(lint-stamps): $(build-dir)/%.stamp: % $(py-libs) | $(build-dir)
-	env MYPYPATH="$$MYPYPATH:../../util" mypy --strict $< $(py-libs)
+	mypy --strict --config-file=mypy.ini $<
 	touch $@
 
 .PHONY: lint

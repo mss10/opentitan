@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,8 +6,10 @@
 #define OPENTITAN_SW_DEVICE_LIB_RUNTIME_HART_H_
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdnoreturn.h>
 
+#include "sw/device/lib/base/macros.h"
 #include "sw/device/lib/base/stdasm.h"
 
 /**
@@ -22,14 +24,27 @@
  *
  * This function may behave as if it is a no-op.
  */
-inline void wait_for_interrupt(void) { asm volatile("wfi"); }
+inline void wait_for_interrupt(void) {
+#ifdef OT_PLATFORM_RV32
+  asm volatile("wfi");
+#endif
+}
+
+/**
+ * Invalidates the instruction cache.
+ */
+inline void icache_invalidate(void) {
+#ifdef OT_PLATFORM_RV32
+  asm volatile("fence.i");
+#endif
+}
 
 /**
  * Spin for at least the given number of microseconds.
  *
  * @param usec Duration in microseconds.
  */
-void usleep(uint32_t usec);
+void busy_spin_micros(uint32_t usec);
 
 /**
  * Immediately halt program execution.

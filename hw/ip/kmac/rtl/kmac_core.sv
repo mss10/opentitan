@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -32,7 +32,7 @@ module kmac_core
   // Configurations
 
   // If kmac_en is cleared, Core logic doesn't function but forward incoming
-  // mesage to SHA3 core
+  // message to SHA3 core
   input                             kmac_en_i,
   input sha3_pkg::sha3_mode_e       mode_i,
   input sha3_pkg::keccak_strength_e strength_i,
@@ -40,14 +40,22 @@ module kmac_core
   // Key input from CSR
   input [MaxKeyLen-1:0] key_data_i [Share],
   input key_len_e       key_len_i,
+  input logic           key_valid_i,
 
   // Controls : same to SHA3 core
   input start_i,
+  input continue_i,
   input process_i,
-  input done_i,
+  input prim_mubi_pkg::mubi4_t done_i,
 
   // Control to SHA3 core
-  output logic process_o
+  output logic process_o,
+
+  // Life cycle
+  input  lc_ctrl_pkg::lc_tx_t lc_escalate_en_i,
+
+  output logic sparse_fsm_error_o,
+  output logic key_index_error_o
 );
 
   import sha3_pkg::KeccakMsgAddrW;
@@ -63,22 +71,45 @@ module kmac_core
   // Definitions //
   /////////////////
 
-  typedef enum logic [1:0] {
-    StKmacIdle,
+  // Encoding generated with:
+  // $ ./util/design/sparse-fsm-encode.py -d 3 -m 5 -n 6 \
+  //      -s 401658243 --language=sv
+  //
+  // Hamming distance histogram:
+  //
+  //  0: --
+  //  1: --
+  //  2: --
+  //  3: |||||||||||||||||||| (50.00%)
+  //  4: |||||||||||||||| (40.00%)
+  //  5: |||| (10.00%)
+  //  6: --
+  //
+  // Minimum Hamming distance: 3
+  // Maximum Hamming distance: 5
+  // Minimum Hamming weight: 1
+  // Maximum Hamming weight: 4
+  //
+  localparam int StateWidth = 6;
+  typedef enum logic [StateWidth-1:0] {
+    StKmacIdle = 6'b011000,
 
     // Secret Key pushing stage
     // The key is sliced by prim_slicer. This state pushes the sliced data into
     // SHA3 hashing engine. When it hits the block size limit,
     // (same as in sha3pad) the state machine moves to Message.
-    StKey,
+    StKey = 6'b010111,
 
     // Incoming Message
     // The core does nothing but forwarding the incoming message to SHA3 hashing
     // engine by turning off `en_kmac_datapath`.
-    StKmacMsg,
+    StKmacMsg = 6'b001110,
 
     // Wait till done signal
-    StKmacFlush
+    StKmacFlush = 6'b101011,
+
+    // Terminal Error
+    StTerminalError = 6'b100000
   } kmac_st_e ;
 
   /////////////
@@ -118,8 +149,9 @@ module kmac_core
   // Encoded key has wider bits. `key_sliced` is the data to send to sha3
   logic [MsgWidth-1:0] key_sliced [Share];
 
-  sha3_pkg::sha3_mode_e unused_mode;
-  assign unused_mode = mode_i;
+  // The following signals are only used in assertions.
+  logic unused_signals;
+  assign unused_signals = ^{mode_i, key_valid_i};
 
   /////////
   // FSM //
@@ -127,17 +159,12 @@ module kmac_core
   kmac_st_e st, st_d;
 
   // State register
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      st <= StKmacIdle;
-    end else begin
-      st <= st_d;
-    end
-  end
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, st_d, st, kmac_st_e, StKmacIdle)
 
   // Next state and output logic
+  // SEC_CM: FSM.SPARSE
   always_comb begin
-    st_d = StKmacIdle;
+    st_d = st;
 
     en_kmac_datapath = 1'b 0;
     en_key_write = 1'b 0;
@@ -147,10 +174,16 @@ module kmac_core
     kmac_valid = 1'b 0;
     kmac_process = 1'b 0;
 
+    sparse_fsm_error_o = 1'b 0;
+
     unique case (st)
       StKmacIdle: begin
         if (kmac_en_i && start_i) begin
           st_d = StKey;
+        end else if (kmac_en_i && continue_i) begin
+          // Resume a saved context. No need to again process the key
+          // as this already was done previously.
+          st_d = StKmacMsg;
         end else begin
           st_d = StKmacIdle;
         end
@@ -186,17 +219,32 @@ module kmac_core
       end
 
       StKmacFlush: begin
-        if (done_i) begin
+        if (prim_mubi_pkg::mubi4_test_true_strict(done_i)) begin
           st_d = StKmacIdle;
         end else begin
           st_d = StKmacFlush;
         end
       end
 
+      StTerminalError: begin
+        // this state is terminal
+        st_d = st;
+        sparse_fsm_error_o = 1'b 1;
+      end
+
       default: begin
-        st_d = StKmacIdle;
+        // this state is terminal
+        st_d = StTerminalError;
+        sparse_fsm_error_o = 1'b 1;
       end
     endcase
+
+    // SEC_CM: FSM.GLOBAL_ESC, FSM.LOCAL_ESC
+    // Unconditionally jump into the terminal error state
+    // if the life cycle controller triggers an escalation.
+    if (lc_ctrl_pkg::lc_tx_test_true_loose(lc_escalate_en_i)) begin
+      st_d = StTerminalError;
+    end
   end
 
   //////////////
@@ -205,10 +253,10 @@ module kmac_core
 
   // DATA Mux depending on kmac_en
   // When Key write happens, hold the FIFO request. so fifo_ready_o is tied to 0
-  assign msg_valid_o  = (kmac_en_i && en_kmac_datapath) ? kmac_valid : fifo_valid_i;
-  assign msg_data_o   = (kmac_en_i && en_kmac_datapath) ? kmac_data  : fifo_data_i ;
-  assign msg_strb_o   = (kmac_en_i && en_kmac_datapath) ? kmac_strb  : fifo_strb_i ;
-  assign fifo_ready_o = (kmac_en_i && en_kmac_datapath) ? 1'b 0      : msg_ready_i ;
+  assign msg_valid_o  = (en_kmac_datapath) ? kmac_valid : fifo_valid_i;
+  assign msg_data_o   = (en_kmac_datapath) ? kmac_data  : fifo_data_i ;
+  assign msg_strb_o   = (en_kmac_datapath) ? kmac_strb  : fifo_strb_i ;
+  assign fifo_ready_o = (en_kmac_datapath) ? 1'b 0      : msg_ready_i ;
 
   // secret key write request to SHA3 hashing engine is always full width write.
   // KeyMgr is fixed 256 bit output. So `right_encode(256)` is 0x020100 --> strb 3
@@ -226,7 +274,8 @@ module kmac_core
       process_latched <= 1'b 0;
     end else if (process_i && !process_o) begin
       process_latched <= 1'b 1;
-    end else if (process_o || done_i) begin
+    end else if (process_o ||
+      prim_mubi_pkg::mubi4_test_true_strict(done_i)) begin
       process_latched <= 1'b 0;
     end
   end
@@ -235,7 +284,7 @@ module kmac_core
   // 1. Prepare left_encode(w)
   // 2. Prepare left_encode(len(secret_key))
   // 3. Concatenate left_encode(len(secret_key)) || secret_key
-  // 4. Concaatenate left_encode(w) || encode_string(secret_key)
+  // 4. Concatenate left_encode(w) || encode_string(secret_key)
   // 5. Based on the address, slice out the data into MsgWidth bits
 
   // left_encode(w): Same as used in sha3pad logic.
@@ -349,11 +398,24 @@ module kmac_core
   // It behaves same as `keccak_addr` or `prefix_index` in sha3pad module.
   assign inc_keyidx = kmac_valid & msg_ready_i ;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni)         key_index <= '0;
-    else if (clr_keyidx) key_index <= '0;
-    else if (inc_keyidx) key_index <= key_index + 1'b 1;
-  end
+  // This primitive is used to place a hardened counter
+  // SEC_CM: CTR.REDUN
+  prim_count #(
+    .Width(sha3_pkg::KeccakMsgAddrW)
+  ) u_key_index_count (
+    .clk_i,
+    .rst_ni,
+    .clr_i(clr_keyidx),
+    .set_i(1'b0),
+    .set_cnt_i('0),
+    .incr_en_i(inc_keyidx),
+    .decr_en_i(1'b0),
+    .step_i(sha3_pkg::KeccakMsgAddrW'(1)),
+    .commit_i(1'b1),
+    .cnt_o(key_index),
+    .cnt_after_commit_o(),
+    .err_o(key_index_error_o)
+  );
 
   // Block size based on the address.
   // This is used for bytepad() and also pad10*1()
@@ -397,15 +459,17 @@ module kmac_core
           st == StKmacMsg && process_latched |=> !process_latched)
 
   // Assume configuration is stable during the operation
-  `ASSUME(KmacEnStable_M, $changed(kmac_en_i) |-> st == StKmacIdle)
-  `ASSUME(ModeStable_M, $changed(mode_i) |-> st == StKmacIdle)
-  `ASSUME(StrengthStable_M, $changed(strength_i) |-> st == StKmacIdle)
-  `ASSUME(KeyLengthStable_M, $changed(key_len_i) |-> st == StKmacIdle)
-  `ASSUME(KeyDataStable_M, $changed(key_data_i) |-> st == StKmacIdle)
+  `ASSUME(KmacEnStable_M, $changed(kmac_en_i) |-> st inside {StKmacIdle, StTerminalError})
+  `ASSUME(ModeStable_M, $changed(mode_i) |-> st inside {StKmacIdle, StTerminalError})
+  `ASSUME(StrengthStable_M,
+          $changed(strength_i) |->
+          (st inside {StKmacIdle, StTerminalError}) ||
+          ($past(st) == StKmacIdle))
+  `ASSUME(KeyLengthStableWhenValid_M, key_valid_i && !$rose(key_valid_i) |-> $stable(key_len_i))
+  `ASSUME(KeyDataStableWhenValid_M, key_valid_i && !$rose(key_valid_i) |-> $stable(key_data_i))
 
   // no acked to MsgFIFO in StKmacMsg
   `ASSERT(AckOnlyInMessageState_A,
           fifo_valid_i && fifo_ready_o && kmac_en_i |-> st == StKmacMsg)
 
 endmodule : kmac_core
-

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -19,8 +19,8 @@
 #include "sv_utils.h"
 
 OtbnMemUtil::OtbnMemUtil(const std::string &top_scope)
-    : imem_(SVScoped::join_sv_scopes(top_scope, "u_imem"), 4096 / 4, 4 / 4),
-      dmem_(SVScoped::join_sv_scopes(top_scope, "u_dmem"), 4096 / 32, 32 / 4),
+    : imem_(SVScoped::join_sv_scopes(top_scope, "u_imem"), 16384 / 4, 4 / 4),
+      dmem_(SVScoped::join_sv_scopes(top_scope, "u_dmem"), 32768 / 32, 32 / 4),
       expected_end_addr_(-1) {
   RegisterMemoryArea("imem", 0x4000, &imem_);
   RegisterMemoryArea("dmem", 0x8000, &dmem_);
@@ -176,7 +176,7 @@ extern "C" int OtbnMemUtilGetSegCount(OtbnMemUtil *mem_util, svBit is_imem) {
   // but it's theoretically possible). Fortunately, that number is still
   // representable with a signed 32-bit integer, so this assertion shouldn't
   // ever fire.
-  assert(num_segs < std::numeric_limits<int>::max());
+  assert(num_segs < (unsigned)std::numeric_limits<int>::max());
 
   return num_segs;
 }
@@ -294,7 +294,7 @@ int OtbnMemUtilGetNumLoopWarps(OtbnMemUtil *mem_util) {
   assert(mem_util);
 
   size_t sz = mem_util->GetLoopWarps().size();
-  assert(sz < std::numeric_limits<int>::max());
+  assert(sz < (unsigned)std::numeric_limits<int>::max());
 
   return sz;
 }
@@ -308,7 +308,7 @@ void OtbnMemUtilGetLoopWarpByIndex(
   assert(0 <= idx);
 
   auto &warps = mem_util->GetLoopWarps();
-  assert(idx < warps.size());
+  assert((unsigned)idx < warps.size());
 
   auto it = std::next(warps.begin(), idx);
 

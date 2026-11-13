@@ -1,19 +1,23 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "hw/top/dt/kmac.h"
 #include "sw/device/lib/arch/device.h"
-#include "sw/device/lib/base/memory.h"
 #include "sw/device/lib/base/mmio.h"
 #include "sw/device/lib/dif/dif_kmac.h"
-#include "sw/device/lib/flash_ctrl.h"
 #include "sw/device/lib/runtime/log.h"
-#include "sw/device/lib/testing/check.h"
-#include "sw/device/lib/testing/test_framework/test_main.h"
+#include "sw/device/lib/testing/test_framework/check.h"
+#include "sw/device/lib/testing/test_framework/ottf_main.h"
 
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
+#include "hw/top/kmac_regs.h"  // Generated.
 
-const test_config_t kTestConfig;
+static_assert(kDtKmacCount >= 1,
+              "This test requires at least one KMAC instance");
+
+static dt_kmac_t kTestKmac = (dt_kmac_t)0;
+
+OTTF_DEFINE_TEST_CONFIG();
 
 /**
  * Digest lengths in 32-bit words.
@@ -54,7 +58,7 @@ const sha3_test_t sha3_tests[] = {
     {
         .mode = kDifKmacModeSha3Len256,
         .message = "\xe7\x37\x21\x05",
-        .message_len = 4,
+        .message_len = 32 / 8,
         .digest = {0x8ab6423a, 0x8cf279b0, 0x52c7a34c, 0x90276f29, 0x78fec406,
                    0xd979ebb1, 0x057f7789, 0xae46401e},
         .digest_len = DIGEST_LEN_SHA3_256,
@@ -63,7 +67,7 @@ const sha3_test_t sha3_tests[] = {
         .mode = kDifKmacModeSha3Len384,
         .message = "\xa7\x48\x47\x93\x0a\x03\xab\xee\xa4\x73\xe1\xf3\xdc\x30"
                    "\xb8\x88\x15",
-        .message_len = 17,
+        .message_len = 136 / 8,
         .digest = {0x29f9a6db, 0xd6f955fe, 0xc0675f6c, 0xf1823baf, 0xb358cf7b,
                    0x16f35267, 0x3f08165c, 0x78d48fea, 0xf20369ee, 0xd20a827f,
                    0xaf5099dd, 0x00678cb4},
@@ -82,7 +86,7 @@ const sha3_test_t sha3_tests[] = {
             "\x3e\x10\xca\xfb\x7c\x2c\x33\xc8\x3b\xbf\x4c\x46\xa3\x1d\xa9\x0c"
             "\xff\x3b\xfd\x4c\xcc\x6e\xd4\xb3\x10\x75\x84\x91\xee\xba\x60\x3a"
             "\x76",
-        .message_len = 145,
+        .message_len = 1160 / 8,
         .digest = {0xf15f82e5, 0xd570c0a3, 0xe7bb2fa5, 0x444a8511, 0x5f295405,
                    0x69797afb, 0xd10879a1, 0xbebf6301, 0xa6521d8f, 0x13a0e876,
                    0x1ca1567b, 0xb4fb0fdf, 0x9f89bc56, 0x4bd127c7, 0x322288d8,
@@ -109,6 +113,8 @@ typedef struct shake_test {
 /**
  * SHAKE tests.
  */
+// Examples generated using a custom Go program importing package
+// `golang.org/x/crypto/sha3`
 const shake_test_t shake_tests[] = {
     {
         .mode = kDifKmacModeShakeLen128,
@@ -124,7 +130,7 @@ const shake_test_t shake_tests[] = {
                    0x268e4a5a, 0xe5da510f, 0x97e5d3bc, 0xaae1b7bc, 0xa337f70b,
                    0xeae3cc65, 0xb8429058, 0xe4319c08, 0xd35e2786, 0xbc99af6e,
                    0x19a04aa8, 0xccbf18bf, 0xf681ebd4, 0x3d6da575, 0x2f0b9406},
-        .digest_len = 50,  // Rate (r) is 42 words.
+        .digest_len = 1600 / 8 / 4,  // Rate (r) is 42 words.
     },
     {
         .mode = kDifKmacModeShakeLen256,
@@ -151,42 +157,33 @@ const shake_test_t shake_tests[] = {
                    0x423323c9, 0xba7b8db4, 0x06c36eb0, 0x4fd75b36, 0xf0c70001,
                    0x0aefb1df, 0x6ae399e6, 0xf71930a6, 0xdef2206,  0x5ce2a640,
                    0x6a82fcf4, 0xa91b0815},
-        .digest_len = 102,  // Rate (r) is 34 words.
+        .digest_len = 3264 / 8 / 4,  // Rate (r) is 34 words.
     },
 };
 
-bool test_main() {
-  LOG_INFO("Running KMAC DIF test...");
-
-  // Intialize KMAC hardware.
-  dif_kmac_t kmac;
-  dif_kmac_operation_state_t kmac_operation_state;
-  CHECK_DIF_OK(
-      dif_kmac_init(mmio_region_from_addr(TOP_EARLGREY_KMAC_BASE_ADDR), &kmac));
-
-  // Configure KMAC hardware using software entropy.
-  dif_kmac_config_t config = (dif_kmac_config_t){
-      .entropy_mode = kDifKmacEntropyModeSoftware,
-      .entropy_seed = 0xffff,
-      .entropy_fast_process = kDifToggleEnabled,
-  };
-  CHECK_DIF_OK(dif_kmac_configure(&kmac, config));
-
-  // Run SHA-3 test cases using single blocking absorb/squeeze operations.
+/**
+ * Run SHA-3 test cases using single blocking absorb/squeeze operations.
+ */
+void run_sha3_test(dif_kmac_t *kmac) {
+  dif_kmac_operation_state_t operation_state;
   for (int i = 0; i < ARRAYSIZE(sha3_tests); ++i) {
     sha3_test_t test = sha3_tests[i];
 
-    CHECK_DIF_OK(
-        dif_kmac_mode_sha3_start(&kmac, &kmac_operation_state, test.mode));
+    CHECK_DIF_OK(dif_kmac_mode_sha3_start(kmac, &operation_state, test.mode));
     if (test.message_len > 0) {
-      CHECK_DIF_OK(dif_kmac_absorb(&kmac, &kmac_operation_state, test.message,
+      CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, test.message,
                                    test.message_len, NULL));
     }
     uint32_t out[DIGEST_LEN_SHA3_MAX];
     CHECK(DIGEST_LEN_SHA3_MAX >= test.digest_len);
-    CHECK_DIF_OK(dif_kmac_squeeze(&kmac, &kmac_operation_state, out,
-                                  test.digest_len, NULL));
-    CHECK_DIF_OK(dif_kmac_end(&kmac, &kmac_operation_state));
+    CHECK_DIF_OK(dif_kmac_squeeze(kmac, &operation_state, out, test.digest_len,
+                                  /*processed=*/NULL, /*capacity=*/NULL));
+    CHECK_DIF_OK(dif_kmac_end(kmac, &operation_state));
+
+    // Wait for the hardware engine to actually finish. On FPGA, it may take
+    // a while until the DONE command gets actually executed (see SecCmdDelay
+    // SystemVerilog parameter).
+    CHECK_DIF_OK(dif_kmac_poll_status(kmac, KMAC_STATUS_SHA3_IDLE_BIT));
 
     for (int j = 0; j < test.digest_len; ++j) {
       CHECK(out[j] == test.digest[j],
@@ -194,22 +191,97 @@ bool test_main() {
             test.digest[j]);
     }
   }
+}
 
-  // Run SHAKE test cases using single blocking absorb/squeeze operations.
+/**
+ * Run a SHA-3 test case with varying alignments.
+ */
+void run_sha3_alignment_test(dif_kmac_t *kmac) {
+  // Examples taken from NIST FIPS-202 Algorithm Test Vectors:
+  // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/sha3/sha-3bytetestvectors.zip
+  const char kMsg[] =
+      "\xa7\x48\x47\x93\x0a\x03\xab\xee\xa4\x73\xe1\xf3\xdc\x30"
+      "\xb8\x88\x15";
+  const size_t kSize = ARRAYSIZE(kMsg);
+  const uint32_t kExpect = 0x29f9a6db;
+  const dif_kmac_mode_sha3_t kMode = kDifKmacModeSha3Len384;
+  dif_kmac_operation_state_t operation_state;
+
+  for (size_t i = 0; i < sizeof(uint32_t); ++i) {
+    char buffer[ARRAYSIZE(kMsg) + sizeof(uint32_t)] = {0};
+    memcpy(&buffer[i], kMsg, kSize);
+
+    CHECK_DIF_OK(dif_kmac_mode_sha3_start(kmac, &operation_state, kMode));
+    CHECK_DIF_OK(
+        dif_kmac_absorb(kmac, &operation_state, &buffer[i], kSize, NULL));
+
+    // Checking the first 32-bits of the digest is sufficient.
+    uint32_t out;
+    CHECK_DIF_OK(dif_kmac_squeeze(kmac, &operation_state, &out,
+                                  sizeof(uint32_t), /*processed=*/NULL,
+                                  /*capacity=*/NULL));
+    CHECK_DIF_OK(dif_kmac_end(kmac, &operation_state));
+
+    // Wait for the hardware engine to actually finish. On FPGA, it may take
+    // a while until the DONE command gets actually executed (see SecCmdDelay
+    // SystemVerilog parameter).
+    CHECK_DIF_OK(dif_kmac_poll_status(kmac, KMAC_STATUS_SHA3_IDLE_BIT));
+
+    CHECK_DIF_OK((out == kExpect),
+                 "mismatch at alignment %u got 0x%u want 0x%x", i, out,
+                 kExpect);
+  }
+
+  // Run a SHA-3 test case using multiple absorb calls.
+  {
+    CHECK_DIF_OK(dif_kmac_mode_sha3_start(kmac, &operation_state, kMode));
+    CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, &kMsg[0], 1, NULL));
+    CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, &kMsg[1], 2, NULL));
+    CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, &kMsg[3], 5, NULL));
+    CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, &kMsg[8], 4, NULL));
+    CHECK_DIF_OK(
+        dif_kmac_absorb(kmac, &operation_state, &kMsg[12], kSize - 12, NULL));
+
+    // Checking the first 32-bits of the digest is sufficient.
+    uint32_t out;
+    CHECK_DIF_OK(dif_kmac_squeeze(kmac, &operation_state, &out,
+                                  sizeof(uint32_t), /*processed=*/NULL,
+                                  /*capacity=*/NULL));
+    CHECK_DIF_OK(dif_kmac_end(kmac, &operation_state));
+
+    // Wait for the hardware engine to actually finish. On FPGA, it may take
+    // a while until the DONE command gets actually executed (see SecCmdDelay
+    // SystemVerilog parameter).
+    CHECK_DIF_OK(dif_kmac_poll_status(kmac, KMAC_STATUS_SHA3_IDLE_BIT));
+
+    CHECK_DIF_OK((out == kExpect), "mismatch got 0x%u want 0x%x", out, kExpect);
+  }
+}
+
+/**
+ * Run SHAKE test cases using single blocking absorb/squeeze operations.
+ */
+void run_shake_test(dif_kmac_t *kmac) {
+  dif_kmac_operation_state_t operation_state;
+
   for (int i = 0; i < ARRAYSIZE(shake_tests); ++i) {
     shake_test_t test = shake_tests[i];
 
-    CHECK_DIF_OK(
-        dif_kmac_mode_shake_start(&kmac, &kmac_operation_state, test.mode));
+    CHECK_DIF_OK(dif_kmac_mode_shake_start(kmac, &operation_state, test.mode));
     if (test.message_len > 0) {
-      CHECK_DIF_OK(dif_kmac_absorb(&kmac, &kmac_operation_state, test.message,
+      CHECK_DIF_OK(dif_kmac_absorb(kmac, &operation_state, test.message,
                                    test.message_len, NULL));
     }
     uint32_t out[DIGEST_LEN_SHAKE_MAX];
     CHECK(DIGEST_LEN_SHAKE_MAX >= test.digest_len);
-    CHECK_DIF_OK(dif_kmac_squeeze(&kmac, &kmac_operation_state, out,
-                                  test.digest_len, NULL));
-    CHECK_DIF_OK(dif_kmac_end(&kmac, &kmac_operation_state));
+    CHECK_DIF_OK(dif_kmac_squeeze(kmac, &operation_state, out, test.digest_len,
+                                  /*processed=*/NULL, /*capacity=*/NULL));
+    CHECK_DIF_OK(dif_kmac_end(kmac, &operation_state));
+
+    // Wait for the hardware engine to actually finish. On FPGA, it may take
+    // a while until the DONE command gets actually executed (see SecCmdDelay
+    // SystemVerilog parameter).
+    CHECK_DIF_OK(dif_kmac_poll_status(kmac, KMAC_STATUS_SHA3_IDLE_BIT));
 
     for (int j = 0; j < test.digest_len; ++j) {
       CHECK(out[j] == test.digest[j],
@@ -217,6 +289,29 @@ bool test_main() {
             test.digest[j]);
     }
   }
+}
+
+bool test_main(void) {
+  LOG_INFO("Running KMAC DIF test...");
+
+  // Intialize KMAC hardware.
+  dif_kmac_t kmac;
+  CHECK_DIF_OK(dif_kmac_init_from_dt(kTestKmac, &kmac));
+
+  // Configure KMAC hardware using software entropy. The seed has been randomnly
+  // chosen and is genrated using enerated using
+  // ./util/design/gen-lfsr-seed.py --width 192 --seed 2034386436 --prefix ""
+  dif_kmac_config_t config = (dif_kmac_config_t){
+      .entropy_mode = kDifKmacEntropyModeSoftware,
+      .entropy_seed = {0xb153e3fe, 0x09596819, 0x3e85a6e8, 0xb6dcdaba,
+                       0x50dc409c, 0x11e1ebd1},
+      .entropy_fast_process = kDifToggleEnabled,
+  };
+  CHECK_DIF_OK(dif_kmac_configure(&kmac, config));
+
+  run_sha3_test(&kmac);
+  run_sha3_alignment_test(&kmac);
+  run_shake_test(&kmac);
 
   return true;
 }

@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -45,29 +45,27 @@ class BadDeepLoop(SnippetGen):
 
         '''
         # Pick some value for bodysize that either points at an existing
-        # instruction or points above the top of memory. Rather than doing
-        # something clever, we pick the address at random and "re-roll" if it
-        # points at a gap in instruction memory. Since bodysize_range[1] is
-        # 4096, giving a maximum address of 16KiB, which happens to equal the
-        # size of IMEM, we know it's going to be possible. Try to pick 50
-        # times, which should fail with probability at most 1/4^50 = 1/2^100.
+        # instruction or points above the top of memory. List every value
+        # that works and pick one of them.
         bodysize_op_type = insn.operands[1].op_type
         bodysize_range = bodysize_op_type.get_op_val_range(pc)
         assert bodysize_range is not None
 
-        bodysize = None
-        for _ in range(50):
-            guess = random.randint(bodysize_range[0], bodysize_range[1])
+        # The largest bodysize must reach above the top of IMEM, so that
+        # there is always at least one choice.
+        assert pc + 4 * bodysize_range[1] >= program.imem_size
+
+        choices = []
+        for guess in range(bodysize_range[0], bodysize_range[1] + 1):
             last_insn_addr = pc + 4 * guess
             if ((last_insn_addr >= program.imem_size or
                  program.get_insn_space_at(last_insn_addr) == 0)):
-                bodysize = guess
-                break
+                choices.append(guess)
 
-        assert bodysize is not None
+        bodysize = random.choice(choices)
         enc_bodysize = bodysize_op_type.op_val_to_enc_val(bodysize, pc)
         assert enc_bodysize is not None
-        return (enc_bodysize, pc + 4 * guess)
+        return (enc_bodysize, pc + 4 * bodysize)
 
     def _pick_loop_iterations(self, model: Model) -> Optional[int]:
         # This is like Loop._pick_loop_iterations, but doesn't try to weight
@@ -105,7 +103,7 @@ class BadDeepLoop(SnippetGen):
         # Pick an instruction (LOOP vs. LOOPI) and number of iterations
         # together. This means that if we've only got GPRs equal to zero (an
         # invalid loop count), we can still guarantee to pick something
-        # sucessfully.
+        # successfully.
         insn = self.loop_gen.pick_loop_insn()
         iters_op_type = insn.operands[0].op_type
         enc_iters = None
@@ -143,11 +141,11 @@ class BadDeepLoop(SnippetGen):
             # above)
             prog_insn, _ = self._gen_loop_head(model, program)
 
-            # Note that we generate a ProgSnippet, not a LoopSnippet here: while
-            # we've got a loop instruction, we happen to know that it will fault,
-            # so it's going to behave more like a straight line instruction. Also,
-            # we don't have a snippet for the body so the types don't really work
-            # for LoopSnippet.
+            # Note that we generate a ProgSnippet, not a LoopSnippet here:
+            # while we've got a loop instruction, we happen to know that it
+            # will fault, so it's going to behave more like a straight line
+            # instruction. Also, we don't have a snippet for the body so the
+            # types don't really work for LoopSnippet.
             snippet = ProgSnippet(model.pc, [prog_insn])
             snippet.insert_into_program(program)
 
@@ -157,11 +155,8 @@ class BadDeepLoop(SnippetGen):
 
             return (snippet, model)
 
-        # TODO: Maybe generate some straight line insns here? Will need to take
-        # space calculations into account (maybe thread them through as
-        # arguments?)
-
-        # Our space calculations in gen() should have ensured that this is true.
+        # Our space calculations in gen() should have ensured that this is
+        # true.
         assert space_here >= 2
 
         hd_pc = model.pc
@@ -183,10 +178,9 @@ class BadDeepLoop(SnippetGen):
             gap_lo = random.choice(gap_starts)
 
             jump_ret = self.jump_gen.gen_tgt(model, program, gap_lo)
-            # TODO: Can this fail?
             assert jump_ret is not None
 
-            jump_insn, jump_snippet, model = jump_ret
+            _jump_insn, jump_snippet, model = jump_ret
             assert model.pc == gap_lo
             body_snippet = jump_snippet
 
@@ -195,7 +189,8 @@ class BadDeepLoop(SnippetGen):
         if body_snippet is None:
             body_snippet = real_body_snippet
         else:
-            body_snippet = Snippet.merge_list([body_snippet, real_body_snippet])
+            body_snippet = Snippet.merge_list([body_snippet,
+                                               real_body_snippet])
 
         return (LoopSnippet(hd_pc, hd_insn, body_snippet, None), model)
 
@@ -254,4 +249,4 @@ class BadDeepLoop(SnippetGen):
 
         # At this point, we *should* be able to make the loop unconditionally.
         snippet, model = self._gen_loop_stack(model, program)
-        return (snippet, True, model)
+        return (snippet, model)

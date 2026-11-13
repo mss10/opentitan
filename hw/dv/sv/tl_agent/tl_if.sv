@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -20,7 +20,7 @@ interface tl_if(input clk, input rst_n);
 
   clocking host_cb @(posedge clk);
     input  rst_n;
-    output h2d_int;
+    output h2d = h2d_int;
     input  d2h;
   endclocking
   modport host_mp(clocking host_cb);
@@ -28,7 +28,7 @@ interface tl_if(input clk, input rst_n);
   clocking device_cb @(posedge clk);
     input  rst_n;
     input  h2d;
-    output d2h_int;
+    output d2h = d2h_int;
   endclocking
   modport device_mp(clocking device_cb);
 

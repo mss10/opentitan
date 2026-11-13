@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -6,7 +6,7 @@
 
 module aes_sub_bytes import aes_pkg::*;
 #(
-  parameter sbox_impl_e SBoxImpl = SBoxImplLut
+  parameter sbox_impl_e SecSBoxImpl = SBoxImplDom
 ) (
   input  logic                              clk_i,
   input  logic                              rst_ni,
@@ -28,11 +28,19 @@ module aes_sub_bytes import aes_pkg::*;
   sp2v_e           out_ack;
   logic            out_ack_err;
 
+  // Every DOM S-Box instance consumes 28 bits of randomness but itself produces 20 bits for use in
+  // another S-Box instance. For other S-Box implementations, only the bits corresponding to prd_i
+  // are used. Other bits are ignored and tied to 0.
+  logic [3:0][3:0][WidthPRDSBox+19:0] in_prd;
+  logic [3:0][3:0]             [19:0] out_prd;
+
+  // SEC_CM: CTRL.SPARSE
   // Check sparsely encoded signals.
   logic [Sp2VWidth-1:0] en_raw;
   aes_sel_buf_chk #(
-    .Num   ( Sp2VNum   ),
-    .Width ( Sp2VWidth )
+    .Num      ( Sp2VNum   ),
+    .Width    ( Sp2VWidth ),
+    .EnSecBuf ( 1'b1      )
   ) u_aes_sb_en_buf_chk (
     .clk_i  ( clk_i  ),
     .rst_ni ( rst_ni ),
@@ -44,8 +52,9 @@ module aes_sub_bytes import aes_pkg::*;
 
   logic [Sp2VWidth-1:0] out_ack_raw;
   aes_sel_buf_chk #(
-    .Num   ( Sp2VNum   ),
-    .Width ( Sp2VWidth )
+    .Num      ( Sp2VNum   ),
+    .Width    ( Sp2VWidth ),
+    .EnSecBuf ( 1'b1      )
   ) u_aes_sb_out_ack_buf_chk (
     .clk_i  ( clk_i       ),
     .rst_ni ( rst_ni      ),
@@ -58,8 +67,14 @@ module aes_sub_bytes import aes_pkg::*;
   // Individually substitute bytes.
   for (genvar j = 0; j < 4; j++) begin : gen_sbox_j
     for (genvar i = 0; i < 4; i++) begin : gen_sbox_i
+
+      // Rotate the randomness produced by the S-Boxes over the columns but not across rows as
+      // MixColumns will operate across rows. The LSBs are taken from the masking PRNG (prd_i)
+      // whereas the MSBs are produced by the other S-Box instances.
+      assign in_prd[i][j] = {out_prd[i][aes_rot_int(j,4)], prd_i[i][j]};
+
       aes_sbox #(
-        .SBoxImpl ( SBoxImpl )
+        .SecSBoxImpl ( SecSBoxImpl )
       ) u_aes_sbox_ij (
         .clk_i     ( clk_i                ),
         .rst_ni    ( rst_ni               ),
@@ -69,9 +84,10 @@ module aes_sub_bytes import aes_pkg::*;
         .op_i      ( op_i                 ),
         .data_i    ( data_i[i][j]         ),
         .mask_i    ( mask_i[i][j]         ),
-        .prd_i     ( prd_i [i][j]         ),
+        .prd_i     ( in_prd[i][j]         ),
         .data_o    ( data_o[i][j]         ),
-        .mask_o    ( mask_o[i][j]         )
+        .mask_o    ( mask_o[i][j]         ),
+        .prd_o     ( out_prd[i][j]        )
       );
     end
   end

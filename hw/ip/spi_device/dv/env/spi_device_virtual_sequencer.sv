@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,6 +9,7 @@ class spi_device_virtual_sequencer extends cip_base_virtual_sequencer #(
   `uvm_component_utils(spi_device_virtual_sequencer)
 
   spi_sequencer  spi_sequencer_h;
+  spi_sequencer  spi_sequencer_d;
 
   `uvm_component_new
 

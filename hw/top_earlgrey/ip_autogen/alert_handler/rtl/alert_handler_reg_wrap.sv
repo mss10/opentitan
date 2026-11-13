@@ -1,10 +1,10 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Breakout / remapping wrapper for register file.
 
-module alert_handler_reg_wrap import alert_pkg::*; (
+module alert_handler_reg_wrap import alert_handler_pkg::*; (
   input                                   clk_i,
   input                                   rst_ni,
   input                                   rst_shadowed_ni,
@@ -14,7 +14,7 @@ module alert_handler_reg_wrap import alert_pkg::*; (
   // interrupt
   output logic [N_CLASSES-1:0] irq_o,
   // State information for HW crashdump
-  input                        latch_crashdump_i,
+  input  [N_CLASSES-1:0]       latch_crashdump_i,
   output alert_crashdump_t     crashdump_o,
   // hw2reg
   input  hw2reg_wrap_t         hw2reg_wrap,
@@ -41,8 +41,9 @@ module alert_handler_reg_wrap import alert_pkg::*; (
     .tl_o,
     .reg2hw,
     .hw2reg,
-    .intg_err_o(fatal_integ_alert_o),
-    .devmode_i(1'b1)
+    .shadowed_storage_err_o(reg2hw_wrap.shadowed_err_storage),
+    .shadowed_update_err_o(reg2hw_wrap.shadowed_err_update),
+    .intg_err_o(fatal_integ_alert_o)
   );
 
   ////////////////
@@ -173,7 +174,7 @@ module alert_handler_reg_wrap import alert_pkg::*; (
   for (genvar k = 0; k < NAlerts; k++) begin : gen_alert_en_class
     // we only ping enabled alerts that are locked
     assign reg2hw_wrap.alert_ping_en[k] = reg2hw.alert_en_shadowed[k].q &
-                                          reg2hw.alert_regwen[k].q;
+                                          ~reg2hw.alert_regwen[k].q;
     assign reg2hw_wrap.alert_en[k]      = reg2hw.alert_en_shadowed[k].q;
     assign reg2hw_wrap.alert_class[k]   = reg2hw.alert_class_shadowed[k].q;
   end
@@ -311,7 +312,7 @@ module alert_handler_reg_wrap import alert_pkg::*; (
   // crashdump output //
   //////////////////////
 
-  logic crashump_latched_q;
+  logic [N_CLASSES-1:0] crashdump_latched_q;
   alert_crashdump_t crashdump_d, crashdump_q;
 
   // alert cause output
@@ -328,247 +329,32 @@ module alert_handler_reg_wrap import alert_pkg::*; (
   assign crashdump_d.class_esc_cnt   = hw2reg_wrap.class_esc_cnt;
   assign crashdump_d.class_esc_state = hw2reg_wrap.class_esc_state;
 
+  // We latch the crashdump upon triggering any of the escalation protocols. The reason for this is
+  // that during escalation, certain alert senders may start to trigger due to FSMs being moved
+  // into escalation mode - thereby masking the actual alert reasons exposed in the cause
+  // registers.
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_crashdump
     if (!rst_ni) begin
-      crashump_latched_q <= 1'b0;
+      crashdump_latched_q <= '0;
       crashdump_q <= '0;
     end else begin
-      // We latch the crashdump upon triggering any of the escalation protocols. The reason for this
-      // is that during escalation, certain alert senders may start to trigger due to FSMs being
-      // moved into escalation mode - thereby masking the actual alert reasons exposed in the cause
-      // registers. Note that the alert handler only captures the crashdump once upon first
-      // assertion of this signal, and needs to be reset to re-arm the crashdump latching
-      // mechanism.
-      if (latch_crashdump_i && !crashump_latched_q) begin
-        crashump_latched_q <= 1'b1;
+      // We track which class has been escalated so that the crashdump latching mechanism cannot be
+      // re-armed by clearing another class that has not escalated yet. This also implies that if
+      // an unclearable class has escalated, the crashdump latching mechanism cannot be re-armed.
+      crashdump_latched_q <= (crashdump_latched_q & ~reg2hw_wrap.class_clr) | latch_crashdump_i;
+
+      // The alert handler only captures the first escalation event that asserts a latch_crashdump_i
+      // signal, unless all classes are cleared, in which case the crashdump latching mechanism is
+      // re-armed. In other words, we latch the crashdump if any of the latch_crashdump_i bits is
+      // asserted, and no crashdump has been latched yet.
+      if (|latch_crashdump_i && !(|crashdump_latched_q)) begin
         crashdump_q <= crashdump_d;
       end
     end
   end
 
   // As long as the crashdump has not been latched yet, we output the current alert handler state.
-  // Once it has been latched, we switch to the latched snapshot.
-  assign crashdump_o = (crashump_latched_q) ? crashdump_q : crashdump_d;
-
-  /////////////////////////////
-  // aggregate shadow errors //
-  /////////////////////////////
-
-  always_comb begin : p_gather_shadow_errs
-    reg2hw_wrap.shadowed_err_update = 1'b0;
-    reg2hw_wrap.shadowed_err_storage = 1'b0;
-    reg2hw_wrap.shadowed_err_update |= reg2hw.ping_timer_en_shadowed.err_update;
-    reg2hw_wrap.shadowed_err_storage |= reg2hw.ping_timer_en_shadowed.err_storage;
-
-    for (int k = 0; k < NAlerts; k++) begin
-      reg2hw_wrap.shadowed_err_update |= |{
-        reg2hw.alert_en_shadowed[k].err_update,
-        reg2hw.alert_class_shadowed[k].err_update
-      };
-      reg2hw_wrap.shadowed_err_storage |= |{
-        reg2hw.alert_en_shadowed[k].err_storage,
-        reg2hw.alert_class_shadowed[k].err_storage
-      };
-    end
-
-    for (int k = 0; k < N_LOC_ALERT; k++) begin
-      reg2hw_wrap.shadowed_err_update |= |{
-        reg2hw.loc_alert_en_shadowed[k].err_update,
-        reg2hw.loc_alert_class_shadowed[k].err_update
-      };
-      reg2hw_wrap.shadowed_err_storage |= |{
-        reg2hw.loc_alert_en_shadowed[k].err_storage,
-        reg2hw.loc_alert_class_shadowed[k].err_storage
-      };
-    end
-
-    reg2hw_wrap.shadowed_err_update |= |{
-      reg2hw.ping_timeout_cyc_shadowed.err_update,
-
-      reg2hw.classa_ctrl_shadowed.en.err_update,
-      reg2hw.classb_ctrl_shadowed.en.err_update,
-      reg2hw.classc_ctrl_shadowed.en.err_update,
-      reg2hw.classd_ctrl_shadowed.en.err_update,
-
-      reg2hw.classa_ctrl_shadowed.lock.err_update,
-      reg2hw.classb_ctrl_shadowed.lock.err_update,
-      reg2hw.classc_ctrl_shadowed.lock.err_update,
-      reg2hw.classd_ctrl_shadowed.lock.err_update,
-
-      reg2hw.classa_ctrl_shadowed.en_e0.err_update,
-      reg2hw.classa_ctrl_shadowed.en_e1.err_update,
-      reg2hw.classa_ctrl_shadowed.en_e2.err_update,
-      reg2hw.classa_ctrl_shadowed.en_e3.err_update,
-
-      reg2hw.classb_ctrl_shadowed.en_e0.err_update,
-      reg2hw.classb_ctrl_shadowed.en_e1.err_update,
-      reg2hw.classb_ctrl_shadowed.en_e2.err_update,
-      reg2hw.classb_ctrl_shadowed.en_e3.err_update,
-
-      reg2hw.classc_ctrl_shadowed.en_e0.err_update,
-      reg2hw.classc_ctrl_shadowed.en_e1.err_update,
-      reg2hw.classc_ctrl_shadowed.en_e2.err_update,
-      reg2hw.classc_ctrl_shadowed.en_e3.err_update,
-
-      reg2hw.classd_ctrl_shadowed.en_e0.err_update,
-      reg2hw.classd_ctrl_shadowed.en_e1.err_update,
-      reg2hw.classd_ctrl_shadowed.en_e2.err_update,
-      reg2hw.classd_ctrl_shadowed.en_e3.err_update,
-
-      reg2hw.classa_ctrl_shadowed.map_e0.err_update,
-      reg2hw.classa_ctrl_shadowed.map_e1.err_update,
-      reg2hw.classa_ctrl_shadowed.map_e2.err_update,
-      reg2hw.classa_ctrl_shadowed.map_e3.err_update,
-
-      reg2hw.classb_ctrl_shadowed.map_e0.err_update,
-      reg2hw.classb_ctrl_shadowed.map_e1.err_update,
-      reg2hw.classb_ctrl_shadowed.map_e2.err_update,
-      reg2hw.classb_ctrl_shadowed.map_e3.err_update,
-
-      reg2hw.classc_ctrl_shadowed.map_e0.err_update,
-      reg2hw.classc_ctrl_shadowed.map_e1.err_update,
-      reg2hw.classc_ctrl_shadowed.map_e2.err_update,
-      reg2hw.classc_ctrl_shadowed.map_e3.err_update,
-
-      reg2hw.classd_ctrl_shadowed.map_e0.err_update,
-      reg2hw.classd_ctrl_shadowed.map_e1.err_update,
-      reg2hw.classd_ctrl_shadowed.map_e2.err_update,
-      reg2hw.classd_ctrl_shadowed.map_e3.err_update,
-
-      reg2hw.classa_accum_thresh_shadowed.err_update,
-      reg2hw.classb_accum_thresh_shadowed.err_update,
-      reg2hw.classc_accum_thresh_shadowed.err_update,
-      reg2hw.classd_accum_thresh_shadowed.err_update,
-
-      reg2hw.classa_timeout_cyc_shadowed.err_update,
-      reg2hw.classb_timeout_cyc_shadowed.err_update,
-      reg2hw.classc_timeout_cyc_shadowed.err_update,
-      reg2hw.classd_timeout_cyc_shadowed.err_update,
-
-      reg2hw.classa_phase0_cyc_shadowed.err_update,
-      reg2hw.classa_phase1_cyc_shadowed.err_update,
-      reg2hw.classa_phase2_cyc_shadowed.err_update,
-      reg2hw.classa_phase3_cyc_shadowed.err_update,
-
-      reg2hw.classb_phase0_cyc_shadowed.err_update,
-      reg2hw.classb_phase1_cyc_shadowed.err_update,
-      reg2hw.classb_phase2_cyc_shadowed.err_update,
-      reg2hw.classb_phase3_cyc_shadowed.err_update,
-
-      reg2hw.classc_phase0_cyc_shadowed.err_update,
-      reg2hw.classc_phase1_cyc_shadowed.err_update,
-      reg2hw.classc_phase2_cyc_shadowed.err_update,
-      reg2hw.classc_phase3_cyc_shadowed.err_update,
-
-      reg2hw.classd_phase0_cyc_shadowed.err_update,
-      reg2hw.classd_phase1_cyc_shadowed.err_update,
-      reg2hw.classd_phase2_cyc_shadowed.err_update,
-      reg2hw.classd_phase3_cyc_shadowed.err_update,
-
-      reg2hw.classa_crashdump_trigger_shadowed.err_update,
-      reg2hw.classb_crashdump_trigger_shadowed.err_update,
-      reg2hw.classc_crashdump_trigger_shadowed.err_update,
-      reg2hw.classd_crashdump_trigger_shadowed.err_update,
-
-      reg2hw.classa_clr_shadowed.err_update,
-      reg2hw.classb_clr_shadowed.err_update,
-      reg2hw.classc_clr_shadowed.err_update,
-      reg2hw.classd_clr_shadowed.err_update
-    };
-
-    reg2hw_wrap.shadowed_err_storage |= |{
-      reg2hw.ping_timeout_cyc_shadowed.err_storage,
-
-      reg2hw.classa_ctrl_shadowed.en.err_storage,
-      reg2hw.classb_ctrl_shadowed.en.err_storage,
-      reg2hw.classc_ctrl_shadowed.en.err_storage,
-      reg2hw.classd_ctrl_shadowed.en.err_storage,
-
-      reg2hw.classa_ctrl_shadowed.lock.err_storage,
-      reg2hw.classb_ctrl_shadowed.lock.err_storage,
-      reg2hw.classc_ctrl_shadowed.lock.err_storage,
-      reg2hw.classd_ctrl_shadowed.lock.err_storage,
-
-      reg2hw.classa_ctrl_shadowed.en_e0.err_storage,
-      reg2hw.classa_ctrl_shadowed.en_e1.err_storage,
-      reg2hw.classa_ctrl_shadowed.en_e2.err_storage,
-      reg2hw.classa_ctrl_shadowed.en_e3.err_storage,
-
-      reg2hw.classb_ctrl_shadowed.en_e0.err_storage,
-      reg2hw.classb_ctrl_shadowed.en_e1.err_storage,
-      reg2hw.classb_ctrl_shadowed.en_e2.err_storage,
-      reg2hw.classb_ctrl_shadowed.en_e3.err_storage,
-
-      reg2hw.classc_ctrl_shadowed.en_e0.err_storage,
-      reg2hw.classc_ctrl_shadowed.en_e1.err_storage,
-      reg2hw.classc_ctrl_shadowed.en_e2.err_storage,
-      reg2hw.classc_ctrl_shadowed.en_e3.err_storage,
-
-      reg2hw.classd_ctrl_shadowed.en_e0.err_storage,
-      reg2hw.classd_ctrl_shadowed.en_e1.err_storage,
-      reg2hw.classd_ctrl_shadowed.en_e2.err_storage,
-      reg2hw.classd_ctrl_shadowed.en_e3.err_storage,
-
-      reg2hw.classa_ctrl_shadowed.map_e0.err_storage,
-      reg2hw.classa_ctrl_shadowed.map_e1.err_storage,
-      reg2hw.classa_ctrl_shadowed.map_e2.err_storage,
-      reg2hw.classa_ctrl_shadowed.map_e3.err_storage,
-
-      reg2hw.classb_ctrl_shadowed.map_e0.err_storage,
-      reg2hw.classb_ctrl_shadowed.map_e1.err_storage,
-      reg2hw.classb_ctrl_shadowed.map_e2.err_storage,
-      reg2hw.classb_ctrl_shadowed.map_e3.err_storage,
-
-      reg2hw.classc_ctrl_shadowed.map_e0.err_storage,
-      reg2hw.classc_ctrl_shadowed.map_e1.err_storage,
-      reg2hw.classc_ctrl_shadowed.map_e2.err_storage,
-      reg2hw.classc_ctrl_shadowed.map_e3.err_storage,
-
-      reg2hw.classd_ctrl_shadowed.map_e0.err_storage,
-      reg2hw.classd_ctrl_shadowed.map_e1.err_storage,
-      reg2hw.classd_ctrl_shadowed.map_e2.err_storage,
-      reg2hw.classd_ctrl_shadowed.map_e3.err_storage,
-
-      reg2hw.classa_accum_thresh_shadowed.err_storage,
-      reg2hw.classb_accum_thresh_shadowed.err_storage,
-      reg2hw.classc_accum_thresh_shadowed.err_storage,
-      reg2hw.classd_accum_thresh_shadowed.err_storage,
-
-      reg2hw.classa_timeout_cyc_shadowed.err_storage,
-      reg2hw.classb_timeout_cyc_shadowed.err_storage,
-      reg2hw.classc_timeout_cyc_shadowed.err_storage,
-      reg2hw.classd_timeout_cyc_shadowed.err_storage,
-
-      reg2hw.classa_phase0_cyc_shadowed.err_storage,
-      reg2hw.classa_phase1_cyc_shadowed.err_storage,
-      reg2hw.classa_phase2_cyc_shadowed.err_storage,
-      reg2hw.classa_phase3_cyc_shadowed.err_storage,
-
-      reg2hw.classb_phase0_cyc_shadowed.err_storage,
-      reg2hw.classb_phase1_cyc_shadowed.err_storage,
-      reg2hw.classb_phase2_cyc_shadowed.err_storage,
-      reg2hw.classb_phase3_cyc_shadowed.err_storage,
-
-      reg2hw.classc_phase0_cyc_shadowed.err_storage,
-      reg2hw.classc_phase1_cyc_shadowed.err_storage,
-      reg2hw.classc_phase2_cyc_shadowed.err_storage,
-      reg2hw.classc_phase3_cyc_shadowed.err_storage,
-
-      reg2hw.classd_phase0_cyc_shadowed.err_storage,
-      reg2hw.classd_phase1_cyc_shadowed.err_storage,
-      reg2hw.classd_phase2_cyc_shadowed.err_storage,
-      reg2hw.classd_phase3_cyc_shadowed.err_storage,
-
-      reg2hw.classa_crashdump_trigger_shadowed.err_storage,
-      reg2hw.classb_crashdump_trigger_shadowed.err_storage,
-      reg2hw.classc_crashdump_trigger_shadowed.err_storage,
-      reg2hw.classd_crashdump_trigger_shadowed.err_storage,
-
-      reg2hw.classa_clr_shadowed.err_storage,
-      reg2hw.classb_clr_shadowed.err_storage,
-      reg2hw.classc_clr_shadowed.err_storage,
-      reg2hw.classd_clr_shadowed.err_storage
-    };
-  end
+  // Once any of the classes has triggered the latching, we switch to the latched snapshot.
+  assign crashdump_o = (|crashdump_latched_q) ? crashdump_q : crashdump_d;
 
 endmodule : alert_handler_reg_wrap

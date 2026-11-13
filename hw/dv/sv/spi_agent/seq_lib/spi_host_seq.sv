@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,6 +9,7 @@ class spi_host_seq extends spi_base_seq;
   // data to be sent
   rand bit [7:0] data[$];
 
+  bit [CSB_WIDTH-1:0] csb_sel = 0;
   // constrain size of data sent / received to be at most 64kB
   constraint data_size_c {
     data.size() inside {[1:65536]};
@@ -17,7 +18,9 @@ class spi_host_seq extends spi_base_seq;
   virtual task body();
     req = spi_item::type_id::create("req");
     start_item(req);
+    cfg.spi_func_mode = SpiModeGeneric;
     `DV_CHECK_RANDOMIZE_WITH_FATAL(req,
+                                   csb_sel == local::csb_sel;
                                    item_type == SpiTransNormal;
                                    data.size() == local::data.size();
                                    foreach (data[i]) {

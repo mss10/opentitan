@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -20,7 +20,8 @@ module entropy_src_bucket_ht #(
   input logic [RegWidth-1:0]    thresh_i,
   input logic                   window_wrap_pulse_i,
   output logic [RegWidth-1:0]   test_cnt_o,
-  output logic                  test_fail_pulse_o
+  output logic                  test_fail_pulse_o,
+  output logic                  count_err_o
 );
 
   localparam int NUM_BINS = 2**RngBusWidth;
@@ -28,20 +29,9 @@ module entropy_src_bucket_ht #(
   // signals
   logic [NUM_BINS-1:0] bin_incr;
   logic [NUM_BINS-1:0] bin_cnt_exceeds_thresh;
-
-  // flops
-  logic [RegWidth-1:0] test_cnt_q, test_cnt_d;
-  logic [RegWidth-1:0] bin_cntr_q[NUM_BINS], bin_cntr_d[NUM_BINS];
-
-  always_ff @(posedge clk_i or negedge rst_ni)
-    if (!rst_ni) begin
-      test_cnt_q       <= '0;
-      bin_cntr_q       <= '{default:0};
-    end else begin
-      test_cnt_q       <= test_cnt_d;
-      bin_cntr_q       <= bin_cntr_d;
-    end
-
+  logic [NUM_BINS - 1:0][RegWidth - 1:0] bin_cntr;
+  logic [NUM_BINS-1:0] bin_cntr_err;
+  logic [RegWidth-1:0] bin_max;
 
   // Bucket Test
   //
@@ -58,22 +48,44 @@ module entropy_src_bucket_ht #(
     // set the bin incrementer if the symbol matches that bin
     assign bin_incr[i] = entropy_bit_vld_i && (entropy_bit_i == i);
     // use the bin incrementer to increase the bin total count
-    assign bin_cntr_d[i] = window_wrap_pulse_i ? '0 :
-           ((active_i && bin_incr[i]) ? (bin_cntr_q[i]+1) : bin_cntr_q[i]);
-    // use the bin incrementer to increase the bin total count
-    assign bin_cnt_exceeds_thresh[i] = (bin_cntr_q[i] > thresh_i);
+    // SEC_CM: CTR.REDUN
+    prim_count #(
+      .Width(RegWidth)
+    ) u_prim_count_bin_cntr (
+      .clk_i,
+      .rst_ni,
+      .clr_i(window_wrap_pulse_i),
+      .set_i(!active_i || clear_i),
+      .set_cnt_i(RegWidth'(0)),
+      .incr_en_i(bin_incr[i]),
+      .decr_en_i(1'b0),
+      .step_i(RegWidth'(1)),
+      .commit_i(1'b1),
+      .cnt_o(bin_cntr[i]),
+      .cnt_after_commit_o(),
+      .err_o(bin_cntr_err[i])
+    );
+    // A threshold of all ones disables the test.
+    assign bin_cnt_exceeds_thresh[i] = ~&thresh_i && (bin_cntr[i] >= thresh_i);
   end : gen_symbol_match
 
-  // Test event counter
-  assign test_cnt_d =
-         (!active_i || clear_i) ? '0 :
-         window_wrap_pulse_i ? '0 :
-         entropy_bit_vld_i && (|bin_cnt_exceeds_thresh) ? (test_cnt_q+1) :
-         test_cnt_q;
+  prim_max_tree #(
+    .NumSrc(NUM_BINS),
+    .Width(RegWidth)
+  ) u_prim_max_tree_bin_cntr_max (
+    .clk_i,
+    .rst_ni,
+    .values_i   (bin_cntr),
+    .valid_i    ({RegWidth{1'b1}}),
+    .max_value_o(bin_max),
+    .max_idx_o  (),
+    .max_valid_o()
+  );
 
   // the pulses will be only one clock in length
-  assign test_fail_pulse_o = active_i && window_wrap_pulse_i && (test_cnt_q > '0);
-  assign test_cnt_o = test_cnt_q;
+  assign test_fail_pulse_o = active_i && window_wrap_pulse_i && (|bin_cnt_exceeds_thresh);
+  assign test_cnt_o = bin_max;
+  assign count_err_o = |bin_cntr_err;
 
 
 endmodule

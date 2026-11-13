@@ -1,252 +1,268 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Description: csrng command staging module
+// Description: CSRNG command staging module.
 //
+`include "prim_assert.sv"
 
-module csrng_cmd_stage import csrng_pkg::*; #(
-  parameter int CmdFifoWidth = 32,
-  parameter int CmdFifoDepth = 16,
-  parameter int StateId = 4
-) (
+module csrng_cmd_stage import csrng_pkg::*; (
   input logic                        clk_i,
   input logic                        rst_ni,
-  // command in
+  // Command input.
   input logic                        cs_enable_i,
   input logic                        cmd_stage_vld_i,
-  input logic [StateId-1:0]          cmd_stage_shid_i,
-  input logic [CmdFifoWidth-1:0]     cmd_stage_bus_i,
+  input logic [InstIdWidth-1:0]      cmd_stage_shid_i,
+  input logic [CmdBusWidth-1:0]      cmd_stage_bus_i,
   output logic                       cmd_stage_rdy_o,
-  // command to arbiter
+  // Command checking interface.
+  input logic                        reseed_cnt_reached_i,
+  input logic                        instantiated_i,
+  input logic [GenBitsCtrWidth-1:0]  cmd_gen_cnt_i,
+  input logic                        cmd_gen_flag_i,
+  output logic                       reseed_cnt_alert_o,
+  output logic                       invalid_cmd_seq_alert_o,
+  output logic                       invalid_acmd_alert_o,
+  output logic                       invalid_gen_cmd_alert_o,
+  // Generate abort request signals.
+  input logic                        gen_abort_req_i,
+  output logic                       gen_abort_invalid_o,
+  // Halt control.
+  input logic                        halt_i,
+  output logic                       halted_o,
+  // Command to arbiter.
   output logic                       cmd_arb_req_o,
   output logic                       cmd_arb_sop_o,
   output logic                       cmd_arb_mop_o,
   output logic                       cmd_arb_eop_o,
   input logic                        cmd_arb_gnt_i,
-  output logic [CmdFifoWidth-1:0]    cmd_arb_bus_o,
-  // ack from core
+  output logic [CmdBusWidth-1:0]     cmd_arb_bus_o,
+  // Ack from core.
   input logic                        cmd_ack_i,
-  input logic                        cmd_ack_sts_i,
-  // ack to app i/f
+  input csrng_cmd_sts_e              cmd_ack_sts_i,
+  // Ack to app i/f.
   output logic                       cmd_stage_ack_o,
-  output logic                       cmd_stage_ack_sts_o,
-  // genbits from core
+  output csrng_cmd_sts_e             cmd_stage_ack_sts_o,
+  // Genbits from core.
   input logic                        genbits_vld_i,
   input logic [127:0]                genbits_bus_i,
   input logic                        genbits_fips_i,
-  // genbits to app i/f
+  // Genbits to app i/f.
   output logic                       genbits_vld_o,
   input logic                        genbits_rdy_i,
   output logic [127:0]               genbits_bus_o,
   output logic                       genbits_fips_o,
-  // error indication
+  // Error indication.
   output logic [2:0]                 cmd_stage_sfifo_cmd_err_o,
   output logic [2:0]                 cmd_stage_sfifo_genbits_err_o,
   output logic                       cmd_stage_sm_err_o
 );
 
-  localparam int GenBitsFifoWidth = 1+128;
+  // Genbits parameters.
+  localparam int GenBitsFifoWidth = 1 + BlkLen;
   localparam int GenBitsFifoDepth = 1;
-  localparam int GenBitsCntrWidth = 19;
 
-  // signals
-  // command fifo
-  logic [CmdFifoWidth-1:0] sfifo_cmd_rdata;
-  logic [$clog2(CmdFifoDepth):0] sfifo_cmd_depth;
-  logic                    sfifo_cmd_push;
-  logic [CmdFifoWidth-1:0] sfifo_cmd_wdata;
-  logic                    sfifo_cmd_pop;
-  logic [2:0]              sfifo_cmd_err;
-  logic                    sfifo_cmd_full;
-  logic                    sfifo_cmd_not_empty;
+  // Command FIFO.
+  logic      [CmdBusWidth-1:0] sfifo_cmd_rdata;
+  logic     [CmdFifoDepthLg:0] sfifo_cmd_depth;
+  logic                        sfifo_cmd_wvld;
+  logic                        sfifo_cmd_wrdy;
+  logic      [CmdBusWidth-1:0] sfifo_cmd_wdata;
+  logic                        sfifo_cmd_rrdy;
+  logic                  [2:0] sfifo_cmd_err;
+  logic                        sfifo_cmd_rvld;
 
-  // genbits fifo
+  // Genbits FIFO.
+  logic                        sfifo_genbits_clr;
   logic [GenBitsFifoWidth-1:0] sfifo_genbits_rdata;
-  logic                        sfifo_genbits_push;
+  logic                        sfifo_genbits_wvld;
+  logic                        sfifo_genbits_wrdy;
   logic [GenBitsFifoWidth-1:0] sfifo_genbits_wdata;
-  logic                        sfifo_genbits_pop;
-  logic [2:0]                  sfifo_genbits_err;
-  logic                        sfifo_genbits_full;
-  logic                        sfifo_genbits_not_empty;
+  logic                        sfifo_genbits_rrdy;
+  logic                  [2:0] sfifo_genbits_err;
+  logic                        sfifo_genbits_rvld;
 
-  logic [3:0]              cmd_len;
-  logic                    cmd_fifo_zero;
-  logic                    cmd_fifo_pop;
-  logic                    cmd_len_dec;
-  logic                    cmd_gen_cnt_dec;
-  logic                    cmd_gen_1st_req;
-  logic                    cmd_gen_inc_req;
-  logic                    cmd_gen_cnt_last;
-  logic                    cmd_final_ack;
+  // Command signals.
+  logic                  [3:0] cmd_len;
+  logic                        cmd_fifo_zero;
+  logic                        cmd_fifo_pop;
+  logic                        cmd_len_dec;
+  logic                        cmd_gen_1st_req;
+  logic                        cmd_gen_inc_req;
+  logic                        cmd_gen_cnt_last;
+  logic                        cmd_final_ack;
+  logic                        cmd_err_ack;
+  logic                        cmd_gen_abort_req;
+  logic                        cmd_gen_abort_ack;
+  csrng_cmd_sts_e              err_sts;
+  logic                        reseed_cnt_exceeded;
+  logic                        invalid_cmd_seq;
+  logic                        invalid_acmd;
+  logic                        invalid_gen_cmd;
+  logic                  [2:0] acmd;
 
-  // flops
-  logic                    cmd_ack_q, cmd_ack_d;
-  logic                    cmd_ack_sts_q, cmd_ack_sts_d;
-  logic [3:0]              cmd_len_q, cmd_len_d;
-  logic                    cmd_gen_flag_q, cmd_gen_flag_d;
-  logic [GenBitsCntrWidth-1:0] cmd_gen_cnt_q, cmd_gen_cnt_d; // max_nuber_of_bits_per_request = 2^19
-  logic [11:0]             cmd_gen_cmd_q, cmd_gen_cmd_d;
+  // Flops.
+  logic           cmd_ack_q, cmd_ack_d;
+  csrng_cmd_sts_e cmd_ack_sts_q, cmd_ack_sts_d;
+  logic     [3:0] cmd_len_q, cmd_len_d;
+  logic           gen_ongoing_q, gen_ongoing_d;
+  logic           gen_abort_pending_q, gen_abort_pending_d;
+  logic           gen_abort_inflight_q, gen_abort_inflight_d;
 
-
-  always_ff @(posedge clk_i or negedge rst_ni)
+  always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      cmd_ack_q       <= '0;
-      cmd_ack_sts_q   <= '0;
-      cmd_len_q       <= '0;
-      cmd_gen_flag_q  <= '0;
-      cmd_gen_cnt_q   <= '0;
-      cmd_gen_cmd_q   <= '0;
+      cmd_ack_q            <= '0;
+      cmd_ack_sts_q        <= CMD_STS_SUCCESS;
+      cmd_len_q            <= '0;
+      gen_ongoing_q        <= '0;
+      gen_abort_pending_q  <= '0;
+      gen_abort_inflight_q <= '0;
     end else begin
-      cmd_ack_q       <= cmd_ack_d;
-      cmd_ack_sts_q   <= cmd_ack_sts_d;
-      cmd_len_q       <= cmd_len_d;
-      cmd_gen_flag_q  <= cmd_gen_flag_d;
-      cmd_gen_cnt_q   <= cmd_gen_cnt_d;
-      cmd_gen_cmd_q   <= cmd_gen_cmd_d;
+      cmd_ack_q            <= cmd_ack_d;
+      cmd_ack_sts_q        <= cmd_ack_sts_d;
+      cmd_len_q            <= cmd_len_d;
+      gen_ongoing_q        <= gen_ongoing_d;
+      gen_abort_pending_q  <= gen_abort_pending_d;
+      gen_abort_inflight_q <= gen_abort_inflight_d;
     end
+  end
 
-  assign  cmd_stage_sfifo_cmd_err_o = sfifo_cmd_err;
-  assign  cmd_stage_sfifo_genbits_err_o = sfifo_genbits_err;
+  assign cmd_stage_sfifo_cmd_err_o = sfifo_cmd_err;
+  assign cmd_stage_sfifo_genbits_err_o = sfifo_genbits_err;
 
   //---------------------------------------------------------
-  // capture the transfer length of data behind the command
+  // Capture the transfer length of data behind the command.
   //---------------------------------------------------------
 
   prim_fifo_sync #(
-    .Width(CmdFifoWidth),
+    .Width(CmdBusWidth),
     .Pass(0),
     .Depth(CmdFifoDepth),
     .OutputZeroIfEmpty(1'b0)
   ) u_prim_fifo_cmd (
-    .clk_i          (clk_i),
-    .rst_ni         (rst_ni),
-    .clr_i          (!cs_enable_i),
-    .wvalid_i       (sfifo_cmd_push),
-    .wready_o       (),
-    .wdata_i        (sfifo_cmd_wdata),
-    .rvalid_o       (sfifo_cmd_not_empty),
-    .rready_i       (sfifo_cmd_pop),
-    .rdata_o        (sfifo_cmd_rdata),
-    .full_o         (sfifo_cmd_full),
-    .depth_o        (sfifo_cmd_depth)
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .clr_i   (!cs_enable_i),
+    .wvalid_i(sfifo_cmd_wvld),
+    .wready_o(sfifo_cmd_wrdy),
+    .wdata_i (sfifo_cmd_wdata),
+    .rvalid_o(sfifo_cmd_rvld),
+    .rready_i(sfifo_cmd_rrdy),
+    .rdata_o (sfifo_cmd_rdata),
+    .full_o  (),
+    .depth_o (sfifo_cmd_depth),
+    .err_o   ()
   );
 
   assign sfifo_cmd_wdata = cmd_stage_bus_i;
 
-  assign sfifo_cmd_push = cs_enable_i && cmd_stage_rdy_o && cmd_stage_vld_i;
+  assign sfifo_cmd_wvld = cs_enable_i && cmd_stage_rdy_o && cmd_stage_vld_i;
 
-  assign sfifo_cmd_pop = cs_enable_i && cmd_fifo_pop;
+  assign sfifo_cmd_rrdy = cs_enable_i && cmd_fifo_pop;
 
   assign cmd_arb_bus_o =
-         cmd_gen_inc_req ? {15'b0,cmd_gen_cnt_last,cmd_stage_shid_i,cmd_gen_cmd_q} :
-        // pad,glast,id,f,clen,cmd
-        cmd_gen_1st_req ? {15'b0,cmd_gen_cnt_last,cmd_stage_shid_i,sfifo_cmd_rdata[11:0]} :
-        cmd_arb_mop_o   ? sfifo_cmd_rdata :
+        // pad,gfirst,glen,glast,id,f,clen,cmd
+        cmd_gen_abort_req ? {15'b0,1'b0,cmd_stage_shid_i,12'(UNI)} :
+        cmd_gen_inc_req   ? {15'b0,cmd_gen_cnt_last,cmd_stage_shid_i,12'(GEN)} :
+        cmd_gen_1st_req   ? {2'b0,1'b1,sfifo_cmd_rdata[12 +: GenBitsCtrWidth],cmd_gen_cnt_last,
+                             cmd_stage_shid_i,sfifo_cmd_rdata[11:0]} :
+        cmd_arb_mop_o     ? sfifo_cmd_rdata :
         '0;
 
-  assign cmd_stage_rdy_o = !sfifo_cmd_full;
-
   assign sfifo_cmd_err =
-         {(sfifo_cmd_push && sfifo_cmd_full),
-          (sfifo_cmd_pop && !sfifo_cmd_not_empty),
-          (sfifo_cmd_full && !sfifo_cmd_not_empty)};
+         {( sfifo_cmd_wvld && !sfifo_cmd_wrdy),
+          ( sfifo_cmd_rrdy && !sfifo_cmd_rvld),
+          (!sfifo_cmd_wrdy && !sfifo_cmd_rvld)};
 
 
-  // state machine controls
+  // State machine controls.
   assign cmd_fifo_zero = (sfifo_cmd_depth == '0);
   assign cmd_len = sfifo_cmd_rdata[7:4];
 
-  // capture the length of csrng command
+  // Capture the length of csrng command.
   assign cmd_len_d =
          (!cs_enable_i) ? '0 :
          cmd_arb_sop_o ? cmd_len :
          cmd_len_dec ? (cmd_len_q-1) :
          cmd_len_q;
 
-  // for gen commands, capture information from the orignal command for use later
-  assign cmd_gen_flag_d =
-         (!cs_enable_i) ? '0 :
-         cmd_gen_1st_req ? (sfifo_cmd_rdata[2:0] == GEN) :
-         cmd_gen_flag_q;
-
-  assign cmd_gen_cnt_d =
-         (!cs_enable_i) ? '0 :
-         cmd_gen_1st_req ? sfifo_cmd_rdata[30:12] :
-         cmd_gen_cnt_dec ? (cmd_gen_cnt_q-1) :
-         cmd_gen_cnt_q;
-
-  assign cmd_gen_cmd_d =
-         (!cs_enable_i) ? '0 :
-         cmd_gen_1st_req ? {sfifo_cmd_rdata[11:0]} :
-         cmd_gen_cmd_q;
-
+  // Capture the application command type.
+  assign acmd = sfifo_cmd_rdata[2:0];
 
   //---------------------------------------------------------
   // state machine to process command
   //---------------------------------------------------------
-// Encoding generated with:
-// $ ./util/design/sparse-fsm-encode.py -d 3 -m 10 -n 8 \
-//      -s 170131814 --language=sv
-//
-// Hamming distance histogram:
-//
-//  0: --
-//  1: --
-//  2: --
-//  3: |||||||||||||||| (28.89%)
-//  4: |||||||||||||||||||| (35.56%)
-//  5: |||||||||||| (22.22%)
-//  6: ||||| (8.89%)
-//  7: | (2.22%)
-//  8: | (2.22%)
-//
-// Minimum Hamming distance: 3
-// Maximum Hamming distance: 8
-// Minimum Hamming weight: 1
-// Maximum Hamming weight: 7
-//
-
-// Encoding generated with:
+  // Encoding generated with:
+  // $ ./util/design/sparse-fsm-encode.py -d 3 -m 11 -n 8 \
+  //     -s 170131814 --language=sv
+  //
+  // Hamming distance histogram:
+  //
+  //  0: --
+  //  1: --
+  //  2: --
+  //  3: |||||||||||| (21.82%)
+  //  4: |||||||||||||||||||| (36.36%)
+  //  5: ||||||||||||||||| (30.91%)
+  //  6: ||||| (9.09%)
+  //  7: | (1.82%)
+  //  8: --
+  //
+  // Minimum Hamming distance: 3
+  // Maximum Hamming distance: 7
+  // Minimum Hamming weight: 1
+  // Maximum Hamming weight: 6
+  //
   localparam int StateWidth = 8;
-  typedef    enum logic [StateWidth-1:0] {
-    Idle      = 8'b00011011, // idle
-    ArbGnt    = 8'b11110101, // general arbiter request
-    SendSOP   = 8'b00011100, // send sop (start of packet)
-    SendMOP   = 8'b00000001, // send mop (middle of packet)
-    GenCmdChk = 8'b01010110, // gen cmd check
-    CmdAck    = 8'b10001101, // wait for command ack
-    GenReq    = 8'b11000000, // process gen requests
-    GenArbGnt = 8'b11111110, // generate subsequent arb request
-    GenSOP    = 8'b10110010, // generate subsequent request
-    Error     = 8'b10111001  // illegal state reached and hang
+  typedef enum logic [StateWidth-1:0] {
+    Idle      = 8'b11110101, // idle
+    Flush     = 8'b01011011, // flush command FIFO and start over
+    ArbGnt    = 8'b00011100, // general arbiter request
+    SendSOP   = 8'b00000001, // send sop (start of packet)
+    SendMOP   = 8'b01010110, // send mop (middle of packet)
+    GenCmdChk = 8'b10001101, // gen cmd check
+    CmdAck    = 8'b11000000, // wait for command ack
+    GenReq    = 8'b10010011, // process gen requests
+    GenArbGnt = 8'b11101110, // generate subsequent arb request
+    GenSOP    = 8'b10111010, // generate subsequent request
+    Error     = 8'b01100111  // illegal state reached and hang
   } state_e;
 
+  // SEC_CM: CMD_STAGE.FSM.SPARSE
   state_e state_d, state_q;
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, state_e, Idle)
 
-  logic [StateWidth-1:0] state_raw_q;
+  // Latch an accepted GEN abort request until it is dispatched.
+  // To avoid race conditions we latch the abort request until it is safe to send an UNI command.
+  assign gen_abort_pending_d =
+         (!cs_enable_i) ? 1'b0 :
+         (state_q == GenSOP && cmd_gen_abort_req) ? 1'b0 :
+         (gen_abort_req_i && gen_ongoing_d) ? 1'b1 :
+         gen_abort_pending_q;
 
-  // This primitive is used to place a size-only constraint on the
-  // flops in order to prevent FSM state encoding optimizations.
-  prim_flop #(
-    .Width(StateWidth),
-    .ResetValue(StateWidth'(Idle))
-  ) u_state_regs (
-    .clk_i,
-    .rst_ni,
-    .d_i ( state_d ),
-    .q_o ( state_raw_q )
-  );
+  // Mark the request that carries the abort, from dispatch until its ack is consumed.
+  assign gen_abort_inflight_d =
+         (!cs_enable_i) ? 1'b0 :
+         (state_q == CmdAck && cmd_ack_i && gen_abort_inflight_q) ? 1'b0 :
+         (state_q == GenSOP && cmd_gen_abort_req) ? 1'b1 :
+         gen_abort_inflight_q;
 
-  assign state_q = state_e'(state_raw_q);
+  // An abort request is only meaningful while a GEN command is ongoing for this app,
+  // otherwise trigger an alert.
+  assign gen_abort_invalid_o = cs_enable_i && gen_abort_req_i && !gen_ongoing_d;
+
+  // The command stage doesn't accept any further requests when halted.
+  assign halted_o = halt_i && (state_q == Idle) && cmd_fifo_zero;
 
   always_comb begin
     state_d = state_q;
+    cmd_stage_rdy_o = 1'b0;
     cmd_fifo_pop = 1'b0;
     cmd_len_dec = 1'b0;
-    cmd_gen_cnt_dec = 1'b0;
     cmd_gen_1st_req = 1'b0;
     cmd_gen_inc_req = 1'b0;
+    cmd_gen_abort_req = 1'b0;
+    cmd_gen_abort_ack = 1'b0;
     cmd_gen_cnt_last = 1'b0;
     cmd_final_ack = 1'b0;
     cmd_arb_req_o = 1'b0;
@@ -254,151 +270,335 @@ module csrng_cmd_stage import csrng_pkg::*; #(
     cmd_arb_mop_o = 1'b0;
     cmd_arb_eop_o = 1'b0;
     cmd_stage_sm_err_o = 1'b0;
-    unique case (state_q)
-      Idle: begin
-        if (!cmd_fifo_zero) begin
-          state_d = ArbGnt;
+    cmd_err_ack = 1'b0;
+    reseed_cnt_exceeded = 1'b0;
+    invalid_cmd_seq = 1'b0;
+    invalid_acmd = 1'b0;
+    invalid_gen_cmd = 1'b0;
+
+    // Tracks if there is an ongoing GEN command.
+    // While gen_ongoing_d is high GEN commands can be aborted, otherwise they are invalid.
+    gen_ongoing_d = cs_enable_i && gen_ongoing_q;
+
+    if (state_q == Error) begin
+      // In case we are in the Error state we must ignore the enable signal.
+      cmd_stage_sm_err_o = 1'b1;
+    end else if (!cs_enable_i && state_q inside {Idle, Flush, ArbGnt, SendSOP, SendMOP, GenCmdChk,
+                                                 CmdAck, GenReq, GenArbGnt, GenSOP}) begin
+      // In case the module is disabled and we are in a legal state we must go into idle state.
+      state_d = Idle;
+    end else begin
+      // Otherwise do the state machine as normal.
+      unique case (state_q)
+        Idle: begin
+          // Because of the if statement above we won't leave idle if enable is low.
+          if (gen_ongoing_q) begin
+            // Resume a halted Generate command.
+            if (!halt_i) begin
+              state_d = GenReq;
+            end
+          end else if (!cmd_fifo_zero) begin
+            if (acmd == INS) begin
+              if (!instantiated_i) begin
+                state_d = ArbGnt;
+              end
+              if (instantiated_i) begin
+                cmd_err_ack = 1'b1;
+                invalid_cmd_seq = 1'b1;
+                state_d = Idle;
+              end
+            end else if (acmd == RES) begin
+              if (instantiated_i) begin
+                state_d = ArbGnt;
+              end
+              if (!instantiated_i) begin
+                cmd_err_ack = 1'b1;
+                invalid_cmd_seq = 1'b1;
+                state_d = Idle;
+              end
+            end else if (acmd == GEN) begin
+              if (instantiated_i) begin
+                if (sfifo_cmd_rdata[12 +: GenBitsCtrWidth] == '0) begin
+                  // A GEN command must request at least one block.
+                  cmd_err_ack = 1'b1;
+                  invalid_gen_cmd = 1'b1;
+                  state_d = Idle;
+                end else if (reseed_cnt_reached_i) begin
+                  // If the issued command is GEN and the reseed count has already been reached,
+                  // send an ack with an error status response.
+                  cmd_err_ack = 1'b1;
+                  reseed_cnt_exceeded = 1'b1;
+                  state_d = Idle;
+                end else begin
+                  state_d = ArbGnt;
+                end
+              end
+              if (!instantiated_i) begin
+                cmd_err_ack = 1'b1;
+                invalid_cmd_seq = 1'b1;
+                state_d = Idle;
+              end
+            end else if (acmd == UPD) begin
+              if (instantiated_i) begin
+                state_d = ArbGnt;
+              end
+              if (!instantiated_i) begin
+                cmd_err_ack = 1'b1;
+                invalid_cmd_seq = 1'b1;
+                state_d = Idle;
+              end
+            end else if (acmd == UNI) begin
+              state_d = ArbGnt;
+            end else begin
+              // Command was not supported.
+              cmd_err_ack = 1'b1;
+              invalid_acmd = 1'b1;
+              state_d = Idle;
+            end
+            // If we received an invalid command, pop it from the FIFO. Afterwards, absorb any
+            // additional data belonging to the same invalid command and empty the FIFO.
+            if (cmd_err_ack) begin
+              cmd_fifo_pop = 1'b1;
+              state_d = Flush;
+            end
+          end else begin
+            // The previous command has been acknowledged, accept a new one unless halted.
+            cmd_stage_rdy_o = !halt_i && sfifo_cmd_wrdy;
+          end
         end
-      end
-      ArbGnt: begin
-        cmd_arb_req_o = 1'b1;
-        if (cmd_arb_gnt_i) begin
-          state_d = SendSOP;
+        Flush: begin
+          // Keep popping the FIFO until it's empty and we're not getting new command input.
+          // The decision whether a command is invalid is taken based on the command header but
+          // EDN might continue and send additional data belonging to the same command. We have
+          // to absorb the full invalid command before we can continue.
+          cmd_stage_rdy_o = sfifo_cmd_wrdy;
+          cmd_fifo_pop = sfifo_cmd_rvld;
+          if (!sfifo_cmd_rvld && !cmd_stage_vld_i) begin
+            state_d = Idle;
+          end
         end
-      end
-      SendSOP: begin
-        cmd_gen_1st_req = 1'b1;
-        cmd_arb_sop_o = 1'b1;
-        cmd_fifo_pop = 1'b1;
-        if (sfifo_cmd_rdata[30:12] == GenBitsCntrWidth'(1)) begin
-          cmd_gen_cnt_last = 1'b1;
+        ArbGnt: begin
+          cmd_arb_req_o = 1'b1;
+          if (cmd_arb_gnt_i) begin
+            state_d = SendSOP;
+          end
         end
-        if (cmd_len == '0) begin
-          cmd_arb_eop_o = 1'b1;
-          state_d = GenCmdChk;
-        end else begin
-          state_d = SendMOP;
-        end
-      end
-      SendMOP: begin
-        if (!cmd_fifo_zero) begin
+        SendSOP: begin
+          cmd_gen_1st_req = 1'b1;
+          if (acmd == GEN) begin
+            gen_ongoing_d = 1'b1;
+          end
+          cmd_arb_sop_o = 1'b1;
           cmd_fifo_pop = 1'b1;
-          cmd_len_dec = 1'b1;
-          if (cmd_len_q == 4'h1) begin
-            cmd_arb_mop_o = 1'b1;
+          if (sfifo_cmd_rdata[12 +: GenBitsCtrWidth] == GenBitsCtrWidth'(1)) begin
+            cmd_gen_cnt_last = 1'b1;
+          end
+          if (cmd_len == '0) begin
             cmd_arb_eop_o = 1'b1;
             state_d = GenCmdChk;
           end else begin
-            cmd_arb_mop_o = 1'b1;
+            state_d = SendMOP;
           end
         end
-      end
-      GenCmdChk: begin
-        if (cmd_gen_flag_q) begin
-          cmd_gen_cnt_dec= 1'b1;
-        end
-        state_d = CmdAck;
-      end
-      CmdAck: begin
-        if (cmd_ack_i) begin
-          state_d = GenReq;
-        end
-      end
-      GenReq: begin
-        // flag set if a gen request
-        if (cmd_gen_flag_q) begin
-          // must stall if genbits fifo is not clear
-          if (!sfifo_genbits_full) begin
-            if (cmd_gen_cnt_q == '0) begin
-              cmd_final_ack = 1'b1;
-              state_d = Idle;
+        SendMOP: begin
+          // Accept the remaining data words of the current command.
+          cmd_stage_rdy_o = sfifo_cmd_wrdy;
+          if (!cmd_fifo_zero) begin
+            cmd_fifo_pop = 1'b1;
+            cmd_len_dec = 1'b1;
+            if (cmd_len_q == 4'h1) begin
+              cmd_stage_rdy_o = 1'b0;
+              cmd_arb_mop_o = 1'b1;
+              cmd_arb_eop_o = 1'b1;
+              state_d = GenCmdChk;
             end else begin
-              // issue a subsequent gen request
-              state_d = GenArbGnt;
+              cmd_arb_mop_o = 1'b1;
             end
           end
-        end else begin
-          // ack for the non-gen request case
-          cmd_final_ack = 1'b1;
-          state_d = Idle;
         end
-      end
-      GenArbGnt: begin
-        cmd_arb_req_o = 1'b1;
-        if (cmd_arb_gnt_i) begin
-          state_d = GenSOP;
+        GenCmdChk: begin
+          state_d = CmdAck;
         end
-      end
-      GenSOP: begin
-        cmd_arb_sop_o = 1'b1;
-        cmd_arb_eop_o = 1'b1;
-        cmd_gen_inc_req = 1'b1;
-        state_d = GenCmdChk;
-        // check for final genbits beat
-        if (cmd_gen_cnt_q == GenBitsCntrWidth'(1)) begin
-          cmd_gen_cnt_last = 1'b1;
+        CmdAck: begin
+          if (cmd_ack_i) begin
+            // The state database has successfully been updated.
+            // In case of Generate commands, we get the generated bits one clock cycle before
+            // receiving the ACK from the state database (from csrng_ctr_drbg_gen).
+            if (gen_abort_inflight_q) begin
+              // Acknowledge the aborted GEN command.
+              cmd_gen_abort_ack = 1'b1;
+              state_d = Idle;
+            end else begin
+              state_d = GenReq;
+            end
+          end
         end
-      end
-      Error: begin
-        cmd_stage_sm_err_o = 1'b1;
-      end
-      default: state_d = Error;
-    endcase
+        GenReq: begin
+          // Flag set if a gen request.
+          if (cmd_gen_flag_i) begin
+            if (gen_abort_pending_q) begin
+              // GEN abort doesn't produce genbits so no need to wait for sfifo_genbits_wrdy.
+              state_d = GenArbGnt;
+            end else if (cmd_gen_cnt_i == '0) begin
+              if (!sfifo_genbits_rvld) begin
+                // Final genbits block has been read out. Ack the completed command.
+                cmd_final_ack = 1'b1;
+                gen_ongoing_d = 1'b0;
+                state_d = Idle;
+              end else if (halt_i) begin
+                // The final block is already sitting in sfifo_genbits. Leave without acking.
+                state_d = Idle;
+              end
+            end else if (halt_i) begin
+              // More genbit blocks remain. This is a safe point to honor a halt request.
+              state_d = Idle;
+            end else if (sfifo_genbits_wrdy) begin
+              // Issue a subsequent gen request.
+              state_d = GenArbGnt;
+            end
+          end else begin
+            // Ack for the non-gen request case.
+            cmd_final_ack = 1'b1;
+            gen_ongoing_d = 1'b0;
+            state_d = Idle;
+          end
+        end
+        GenArbGnt: begin
+          cmd_arb_req_o = 1'b1;
+          if (cmd_arb_gnt_i) begin
+            state_d = GenSOP;
+          end
+        end
+        GenSOP: begin
+          cmd_arb_sop_o = 1'b1;
+          cmd_arb_eop_o = 1'b1;
+          state_d = GenCmdChk;
+          if (gen_abort_pending_q) begin
+            // Abort this instance instead of requesting another block.
+            cmd_gen_abort_req = 1'b1;
+            gen_ongoing_d = 1'b0;
+          end else begin
+            cmd_gen_inc_req = 1'b1;
+            // Check for final genbits beat.
+            if (cmd_gen_cnt_i == GenBitsCtrWidth'(1)) begin
+              cmd_gen_cnt_last = 1'b1;
+            end
+          end
+        end
+        // Error: The error state is now covered by the if statement above.
+        default: begin
+          state_d = Error;
+          cmd_stage_sm_err_o = 1'b1;
+        end
+      endcase // unique case (state_q)
+    end
   end
 
   //---------------------------------------------------------
-  // genbits fifo
+  // Genbits FIFO.
   //---------------------------------------------------------
 
   prim_fifo_sync #(
     .Width(GenBitsFifoWidth),
     .Pass(0),
     .Depth(GenBitsFifoDepth),
-    .OutputZeroIfEmpty(1'b1) // Set to 1 to prevent triggering the output assert check for x's
+    .OutputZeroIfEmpty(0) // Set to 0, and let last data drive out.
   ) u_prim_fifo_genbits (
-    .clk_i          (clk_i),
-    .rst_ni         (rst_ni),
-    .clr_i          (!cs_enable_i),
-    .wvalid_i       (sfifo_genbits_push),
-    .wready_o       (),
-    .wdata_i        (sfifo_genbits_wdata),
-    .rvalid_o       (sfifo_genbits_not_empty),
-    .rready_i       (sfifo_genbits_pop),
-    .rdata_o        (sfifo_genbits_rdata),
-    .full_o         (sfifo_genbits_full),
-    .depth_o        () // sfifo_genbits_depth)
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .clr_i   (sfifo_genbits_clr),
+    .wvalid_i(sfifo_genbits_wvld),
+    .wready_o(sfifo_genbits_wrdy),
+    .wdata_i (sfifo_genbits_wdata),
+    .rvalid_o(sfifo_genbits_rvld),
+    .rready_i(sfifo_genbits_rrdy),
+    .rdata_o (sfifo_genbits_rdata),
+    .full_o  (),
+    .depth_o (),
+    .err_o   ()
   );
+
+  // Clear u_prim_fifo_genbits when CSRNG is disabled or on a GEN abort.
+  assign sfifo_genbits_clr = !cs_enable_i || cmd_gen_abort_ack;
 
   assign sfifo_genbits_wdata = {genbits_fips_i,genbits_bus_i};
 
-  assign sfifo_genbits_push = cs_enable_i && genbits_vld_i;
+  // The prim_fifo_sync primitive is constructed to only accept pushes if there is indeed space
+  // available. Backpressure would actually need to be handled at the sender (csrng_ctr_drbg_gen).
+  // In this particular case, it is safe to unconditionally push the genbits FIFO because
+  // the GenSOP FSM state which triggers csrng_ctr_drbg_gen to generate bits can only be reached
+  // after checking that the genbits FIFO isn't full already. This condition is checked using an
+  // SVA below.
+  //
+  // If the genbits FIFO got pushed without having space, this either means the output of a genbits
+  // request is routed to the wrong application interface (which would be a critical design bug)
+  // or that some fault injection attack is going on. Thus, we track such cases both with an SVA
+  // and with a fatal alert (identifiable via the ERR_CODE register).
+  assign sfifo_genbits_wvld = cs_enable_i && genbits_vld_i;
 
-  assign sfifo_genbits_pop = genbits_vld_o && genbits_rdy_i;
+  assign sfifo_genbits_rrdy = genbits_vld_o && genbits_rdy_i;
 
-  assign genbits_vld_o = cs_enable_i && sfifo_genbits_not_empty;
-  assign {genbits_fips_o,genbits_bus_o} = sfifo_genbits_rdata;
-
+  assign genbits_vld_o = cs_enable_i && sfifo_genbits_rvld;
+  assign {genbits_fips_o, genbits_bus_o} = sfifo_genbits_rdata;
 
   assign sfifo_genbits_err =
-         {(sfifo_genbits_push && sfifo_genbits_full),
-          (sfifo_genbits_pop && !sfifo_genbits_not_empty),
-          (sfifo_genbits_full && !sfifo_genbits_not_empty)};
+         {( sfifo_genbits_wvld && !sfifo_genbits_wrdy),
+          ( sfifo_genbits_rrdy && !sfifo_genbits_rvld),
+          (!sfifo_genbits_wrdy && !sfifo_genbits_rvld)};
+
+  // We're only allowed to request more bits if the genbits FIFO has indeed space.
+  // An abort request never produces another block, so it is exempt from this requirement.
+  `ASSERT(CsrngCmdStageGenbitsFifoFull_A,
+      (state_q == GenSOP) && !gen_abort_pending_q |-> sfifo_genbits_wrdy)
+
+  // Pushes to the genbits FIFO outside of the GenCmdChk and CmdAck states are not allowed.
+  `ASSERT(CsrngCmdStageGenbitsFifoPushExpected_A,
+      sfifo_genbits_wvld |-> state_q inside {GenCmdChk, CmdAck})
 
   //---------------------------------------------------------
-  // ack logic
+  // Ack logic.
   //---------------------------------------------------------
 
   assign cmd_ack_d =
          (!cs_enable_i) ? '0 :
-         cmd_final_ack;
+         cmd_final_ack || cmd_err_ack || cmd_gen_abort_ack;
 
   assign cmd_stage_ack_o = cmd_ack_q;
 
+  assign err_sts = reseed_cnt_exceeded ? CMD_STS_RESEED_CNT_EXCEEDED :
+                   invalid_cmd_seq     ? CMD_STS_INVALID_CMD_SEQ     :
+                   invalid_gen_cmd     ? CMD_STS_INVALID_GEN_CMD     :
+                   invalid_acmd        ? CMD_STS_INVALID_ACMD        : CMD_STS_INVALID_ACMD;
+
   assign cmd_ack_sts_d =
-         (!cs_enable_i) ? '0 :
+         (!cs_enable_i) ? CMD_STS_SUCCESS :
+         cmd_err_ack ? err_sts :
+         cmd_gen_abort_ack ? CMD_STS_GEN_ABORTED :
          cmd_final_ack ? cmd_ack_sts_i :
          cmd_ack_sts_q;
 
   assign cmd_stage_ack_sts_o = cmd_ack_sts_q;
+
+  assign reseed_cnt_alert_o = reseed_cnt_exceeded;
+  assign invalid_cmd_seq_alert_o = invalid_cmd_seq;
+  assign invalid_acmd_alert_o = invalid_acmd;
+  assign invalid_gen_cmd_alert_o = invalid_gen_cmd;
+
+  // Make sure that the state machine has a stable error state. This means that after the error
+  // state is entered it will not exit it unless a reset signal is received.
+  `ASSERT(CsrngCmdStageErrorStStable_A, state_q == Error |=> $stable(state_q))
+  // If in error state, the error output must be high.
+  `ASSERT(CsrngCmdStageErrorOutput_A,   state_q == Error |-> cmd_stage_sm_err_o)
+
+  //---------------------------------------------------------
+  // Halt assertions.
+  //---------------------------------------------------------
+
+  // halted_o is only ever asserted in the Idle state.
+  `ASSERT(CsrngCmdStageHaltedState_A, halted_o |-> state_q == Idle)
+  // Whenever halted, there must be no outstanding request against the shared arbiter.
+  `ASSERT(CsrngCmdStageHaltedNoArbReq_A, halted_o |-> !cmd_arb_req_o)
+  // While halted, the command FIFO is empty and nothing is pushed into it.
+  `ASSERT(CsrngCmdStageHaltedFifoEmpty_A, halted_o |-> cmd_fifo_zero && !sfifo_cmd_wvld)
 
 endmodule

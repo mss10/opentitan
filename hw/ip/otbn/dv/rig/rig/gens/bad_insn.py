@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -46,7 +46,7 @@ class BadInsn(SnippetGen):
         prog_insn = DummyProgInsn(self._get_badbits())
         snippet = ProgSnippet(model.pc, [prog_insn])
         snippet.insert_into_program(program)
-        return (snippet, True, model)
+        return (snippet, model)
 
     def pick_weight(self,
                     model: Model,

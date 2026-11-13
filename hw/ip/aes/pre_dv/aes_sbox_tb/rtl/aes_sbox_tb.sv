@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -73,12 +73,12 @@ module aes_sbox_tb #(
   assign masked_stimulus = stimulus ^ in_mask;
 
   // PRD Generation
-  parameter int unsigned WidthPRDSBoxCanrightMasked        = 8;
-  parameter int unsigned WidthPRDSBoxCanrightMaskedNoreuse = 18;
-  parameter int unsigned WidthPRDSBoxDOM                   = 8;
+  localparam int unsigned WidthPRDSBoxCanrightMasked        = 8;
+  localparam int unsigned WidthPRDSBoxCanrightMaskedNoreuse = 18;
+  localparam int unsigned WidthPRDSBoxDOM                   = 28;
 
-  logic                                   [31:0] prd;
-  logic [31-WidthPRDSBoxCanrightMaskedNoreuse:0] unused_prd;
+  logic [31:0] prd;
+  logic        unused_prd;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : reg_prd
     if (!rst_ni) begin
@@ -87,7 +87,7 @@ module aes_sbox_tb #(
       prd <= {$random};
     end
   end
-  assign unused_prd = prd[31:WidthPRDSBoxCanrightMaskedNoreuse];
+  assign unused_prd = ^prd[31:WidthPRDSBoxDOM];
 
   // Instantiate Masked SBox Implementations
   aes_sbox_canright_masked_noreuse aes_sbox_canright_masked_noreuse (
@@ -109,11 +109,13 @@ module aes_sbox_tb #(
   );
 
   // Instantiate DOM SBox Implementation
-  logic dom_done;
+  logic        dom_done, pre_we;
+  logic [19:0] unused_out_prd, out_prd;
   aes_sbox_dom aes_sbox_dom (
     .clk_i     ( clk_i                    ),
     .rst_ni    ( rst_ni                   ),
     .en_i      ( 1'b1                     ),
+    .prd_we_i  ( pre_we                   ),
     .out_req_o ( dom_done                 ),
     .out_ack_i ( 1'b1                     ),
     .op_i      ( op                       ),
@@ -121,8 +123,17 @@ module aes_sbox_tb #(
     .mask_i    ( in_mask                  ),
     .prd_i     ( prd[WidthPRDSBoxDOM-1:0] ),
     .data_o    ( masked_response[2]       ),
-    .mask_o    ( out_mask[2]              )
+    .mask_o    ( out_mask[2]              ),
+    .prd_o     ( out_prd                  )
   );
+  assign unused_out_prd = out_prd;
+
+  // Update internally buffered PRD in sync with the actual input.
+  // Note that this testbench is really just about functional verification. It doesn't drive the
+  // single DOM S-Box in an ideal way from an SCA perspective. Ideally, the different prd_i input
+  // bits would update in sync with the evaluation of the corresponding multiplier stages as in the
+  // actual cipher core.
+  assign pre_we = dom_done;
 
   // Unmask responses
   always_comb begin : unmask_resp

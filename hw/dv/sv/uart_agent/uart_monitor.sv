@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -30,11 +30,11 @@ class uart_monitor extends dv_base_monitor#(
         drive_tx_clk();
         drive_rx_clk();
         mon_tx_stable();
-        wait(cfg.under_reset);
+        wait(cfg.in_reset);
       join_any
       disable fork;
 
-      if (cfg.under_reset) process_reset();
+      if (cfg.in_reset) process_reset();
     end
   endtask
 
@@ -47,19 +47,19 @@ class uart_monitor extends dv_base_monitor#(
         item = uart_item::type_id::create("item");
         // get the start bit
         @(cfg.vif.mon_tx_mp.mon_tx_cb);
-        `uvm_info(`gfn, $sformatf("tx start bit %0b", cfg.vif.uart_tx), UVM_DEBUG)
-        item.start_bit = cfg.vif.uart_tx;
+        `uvm_info(`gfn, $sformatf("tx start bit %0b", cfg.vif.uart_tx_int), UVM_HIGH)
+        item.start_bit = cfg.vif.uart_tx_int;
         // get the data bits
         for (int i = 0; i < 8; i++) begin
           @(cfg.vif.mon_tx_mp.mon_tx_cb);
-          `uvm_info(`gfn, $sformatf("tx data bit[%0d] %0b", i, cfg.vif.uart_tx), UVM_DEBUG)
-          item.data[i] = cfg.vif.uart_tx;
+          `uvm_info(`gfn, $sformatf("tx data bit[%0d] %0b", i, cfg.vif.uart_tx_int), UVM_DEBUG)
+          item.data[i] = cfg.vif.uart_tx_int;
         end
         // get the parity bit
         if (cfg.vif.uart_tx_clk_pulses > 2) begin
           @(cfg.vif.mon_tx_mp.mon_tx_cb);
-          `uvm_info(`gfn, $sformatf("tx parity bit %0b", cfg.vif.uart_tx), UVM_DEBUG)
-          item.parity = cfg.vif.uart_tx;
+          `uvm_info(`gfn, $sformatf("tx parity bit %0b", cfg.vif.uart_tx_int), UVM_DEBUG)
+          item.parity = cfg.vif.uart_tx_int;
           if (cfg.en_tx_checks && item.parity != `GET_PARITY(item.data, cfg.odd_parity)) begin
             `uvm_error(`gfn, "Parity failed")
           end
@@ -68,10 +68,10 @@ class uart_monitor extends dv_base_monitor#(
 
         // get the stop bit
         @(cfg.vif.mon_tx_mp.mon_tx_cb);
-        `uvm_info(`gfn, $sformatf("tx stop bit %0b", cfg.vif.uart_tx), UVM_DEBUG)
-        item.stop_bit = cfg.vif.uart_tx;
+        `uvm_info(`gfn, $sformatf("tx stop bit %0b", cfg.vif.uart_tx_int), UVM_DEBUG)
+        item.stop_bit = cfg.vif.uart_tx_int;
         // check stop bit
-        if (cfg.en_tx_checks && cfg.vif.uart_tx !== 1'b1) begin
+        if (cfg.en_tx_checks && cfg.vif.uart_tx_int !== 1'b1) begin
           `uvm_error(`gfn, "No stop bit when expected!")
         end
         `uvm_info(`gfn, $sformatf("collected uart tx txn:\n%0s", item.sprint()), UVM_HIGH)
@@ -82,7 +82,7 @@ class uart_monitor extends dv_base_monitor#(
 
         if (cfg.en_cov) cov.uart_cg.sample(UartTx, item);
       end else begin
-        @(cfg.vif.uart_tx);
+        @(cfg.vif.uart_tx_int);
       end
     end
   endtask
@@ -138,18 +138,18 @@ class uart_monitor extends dv_base_monitor#(
   task drive_tx_clk();
     forever begin
       if (cfg.vif.uart_tx_clk_pulses > 0) begin
-        #(cfg.vif.uart_clk_period_ns / 2);
+        #(cfg.vif.uart_clk_period / 2);
         cfg.vif.uart_tx_clk = ~cfg.vif.uart_tx_clk;
         // last cycle only use half period as design and agent aren't using same clock. If agent
         // freq is slower and design continues sending tx item, the freq diff will be accumulated.
         // Ending current item after latch STOP bit to allow agent to re-establish clock to sample
         // the START bit of next item
-        if (cfg.vif.uart_tx_clk_pulses == 1) #(cfg.vif.uart_clk_period_ns / 4);
-        else                                 #(cfg.vif.uart_clk_period_ns / 2);
+        if (cfg.vif.uart_tx_clk_pulses == 1) #(cfg.vif.uart_clk_period / 4);
+        else                                 #(cfg.vif.uart_clk_period / 2);
         cfg.vif.uart_tx_clk = ~cfg.vif.uart_tx_clk;
         cfg.vif.uart_tx_clk_pulses--;
       end else begin
-        @(cfg.vif.uart_tx, cfg.vif.uart_tx_clk_pulses);
+        @(cfg.vif.uart_tx_int, cfg.vif.uart_tx_clk_pulses);
       end
     end
   endtask
@@ -157,9 +157,9 @@ class uart_monitor extends dv_base_monitor#(
   task drive_rx_clk();
     forever begin
       if (cfg.vif.uart_rx_clk_pulses > 0) begin
-        #(cfg.vif.uart_clk_period_ns / 2);
+        #(cfg.vif.uart_clk_period / 2);
         cfg.vif.uart_rx_clk = ~cfg.vif.uart_rx_clk;
-        #(cfg.vif.uart_clk_period_ns / 2);
+        #(cfg.vif.uart_clk_period / 2);
         cfg.vif.uart_rx_clk = ~cfg.vif.uart_rx_clk;
         cfg.vif.uart_rx_clk_pulses--;
       end else begin
@@ -175,16 +175,16 @@ class uart_monitor extends dv_base_monitor#(
       @(cfg.vif.uart_tx_clk_pulses);
       if (cfg.vif.uart_tx_clk_pulses == 0) continue;
 
-      #(cfg.vif.uart_clk_period_ns * (50 - cfg.get_max_drift_cycle_pct()) / 100);
+      #(cfg.vif.uart_clk_period * (50 - cfg.get_max_drift_cycle_pct()) / 100);
       `DV_SPINWAIT_EXIT(
           begin
-            @(cfg.vif.uart_tx);
+            @(cfg.vif.uart_tx_int);
             `uvm_error(`gfn, $sformatf(
                 "Expect uart_tx stable from %0d to %0d of the period, but it's changed",
                 50 - cfg.get_max_drift_cycle_pct(), 50 + cfg.get_max_drift_cycle_pct()))
           end,
-          // simplified from cfg.vif.uart_clk_period_ns * max_drift_cycle_pct * 2 / 100
-          #(cfg.vif.uart_clk_period_ns * cfg.get_max_drift_cycle_pct() / 50))
+          // simplified from cfg.vif.uart_clk_period * max_drift_cycle_pct * 2 / 100
+          #(cfg.vif.uart_clk_period * cfg.get_max_drift_cycle_pct() / 50))
     end
   endtask
 
@@ -205,7 +205,7 @@ class uart_monitor extends dv_base_monitor#(
     cfg.vif.uart_tx_clk        = 1;
     cfg.vif.uart_rx_clk_pulses = 0;
     cfg.vif.uart_rx_clk        = 1;
-    wait(!cfg.under_reset);
+    wait(!cfg.in_reset);
   endtask
 
 endclass

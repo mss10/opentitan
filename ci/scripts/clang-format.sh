@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -22,18 +22,10 @@ merge_base="$(git merge-base origin/$tgt_branch HEAD)" || {
 }
 echo "Running C/C++ lint checks on files changed since $merge_base"
 
-TMPFILE="$(mktemp)" || {
-    echo >&2 "Failed to create temporary file"
-    exit 1
-}
-trap 'rm -f "$TMPFILE"' EXIT
+trap 'echo "code failed clang_format_check fix with ./bazelisk.sh run //quality:clang_format_fix"' ERR
 
 set -o pipefail
-git diff -U0 "$merge_base" -- "*.cpp" "*.cc" "*.c" "*.h" ':!*/vendor/*' | \
-    clang-format-diff -p1 | \
-    tee "$TMPFILE"
-if [ -s "$TMPFILE" ]; then
-    echo -n "##vso[task.logissue type=error]"
-    echo "C/C++ lint failed. Use 'git clang-format' with appropriate options to reformat the changed code."
-    exit 1
-fi
+(for F in $(git diff --name-only "$merge_base" -- "*.cpp" "*.cc" "*.c" "*.h" ':!*/vendor/*'); do
+    echo "--test_arg=\"$F\""
+done) | \
+    xargs -r ./bazelisk.sh test //quality:clang_format_check --test_output=streamed

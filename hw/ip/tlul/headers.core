@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:tlul:headers:0.1"
@@ -8,9 +8,9 @@ description: "TL-UL headers"
 filesets:
   files_rtl:
     depend:
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
       - lowrisc:prim:secded
-      - lowrisc:prim:mubi
+      - lowrisc:prim:mubi_pkg
     files:
       - rtl/tlul_pkg.sv
     file_type: systemVerilogSource

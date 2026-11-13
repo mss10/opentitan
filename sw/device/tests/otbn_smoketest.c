@@ -1,45 +1,48 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#include "hw/top/dt/otbn.h"
 #include "sw/device/lib/dif/dif_otbn.h"
 #include "sw/device/lib/runtime/ibex.h"
 #include "sw/device/lib/runtime/log.h"
-#include "sw/device/lib/runtime/otbn.h"
-#include "sw/device/lib/testing/check.h"
 #include "sw/device/lib/testing/entropy_testutils.h"
-#include "sw/device/lib/testing/test_framework/test_main.h"
-
-#include "hw/top_earlgrey/sw/autogen/top_earlgrey.h"
+#include "sw/device/lib/testing/otbn_testutils.h"
+#include "sw/device/lib/testing/test_framework/check.h"
+#include "sw/device/lib/testing/test_framework/ottf_alerts.h"
+#include "sw/device/lib/testing/test_framework/ottf_main.h"
 
 OTBN_DECLARE_APP_SYMBOLS(barrett384);
+OTBN_DECLARE_SYMBOL_ADDR(barrett384, inp_a);
+OTBN_DECLARE_SYMBOL_ADDR(barrett384, inp_b);
+OTBN_DECLARE_SYMBOL_ADDR(barrett384, inp_m);
+OTBN_DECLARE_SYMBOL_ADDR(barrett384, inp_u);
+OTBN_DECLARE_SYMBOL_ADDR(barrett384, oup_c);
 
 static const otbn_app_t kAppBarrett = OTBN_APP_T_INIT(barrett384);
+static const otbn_addr_t kInpA = OTBN_ADDR_T_INIT(barrett384, inp_a);
+static const otbn_addr_t kInpB = OTBN_ADDR_T_INIT(barrett384, inp_b);
+static const otbn_addr_t kInpM = OTBN_ADDR_T_INIT(barrett384, inp_m);
+static const otbn_addr_t kInpU = OTBN_ADDR_T_INIT(barrett384, inp_u);
+static const otbn_addr_t kOupC = OTBN_ADDR_T_INIT(barrett384, oup_c);
 
 OTBN_DECLARE_APP_SYMBOLS(err_test);
 
 static const otbn_app_t kAppErrTest = OTBN_APP_T_INIT(err_test);
 
-const test_config_t kTestConfig;
+static_assert(kDtOtbnCount >= 1,
+              "This test requires at least one OTBN instance");
 
-/**
- * Get OTBN error bits, check this succeeds and code matches `expected_err_bits`
- */
-static void check_otbn_err_bits(otbn_t *otbn_ctx,
-                                dif_otbn_err_bits_t expected_err_bits) {
-  dif_otbn_err_bits_t otbn_err_bits;
-  CHECK_DIF_OK(dif_otbn_get_err_bits(&otbn_ctx->dif, &otbn_err_bits));
-  CHECK(otbn_err_bits == expected_err_bits,
-        "dif_otbn_get_err_bits() produced unexpected error bits: %x",
-        otbn_err_bits);
-}
+static dt_otbn_t kTestOtbn = (dt_otbn_t)0;
+
+OTTF_DEFINE_TEST_CONFIG();
 
 /**
  * Gets the OTBN instruction count, checks that it matches expectations.
  */
-static void check_otbn_insn_cnt(otbn_t *otbn_ctx, uint32_t expected_insn_cnt) {
+static void check_otbn_insn_cnt(dif_otbn_t *otbn, uint32_t expected_insn_cnt) {
   uint32_t insn_cnt;
-  CHECK_DIF_OK(dif_otbn_get_insn_cnt(&otbn_ctx->dif, &insn_cnt));
+  CHECK_DIF_OK(dif_otbn_get_insn_cnt(otbn, &insn_cnt));
   CHECK(insn_cnt == expected_insn_cnt,
         "Expected to execute %d instructions, but got %d.", expected_insn_cnt,
         insn_cnt);
@@ -56,11 +59,10 @@ static void check_otbn_insn_cnt(otbn_t *otbn_ctx, uint32_t expected_insn_cnt) {
  * The entry point wrap_barrett384() is called according to the calling
  * convention described in the OTBN assembly code file.
  */
-static void test_barrett384(otbn_t *otbn_ctx) {
+static void test_barrett384(dif_otbn_t *otbn) {
   enum { kDataSizeBytes = 48 };
 
-  CHECK(otbn_zero_data_memory(otbn_ctx) == kOtbnOk);
-  CHECK(otbn_load_app(otbn_ctx, kAppBarrett) == kOtbnOk);
+  CHECK_STATUS_OK(otbn_testutils_load_app(otbn, kAppBarrett));
 
   // a, first operand
   static const uint8_t a[kDataSizeBytes] = {10};
@@ -91,25 +93,18 @@ static void test_barrett384(otbn_t *otbn_ctx) {
   // c = (a * b) % m = (10 * 20) % m = 200
   static const uint8_t c_expected[kDataSizeBytes] = {200};
 
-  // TODO: Use symbols from the application to load these parameters once they
-  // are available (#3998).
-  CHECK_DIF_OK(
-      dif_otbn_dmem_write(&otbn_ctx->dif, /*offset_bytes=*/0, &a, sizeof(a)));
-  CHECK_DIF_OK(
-      dif_otbn_dmem_write(&otbn_ctx->dif, /*offset_bytes=*/64, &b, sizeof(b)));
-  CHECK_DIF_OK(
-      dif_otbn_dmem_write(&otbn_ctx->dif, /*offset_bytes=*/256, &m, sizeof(m)));
-  CHECK_DIF_OK(
-      dif_otbn_dmem_write(&otbn_ctx->dif, /*offset_bytes=*/320, &u, sizeof(u)));
+  CHECK_STATUS_OK(otbn_testutils_write_data(otbn, sizeof(a), &a, kInpA));
+  CHECK_STATUS_OK(otbn_testutils_write_data(otbn, sizeof(b), &b, kInpB));
+  CHECK_STATUS_OK(otbn_testutils_write_data(otbn, sizeof(m), &m, kInpM));
+  CHECK_STATUS_OK(otbn_testutils_write_data(otbn, sizeof(u), &u, kInpU));
 
-  CHECK(dif_otbn_set_ctrl_software_errs_fatal(&otbn_ctx->dif, true) == kDifOk);
-  CHECK(otbn_execute(otbn_ctx) == kOtbnOk);
-  CHECK(dif_otbn_set_ctrl_software_errs_fatal(&otbn_ctx->dif, false) ==
-        kDifUnavailable);
-  CHECK(otbn_busy_wait_for_done(otbn_ctx) == kOtbnOk);
+  CHECK_DIF_OK(dif_otbn_set_ctrl_software_errs_fatal(otbn, true));
+  CHECK_STATUS_OK(otbn_testutils_execute(otbn));
+  CHECK(dif_otbn_set_ctrl_software_errs_fatal(otbn, false) == kDifUnavailable);
+  CHECK_STATUS_OK(otbn_testutils_wait_for_done(otbn, kDifOtbnErrBitsNoError));
 
   // Reading back result (c).
-  dif_otbn_dmem_read(&otbn_ctx->dif, 512, &c, sizeof(c));
+  CHECK_STATUS_OK(otbn_testutils_read_data(otbn, sizeof(c), kOupC, &c));
 
   for (int i = 0; i < sizeof(c); ++i) {
     CHECK(c[i] == c_expected[i],
@@ -117,7 +112,7 @@ static void test_barrett384(otbn_t *otbn_ctx) {
           c[i], c_expected[i]);
   }
 
-  check_otbn_insn_cnt(otbn_ctx, 161);
+  check_otbn_insn_cnt(otbn, 174);
 }
 
 /**
@@ -130,30 +125,47 @@ static void test_barrett384(otbn_t *otbn_ctx) {
  * The entry point wrap_err_test() is called, no arguments are passed or results
  * returned.
  */
-static void test_err_test(otbn_t *otbn_ctx) {
-  CHECK(otbn_load_app(otbn_ctx, kAppErrTest) == kOtbnOk);
+static void test_err_test(dif_otbn_t *otbn) {
+  CHECK_STATUS_OK(otbn_testutils_load_app(otbn, kAppErrTest));
 
   // TODO: Turn on software_errs_fatal for err_test. Currently the model doesn't
   // support this feature so turning it on leads to a failure when run with the
   // model.
-  CHECK(dif_otbn_set_ctrl_software_errs_fatal(&otbn_ctx->dif, false) == kDifOk);
-  CHECK(otbn_execute(otbn_ctx) == kOtbnOk);
-  CHECK(otbn_busy_wait_for_done(otbn_ctx) == kOtbnOperationFailed);
+  CHECK_STATUS_OK(ottf_alerts_expect_alert_start(
+      dt_otbn_alert_to_alert_id(kTestOtbn, kDtOtbnAlertRecov)));
+  CHECK_DIF_OK(dif_otbn_set_ctrl_software_errs_fatal(otbn, false));
+  CHECK_STATUS_OK(otbn_testutils_execute(otbn));
+  CHECK_STATUS_OK(
+      otbn_testutils_wait_for_done(otbn, kDifOtbnErrBitsBadDataAddr));
+  CHECK_STATUS_OK(ottf_alerts_expect_alert_finish(
+      dt_otbn_alert_to_alert_id(kTestOtbn, kDtOtbnAlertRecov)));
 
-  check_otbn_err_bits(otbn_ctx, kDifOtbnErrBitsBadDataAddr);
-
-  check_otbn_insn_cnt(otbn_ctx, 1);
+  check_otbn_insn_cnt(otbn, 1);
 }
 
-bool test_main() {
-  entropy_testutils_boot_mode_init();
+static void test_sec_wipe(dif_otbn_t *otbn) {
+  dif_otbn_status_t otbn_status;
 
-  otbn_t otbn_ctx;
-  CHECK(otbn_init(&otbn_ctx, mmio_region_from_addr(
-                                 TOP_EARLGREY_OTBN_BASE_ADDR)) == kOtbnOk);
+  CHECK_DIF_OK(dif_otbn_write_cmd(otbn, kDifOtbnCmdSecWipeDmem));
+  CHECK_DIF_OK(dif_otbn_get_status(otbn, &otbn_status));
+  CHECK(otbn_status == kDifOtbnStatusBusySecWipeDmem);
+  CHECK_STATUS_OK(otbn_testutils_wait_for_done(otbn, kDifOtbnErrBitsNoError));
 
-  test_barrett384(&otbn_ctx);
-  test_err_test(&otbn_ctx);
+  CHECK_DIF_OK(dif_otbn_write_cmd(otbn, kDifOtbnCmdSecWipeImem));
+  CHECK_DIF_OK(dif_otbn_get_status(otbn, &otbn_status));
+  CHECK(otbn_status == kDifOtbnStatusBusySecWipeImem);
+  CHECK_STATUS_OK(otbn_testutils_wait_for_done(otbn, kDifOtbnErrBitsNoError));
+}
+
+bool test_main(void) {
+  CHECK_STATUS_OK(entropy_testutils_auto_mode_init());
+
+  dif_otbn_t otbn;
+  CHECK_DIF_OK(dif_otbn_init_from_dt(kTestOtbn, &otbn));
+
+  test_barrett384(&otbn);
+  test_sec_wipe(&otbn);
+  test_err_test(&otbn);
 
   return true;
 }

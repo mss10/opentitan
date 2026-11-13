@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,6 +7,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "sw/device/lib/base/macros.h"
 
 /**
  * RISC-V PMP address matching modes.
@@ -24,15 +26,6 @@
  * NA4 is not available. Granularity also determines the minimal region size in
  * TOR and NAPOT modes.
  */
-
-/**
- * Attribute for functions which return errors that must be acknowledged.
- *
- * This attribute must be used to mark all PMP API that return an error value of
- * some kind, to ensure that callers do not accidentally drop the error on the
- * ground.
- */
-#define PMP_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
 
 /**
  * RV32 PMP CSR definitions.
@@ -63,7 +56,7 @@
  */
 #define PMP_ADDRESS_MIN_ALIGNMENT 4
 #define PMP_ADDRESS_MIN_ALIGNMENT_NAPOT 8
-#define PMP_ADDRESS_ALIGNMENT (4 << PMP_GRANULARITY_IBEX)
+#define PMP_ADDRESS_ALIGNMENT (4u << PMP_GRANULARITY_IBEX)
 #define PMP_ADDRESS_ALIGNMENT_MASK (PMP_ADDRESS_ALIGNMENT - 1)
 #define PMP_ADDRESS_ALIGNMENT_INVERTED_MASK (~PMP_ADDRESS_ALIGNMENT_MASK)
 #define PMP_ADDRESS_SHIFT 2
@@ -179,7 +172,7 @@ typedef enum pmp_region_configure_result {
  * @param address System address.
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 pmp_region_configure_result_t pmp_region_configure_off(
     pmp_region_index_t region, uintptr_t address);
 
@@ -216,7 +209,7 @@ typedef enum pmp_region_configure_na4_result {
  * @param address Range start system address.
  * @return `pmp_region_configure_na4_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 pmp_region_configure_na4_result_t pmp_region_configure_na4(
     pmp_region_index_t region, const pmp_region_config_t config,
     uintptr_t address);
@@ -263,7 +256,7 @@ typedef enum pmp_region_configure_napot_result {
  * @param size Address range size (must be power-of-two).
  * @return `pmp_region_configure_napot_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 pmp_region_configure_napot_result_t pmp_region_configure_napot(
     pmp_region_index_t region, const pmp_region_config_t config,
     uintptr_t address, uint32_t size);
@@ -287,10 +280,21 @@ pmp_region_configure_napot_result_t pmp_region_configure_napot(
  * @param address_end Top of the range system address.
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 pmp_region_configure_result_t pmp_region_configure_tor(
     pmp_region_index_t region_end, const pmp_region_config_t config,
     uintptr_t address_start, uintptr_t address_end);
+
+/**
+ * Check if the requested region is configured.
+ *
+ * @param region PMP region to query the information for.
+ * @param[out] configured Whether the PMP region is configured.
+ * @return `pmp_region_configure_result_t`.
+ */
+OT_WARN_UNUSED_RESULT
+pmp_region_configure_result_t pmp_region_is_configured(
+    pmp_region_index_t region, bool *configured);
 
 /**
  * Queries the lock status for the requested region.
@@ -299,7 +303,7 @@ pmp_region_configure_result_t pmp_region_configure_tor(
  * @param lock State of the PMP region (locked/unlocked).
  * @return `pmp_region_configure_result_t`.
  */
-PMP_WARN_UNUSED_RESULT
+OT_WARN_UNUSED_RESULT
 pmp_region_configure_result_t pmp_region_lock_status_get(
     pmp_region_index_t region, pmp_region_lock_t *lock);
 

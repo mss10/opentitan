@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -9,14 +9,16 @@
 module adc_ctrl
   import adc_ctrl_reg_pkg::*;
 #(
-  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}}
+  parameter logic [NumAlerts-1:0] AlertAsyncOn = {NumAlerts{1'b1}},
+  // Number of cycles a differential skew is tolerated on the alert signal
+  parameter int unsigned AlertSkewCycles = 1
 ) (
-  input clk_i,  //regular core clock for SW config interface
-  input clk_aon_i,  //always-on slow clock for internal logic
-  input rst_ni,  //power-on hardware reset
-  input rst_aon_ni,  //power-on reset for the 200KHz clock(logic)
+  input clk_i,      // regular core clock for SW config interface
+  input clk_aon_i,  // always-on slow clock for internal logic
+  input rst_ni,     // power-on hardware reset
+  input rst_aon_ni, // power-on reset for the 200KHz clock(logic)
 
-  //Regster interface
+  // Register interface
   input  tlul_pkg::tl_h2d_t tl_i,
   output tlul_pkg::tl_d2h_t tl_o,
 
@@ -24,27 +26,21 @@ module adc_ctrl
   input  prim_alert_pkg::alert_rx_t [NumAlerts-1:0] alert_rx_i,
   output prim_alert_pkg::alert_tx_t [NumAlerts-1:0] alert_tx_o,
 
+  // Inter-module IO, AST interface
+  // .pd: Power down ADC (used in deep sleep mode to save power)
+  // .channel_sel: channel select for ADC;
+  // 2'b0 means stop, 2'b01 means first channel, 2'b10 means second channel, 2'b11 illegal
   output ast_pkg::adc_ast_req_t adc_o,
+  // .data: ADC voltage level, each step is 2.148mV(2200mV/1024). It covers 0-2.2V
+  // .data_valid: Valid bit(pulse) for adc_d
   input  ast_pkg::adc_ast_rsp_t adc_i,
 
-  //Inter-module IO
-  //AST interface
-  //input  [9:0] adc_d,
-  //ADC voltage level, each step is 2.148mV(2200mV/1024). It covers 0-2.2V
-  //input  adc_d_val,//Valid bit(pulse) for adc_d
-  //output logic adc_pd,//Power down ADC(used in deep sleep mode to save power)
-  //output logic [1:0] adc_chnsel,
-  //channel select for ADC;
-  //2'b0 means stop, 2'b01 means first channel, 2'b10 means second channel, 2'b11 ilegal
+  // Interrupt indicates a matching or measurement is done
+  output logic intr_match_pending_o,
 
-  //interrupt interface
-  output logic intr_debug_cable_o,
-  // Debug cable is detected(attached or disconnected); raise the interrupt to CPU
-
-  //pwrmgr interface
+  // Pwrmgr interface
+  // Debug cable is detected; wake up the chip in normal sleep and deep sleep mode
   output logic wkup_req_o
-  //Debug cable is detected; wake up the GSC(CPU) in normal sleep and deep sleep mode
-  //input  [2:0] pwr_sts,//3'b001: deep sleep, 3'b010: normal sleep, 3'b100: fully active
 );
 
   adc_ctrl_reg2hw_t reg2hw;
@@ -57,6 +53,7 @@ module adc_ctrl
   for (genvar i = 0; i < NumAlerts; i++) begin : gen_alert_tx
     prim_alert_sender #(
       .AsyncOn(AlertAsyncOn[i]),
+      .SkewCycles(AlertSkewCycles),
       .IsFatal(1'b1)
     ) u_prim_alert_sender (
       .clk_i,
@@ -80,8 +77,8 @@ module adc_ctrl
     .tl_o(tl_o),
     .reg2hw(reg2hw),
     .hw2reg(hw2reg),
-    .intg_err_o(alerts[0]),
-    .devmode_i(1'b1)
+    // SEC_CM: BUS.INTEGRITY
+    .intg_err_o(alerts[0])
   );
 
   // Instantiate DCD core module
@@ -95,18 +92,21 @@ module adc_ctrl
     .adc_chn_val_o(hw2reg.adc_chn_val),
     .adc_intr_status_o(hw2reg.adc_intr_status),
     .aon_filter_status_o(hw2reg.filter_status),
-    .debug_cable_wakeup_o(wkup_req_o),
-    .intr_debug_cable_o(intr_debug_cable_o),
+    .wkup_req_o,
+    .intr_o(intr_match_pending_o),
     .adc_i(adc_i),
-    .adc_o(adc_o)
+    .adc_o(adc_o),
+    .aon_fsm_state_o(hw2reg.adc_fsm_state.d)
   );
 
   // All outputs should be known value after reset
-  `ASSERT_KNOWN(IntrDebugCableKnown, intr_debug_cable_o)
-  `ASSERT_KNOWN(WakeDebugCableKnown, wkup_req_o)
+  `ASSERT_KNOWN(IntrKnown, intr_match_pending_o)
+  `ASSERT_KNOWN(WakeKnown, wkup_req_o)
   `ASSERT_KNOWN(TlODValidKnown, tl_o.d_valid)
   `ASSERT_KNOWN(TlOAReadyKnown, tl_o.a_ready)
   `ASSERT_KNOWN(AdcKnown_A, adc_o)
   `ASSERT_KNOWN(AlertsKnown_A, alert_tx_o)
 
+  // Alert assertions for reg_we onehot check
+  `ASSERT_PRIM_REG_WE_ONEHOT_ERROR_TRIGGER_ALERT(RegWeOnehotCheck_A, u_reg, alert_tx_o[0])
 endmodule

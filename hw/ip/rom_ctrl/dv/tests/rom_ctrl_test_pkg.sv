@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,6 +7,7 @@ package rom_ctrl_test_pkg;
   import uvm_pkg::*;
   import cip_base_pkg::*;
   import rom_ctrl_env_pkg::*;
+  import rom_ctrl_vseqs_pkg::*;
 
   // macro includes
   `include "uvm_macros.svh"

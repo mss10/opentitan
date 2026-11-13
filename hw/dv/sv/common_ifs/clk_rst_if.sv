@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,9 +12,7 @@
 // inout clk
 // inout rst_n
 
-interface clk_rst_if #(
-  parameter string IfName = "main"
-) (
+interface clk_rst_if (
   inout clk,
   inout rst_n
 );
@@ -24,6 +22,7 @@ interface clk_rst_if #(
   `include "dv_macros.svh"
   `include "uvm_macros.svh"
   import uvm_pkg::*;
+  import common_ifs_pkg::*;
 `endif
 
   // Enables clock to be generated and driven by this interface.
@@ -37,6 +36,10 @@ interface clk_rst_if #(
 
   // The internal output reset value.
   logic o_rst_n;
+
+  // This event is used to start the initial block driving the clock after set_active sets
+  // the values of drive_clk and drive_rst_n.
+  event set_active_called;
 
   // Applies clock gating.
   bit clk_gate = 1'b0;
@@ -66,13 +69,18 @@ interface clk_rst_if #(
   int duty_cycle = 50;
 
   // Maximum jitter applied to each period of the clock - this is expected to be about 20% or less
-  // than the clock period. The computed jitter is added or subtracted to each edge.
+  // than the clock period.
+  // The jitter is divided to two values - plus-jitter and minus-jitter.
+  // Plus jitter is the possible time can be added to the clock period, while the minus jitter is
+  // the possible time can be subtracted from the clock period.
   //         _________
   // _____:_| :     : |_:_______
   //
-  // The actual jitter value is picked randomly within the window {[-max_jitter_ps:max_jitter_ps]}
+  // The actual jitter value is picked randomly within the window
+  // {[-max_minus_jitter_ps:max_plus_jitter_ps]}
   // and is added to the time to next edge.
-  int max_jitter_ps = 1000;
+  int max_plus_jitter_ps = 1000;
+  int max_minus_jitter_ps = 1000;
 
   // The percentage chance of jitter occurring on each edge. If 0 (default value), then jitter is
   // disabled altogether. If 100, jitter is computed and applied at every edge.
@@ -91,8 +99,7 @@ interface clk_rst_if #(
   // If true, this is the only clock in the system; there is no need to add initial jitter.
   bit sole_clock = 1'b0;
 
-  // use IfName as a part of msgs to indicate which clk_rst_vif instance
-  string msg_id = {"clk_rst_if::", IfName};
+  string msg_id = $sformatf("[%m(clk_rst_if)]");
 
   clocking cb @(posedge clk);
   endclocking
@@ -110,6 +117,28 @@ interface clk_rst_if #(
     repeat (num_clks) @cbn;
   endtask
 
+  // Wait for 'num_clks' clocks based on the positive clock edge or reset, whichever comes first.
+  task automatic wait_clks_or_rst(int num_clks);
+    fork begin : isolation_fork
+      fork
+        wait_clks(num_clks);
+        wait_for_reset(.wait_negedge(1'b1), .wait_posedge(1'b0));
+      join_any
+      disable fork;
+    end join
+  endtask
+
+  // Wait for 'num_clks' clocks based on the negative clock edge or reset, whichever comes first.
+  task automatic wait_n_clks_or_rst(int num_clks);
+    fork begin : isolation_fork
+      fork
+        wait_n_clks(num_clks);
+        wait_for_reset(.wait_negedge(1'b1), .wait_posedge(1'b0));
+      join_any
+      disable fork;
+    end join
+  endtask
+
   // wait for rst_n to assert and then deassert
   task automatic wait_for_reset(bit wait_negedge = 1'b1, bit wait_posedge = 1'b1);
     if (wait_negedge && ($isunknown(rst_n) || rst_n === 1'b1)) @(negedge rst_n);
@@ -119,12 +148,18 @@ interface clk_rst_if #(
   // set the clk frequency in khz
   function automatic void set_freq_khz(int freq_khz);
     clk_freq_mhz = $itor(freq_khz) / 1000;
+    if (drive_clk && clk_freq_mhz <= 0) begin
+      `uvm_fatal(msg_id, "Since drive_clk is true, freq_mhz must be greater than zero.")
+    end
     clk_period_ps = 1000_000 / clk_freq_mhz;
     recompute = 1'b1;
   endfunction
 
   // set the clk frequency in mhz
   function automatic void set_freq_mhz(int freq_mhz);
+    if (drive_clk && freq_mhz <= 0) begin
+      `uvm_fatal(msg_id, "Since drive_clk is true, freq_mhz must be greater than zero.")
+    end
     set_freq_khz(freq_mhz * 1000);
   endfunction
 
@@ -144,16 +179,15 @@ interface clk_rst_if #(
     clk_freq_scale_up = freq_scale_up;
   endfunction
 
-  // call this function at t=0 (from tb top) to enable clk and rst_n to be driven
+  // Enables the clock and reset to be driven.
   function automatic void set_active(bit drive_clk_val = 1'b1, bit drive_rst_n_val = 1'b1);
-    time t = $time;
-    if (t == 0) begin
-      drive_clk = drive_clk_val;
-      drive_rst_n = drive_rst_n_val;
+    if (drive_clk_val && clk_freq_mhz <= 0) begin
+      `uvm_fatal(msg_id, "Cannot enable drive_clk unless clk_freq_mhz is greater than zero.")
     end
-    else begin
-      `dv_fatal("This function can only be called at t=0", msg_id)
-    end
+
+    drive_clk = drive_clk_val;
+    drive_rst_n = drive_rst_n_val;
+    -> set_active_called;
   endfunction
 
   // set the clk period in ps
@@ -170,9 +204,12 @@ interface clk_rst_if #(
     recompute = 1'b1;
   endfunction
 
-  // set maximum jitter in ps
-  function automatic void set_max_jitter_ps(int jitter_ps);
-    max_jitter_ps = jitter_ps;
+  // set maximum jitter in ps, separating the plus jitter and the minus jitter.
+  //  In default the plus and minus jitters are the same.
+  function automatic void set_max_jitter_ps(int plus_jitter_ps,
+                                            int minus_jitter_ps = plus_jitter_ps);
+    max_plus_jitter_ps = plus_jitter_ps;
+    max_minus_jitter_ps = minus_jitter_ps;
   endfunction
 
   // set jitter chance in percentage (0 - 100)
@@ -203,7 +240,7 @@ interface clk_rst_if #(
   // Scales the clock frequency up and down on every edge.
   function automatic void apply_freq_scaling();
     real scaling;
-    real mult = $urandom_range(0, clk_freq_scale_up) ? 1.0 : -1.0;
+    real mult = $urandom_range(0, int'(clk_freq_scale_up)) ? 1.0 : -1.0;
 
     if ($urandom_range(1, 100) <= clk_freq_scaling_chance_pc) begin
       scaling = 1.0 + mult * real'($urandom_range(0, clk_freq_scaling_pc)) / 100;
@@ -216,13 +253,19 @@ interface clk_rst_if #(
   // Applies jitter to clk_hi and clk_lo half periods based on jitter_chance_pc.
   function automatic void apply_jitter();
     int jitter;
+    int plus_jitter;
+    int minus_jitter;
 
     if ($urandom_range(1, 100) <= jitter_chance_pc) begin
-      jitter = ($urandom_range(0, 1) ? 1 : -1) * $urandom_range(0, max_jitter_ps);
+      plus_jitter = $urandom_range(0, max_plus_jitter_ps/2);
+      minus_jitter = $urandom_range(0, max_minus_jitter_ps/2);
+      jitter = ($urandom_range(0, 1) ? plus_jitter : (-1 * minus_jitter));
       clk_hi_modified_ps = clk_hi_ps + jitter;
     end
     if ($urandom_range(1, 100) <= jitter_chance_pc) begin
-      jitter = ($urandom_range(0, 1) ? 1 : -1) * $urandom_range(0, max_jitter_ps);
+      plus_jitter = $urandom_range(0, max_plus_jitter_ps/2);
+      minus_jitter = $urandom_range(0, max_minus_jitter_ps/2);
+      jitter = ($urandom_range(0, 1) ? plus_jitter : (-1 * minus_jitter));
       clk_lo_modified_ps = clk_lo_ps + jitter;
     end
   endfunction
@@ -233,86 +276,83 @@ interface clk_rst_if #(
   endtask
 
   // apply reset with specified scheme
-  // TODO make this enum?
-  // rst_n_scheme
-  // 0 - fullly synchronous reset - it is asserted and deasserted on clock edges
-  // 1 - async assert, sync dessert (default)
-  // 2 - async assert, async dessert
-  // 3 - clk gated when reset asserted
-  // Note: for power on reset, please ensure pre_reset_dly_clks is set to 0
-  // TODO #2338 issue workaround - $urandom call moved from default argument value to function body
-  task automatic apply_reset(int pre_reset_dly_clks   = 0,
-                             integer reset_width_clks = 'x,
+  task automatic apply_reset(int reset_width_clks = $urandom_range(50, 100),
                              int post_reset_dly_clks  = 0,
-                             int rst_n_scheme         = 1);
-    int dly_ps;
-    if ($isunknown(reset_width_clks)) reset_width_clks = $urandom_range(50, 100);
-    dly_ps = $urandom_range(0, clk_period_ps);
-    wait_clks(pre_reset_dly_clks);
-    case (rst_n_scheme)
-      0: begin : sync_assert_deassert
-        o_rst_n <= 1'b0;
-        wait_clks(reset_width_clks);
-        o_rst_n <= 1'b1;
-      end
-      1: begin : async_assert_sync_deassert
-        #(dly_ps * 1ps);
-        o_rst_n <= 1'b0;
-        wait_clks(reset_width_clks);
-        o_rst_n <= 1'b1;
-      end
-      2: begin : async_assert_async_deassert
-        #(dly_ps * 1ps);
-        o_rst_n <= 1'b0;
-        wait_clks(reset_width_clks);
-        dly_ps = $urandom_range(0, clk_period_ps);
-        #(dly_ps * 1ps);
-        o_rst_n <= 1'b1;
-      end
-      default: begin
-        `dv_fatal($sformatf("rst_n_scheme %0d not supported", rst_n_scheme), msg_id)
-      end
-    endcase
-    wait_clks(post_reset_dly_clks);
+                             rst_scheme_e rst_n_scheme  = RstAssertAsyncDeassertSync);
+    if (drive_rst_n) begin
+      int dly_ps;
+      dly_ps = $urandom_range(0, clk_period_ps);
+      case (rst_n_scheme)
+        RstAssertSyncDeassertSync: begin
+          o_rst_n <= 1'b0;
+          wait_clks(reset_width_clks);
+          o_rst_n <= 1'b1;
+        end
+        RstAssertAsyncDeassertSync: begin
+          #(dly_ps * 1ps);
+          o_rst_n <= 1'b0;
+          wait_clks(reset_width_clks);
+          o_rst_n <= 1'b1;
+        end
+        RstAssertAsyncDeassertASync: begin
+          #(dly_ps * 1ps);
+          o_rst_n <= 1'b0;
+          wait_clks(reset_width_clks);
+          dly_ps = $urandom_range(0, clk_period_ps);
+          #(dly_ps * 1ps);
+          o_rst_n <= 1'b1;
+        end
+        default: begin
+          `dv_fatal($sformatf("rst_n_scheme %0d not supported", rst_n_scheme), msg_id)
+        end
+      endcase
+      wait_clks(post_reset_dly_clks);
+    end
   endtask
 
-  // clk gen
+  // clk gen when the clock is active, so this waits until the set_active function was called.
   initial begin
     // start driving clk only after the first por reset assertion. The fork/join means that we'll
     // wait a whole number of clock periods, which means it's possible for the clock to synchronise
     // with the "expected" timestamps.
     bit done;
-    fork
-      begin
-        wait_for_reset(.wait_posedge(1'b0));
+    @set_active_called;
+    if (drive_clk) begin
+      fork
+        begin
+          // Only wait for reset if driving it, otherwise it may never come.
+          if (drive_rst_n) begin
+            wait_for_reset(.wait_posedge(1'b0));
 
-        // Wait a short time after reset before starting to drive the clock.
-        #1ps;
+            // Wait a short time after reset before starting to drive the clock.
+            #1ps;
+          end
+          o_clk = 1'b0;
+
+          done = 1'b1;
+        end
+        while (!done) #(clk_period_ps * 1ps);
+      join
+
+      // If there might be multiple clocks in the system, wait another (randomised) short time to
+      // desynchronise.
+      if (!sole_clock) #($urandom_range(0, clk_period_ps) * 1ps);
+
+      forever begin
+        if (recompute) begin
+          clk_hi_ps = clk_period_ps * duty_cycle / 100;
+          clk_lo_ps = clk_period_ps - clk_hi_ps;
+          clk_hi_modified_ps = clk_hi_ps;
+          clk_lo_modified_ps = clk_lo_ps;
+          recompute = 1'b0;
+        end
+        if (clk_freq_scaling_pc && clk_freq_scaling_chance_pc) apply_freq_scaling();
+        if (jitter_chance_pc) apply_jitter();
+        #(clk_lo_modified_ps * 1ps);
+        if (!clk_gate) o_clk = 1'b1;
+        #(clk_hi_modified_ps * 1ps);
         o_clk = 1'b0;
-
-        done = 1'b1;
       end
-      while (!done) #(clk_period_ps * 1ps);
-    join
-
-    // If there might be multiple clocks in the system, wait another (randomised) short time to
-    // desynchronise.
-    if (!sole_clock) #($urandom_range(0, clk_period_ps) * 1ps);
-
-    forever begin
-      if (recompute) begin
-        clk_hi_ps = clk_period_ps * duty_cycle / 100;
-        clk_lo_ps = clk_period_ps - clk_hi_ps;
-        clk_hi_modified_ps = clk_hi_ps;
-        clk_lo_modified_ps = clk_lo_ps;
-        recompute = 1'b0;
-      end
-      if (clk_freq_scaling_pc && clk_freq_scaling_chance_pc) apply_freq_scaling();
-      if (jitter_chance_pc) apply_jitter();
-      #(clk_lo_modified_ps * 1ps);
-      if (!clk_gate) o_clk = 1'b1;
-      #(clk_hi_modified_ps * 1ps);
-      o_clk = 1'b0;
     end
   end
 

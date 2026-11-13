@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,16 +7,30 @@
 
 class hmac_long_msg_vseq extends hmac_smoke_vseq;
   `uvm_object_utils(hmac_long_msg_vseq)
-  `uvm_object_new
 
-  constraint msg_c {
-    msg.size() dist {
-        0             :/ 1,
-        [1   :64]     :/ 1, // 64 bytes is the FIFO depth
-        [65  :999]    :/ 1,
-        [1000:3000]   :/ 6, // 1KB - 2KB according to SW immediate usage
-        [3001:10_000] :/ 1  // temp set to 10KB as max length, spec max size is 2^64 bits
-    };
-  }
+  // Constraints
+  extern constraint msg_c;
+  extern constraint num_trans_c;
 
+  // Standard SV/UVM methods
+  extern function new(string name="");
 endclass : hmac_long_msg_vseq
+
+
+constraint hmac_long_msg_vseq::msg_c {
+  msg.size() dist {
+    0  :/ 1,  // Empty
+    [   1 :   257] :/ 1,  // Up to two 1024-bit blocks
+    [1000 : 3_000] :/ 5,  // 1KB - 2KB according to SW immediate usage
+    [3001 :10_000] :/ 1   // temp set to 10KB as max length, spec max size is 2^64 bits
+  };
+}
+
+// Reduce the number of transactions as simulation time is too long and it doesn't add much value
+constraint hmac_long_msg_vseq::num_trans_c {
+  num_trans inside {[1:25]};
+}
+
+function hmac_long_msg_vseq::new(string name="");
+  super.new(name);
+endfunction : new

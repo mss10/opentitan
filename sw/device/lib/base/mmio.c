@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,14 +7,6 @@
 #include <stdalign.h>
 
 #include "sw/device/lib/base/memory.h"
-
-/**
- * Computes how many bytes `addr` is ahead of the previous 32-bit word alignment
- * boundary.
- */
-static ptrdiff_t misalignment32_of(uintptr_t addr) {
-  return addr % alignof(uint32_t);
-}
 
 /**
  * Copies a block of memory between MMIO and main memory while ensuring that
@@ -31,8 +23,8 @@ static ptrdiff_t misalignment32_of(uintptr_t addr) {
  * @param from_mmio if true, copy from MMIO to main memory. Otherwise, copy from
  * main memory to MMIO.
  */
-static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset, void *buf,
-                                 size_t len, bool from_mmio) {
+static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset,
+                                 uint8_t *buf, size_t len, bool from_mmio) {
   if (len == 0) {
     return;
   }
@@ -43,7 +35,7 @@ static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset, void *buf,
   if (misalignment != 0) {
     // The number of bytes missing to bring `offset` back into alignment.
     // For example, 0x3 has misalignment of 3 and realignment of 1.
-    ptrdiff_t realignment = sizeof(uint32_t) - misalignment;
+    size_t realignment = sizeof(uint32_t) - OT_UNSIGNED(misalignment);
     // Note that we might be doing less I/O than the misalignment requires; we
     // might be off by a single byte, but not have the full three bytes for full
     // realignment.
@@ -53,7 +45,7 @@ static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset, void *buf,
 
     // Converts `offset`, which points to a subword boundary, to point to the
     // start of the current word it points into.
-    ptrdiff_t current_word_offset = offset - misalignment;
+    ptrdiff_t current_word_offset = OT_SIGNED(offset) - misalignment;
     uint32_t current_word = mmio_region_read32(base, current_word_offset);
 
     // Act on only to a suffix of `current_word`, corresponding to the necessary
@@ -89,7 +81,7 @@ static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset, void *buf,
       // If writing to MMIO, we only need to write a prefix when writing a
       // subword. In that case, we need to avoid clobbering the word at
       // `offset`.
-      current_word = mmio_region_read32(base, offset);
+      current_word = mmio_region_read32(base, OT_SIGNED(offset));
     }
 
     // Copy a prefix; most of the time, this will be the whole word.
@@ -98,7 +90,7 @@ static void mmio_region_memcpy32(mmio_region_t base, uint32_t offset, void *buf,
     } else {
       // When writing to MMIO, we need to write the modified word.
       memcpy(&current_word, buf, bytes_to_copy);
-      mmio_region_write32(base, offset, current_word);
+      mmio_region_write32(base, OT_SIGNED(offset), current_word);
     }
 
     offset += bytes_to_copy;
@@ -122,6 +114,7 @@ void mmio_region_memcpy_to_mmio32(mmio_region_t base, uint32_t offset,
 
 // `extern` declarations to give the inline functions in the
 // corresponding header a link location.
+extern mmio_region_t mmio_region_from_addr(uintptr_t address);
 extern uint8_t mmio_region_read8(mmio_region_t base, ptrdiff_t offset);
 extern uint32_t mmio_region_read32(mmio_region_t base, ptrdiff_t offset);
 extern void mmio_region_write8(mmio_region_t base, ptrdiff_t offset,

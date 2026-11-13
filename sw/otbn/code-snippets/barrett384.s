@@ -1,4 +1,4 @@
-/* Copyright lowRISC contributors. */
+/* Copyright lowRISC contributors (OpenTitan project). */
 /* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
@@ -227,27 +227,68 @@ barrett384:
 .section .text.start
 .globl wrap_barrett384
 wrap_barrett384:
+  /* Initialize all-zero register. */
   bn.xor w31, w31, w31
-
+  /* Initialise WDRs before using them */
+  bn.xor w16, w16, w16
+  bn.xor w17, w17, w17
+  bn.xor w18, w18, w18
   /* load first operand from dmem to [w9, w8] */
   li x4, 8
-  bn.lid x4++, 0(x0)
-  bn.lid x4++, 32(x0)
+  la x5, inp_a
+  bn.lid x4++, 0(x5)
+  bn.lid x4++, 32(x5)
   /* load second operand from dmem to [w11, w10] */
-  bn.lid x4++, 64(x0)
-  bn.lid x4++, 96(x0)
+  la x5, inp_b
+  bn.lid x4++, 0(x5)
+  bn.lid x4++, 32(x5)
   /* load modulus from dmem to [w13, w12] */
-  bn.lid x4++, 256(x0)
-  bn.lid x4++, 288(x0)
+  la x5, inp_m
+  bn.lid x4++, 0(x5)
+  bn.lid x4++, 32(x5)
   /* load barrett precomputed parameter u from dmem to [w15, w14] */
-  bn.lid x4++, 320(x0)
-  bn.lid x4++, 352(x0)
+  la x5, inp_u
+  bn.lid x4++, 0(x5)
+  bn.lid x4++, 32(x5)
 
   jal x1, barrett384
 
   /* store result from [w30, w29] to dmem */
   li x4, 29
-  bn.sid x4++, 512(x0)
-  bn.sid x4++, 544(x0)
+  la x5, oup_c
+  bn.sid x4++, 0(x5)
+  bn.sid x4++, 32(x5)
 
   ecall
+
+.data
+
+/* First operand for Barrett modular multiplication. */
+.globl inp_a
+.balign 32
+inp_a:
+  .zero 64
+
+/* Second operand for Barrett modular multiplication. */
+.globl inp_b
+.balign 32
+inp_b:
+  .zero 64
+
+/* Modulus. */
+.globl inp_m
+.balign 32
+inp_m:
+  .zero 64
+
+/* Low 256 bits of Barrett constant u = floor(2^512 / modulus). */
+.globl inp_u
+.balign 32
+inp_u:
+  .zero 64
+
+/* Output buffer. */
+.globl oup_c
+.balign 32
+oup_c:
+  .zero 64

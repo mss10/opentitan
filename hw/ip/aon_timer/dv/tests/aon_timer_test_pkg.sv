@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,6 +6,7 @@ package aon_timer_test_pkg;
   // dep packages
   import uvm_pkg::*;
   import cip_base_pkg::*;
+  import dv_utils_pkg::*;
   import aon_timer_env_pkg::*;
 
   // macro includes

@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:dv:aes_test_vectors"
@@ -10,6 +10,7 @@ filesets:
       - lowrisc:ip:aes
     files:
       - nist_vectors_pkg.sv
+      - nist_vectors_gcm_pkg.sv
     file_type: systemVerilogSource
 
 targets:

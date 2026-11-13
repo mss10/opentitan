@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -16,11 +16,12 @@ $(build-dir) $(lint-build-dir):
 	mkdir -p $@
 
 pylibs := $(wildcard shared/*.py docs/*.py)
-pyscripts := yaml_to_doc.py otbn-as otbn-ld otbn-objdump
+pyscripts := yaml_to_doc.py otbn_as.py otbn_ld.py otbn_objdump.py docs/md_isrs.py
 
 lint-stamps := $(foreach s,$(pyscripts),$(lint-build-dir)/$(s).stamp)
 $(lint-build-dir)/%.stamp: % $(pylibs) | $(lint-build-dir)
-	mypy --strict $< $(pylibs)
+	mypy --strict --config-file=mypy.ini $<
+	mkdir -p $(@D)
 	touch $@
 
 .PHONY: lint
@@ -32,8 +33,6 @@ lint: $(lint-stamps)
 otbn-code-snippets-obj-dir := $(cs-build-dir)
 otbn-code-snippets-bin-dir := $(cs-build-dir)
 otbn-code-snippets-util-dir  := .
-
-include $(repo-top)/sw/otbn/code-snippets/rules.mk
 
 .PHONY: asm-check
 asm-check: $(otbn-code-snippets-elfs)

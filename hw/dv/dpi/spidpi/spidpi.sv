@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,8 +11,8 @@
 module spidpi
   #(
   parameter string NAME = "spi0",
-  parameter MODE = 0,
-  parameter LOG_LEVEL = 9
+  parameter int MODE = 0,
+  parameter int LOG_LEVEL = 9
   )(
   input  logic clk_i,
   input  logic rst_ni,
@@ -30,7 +30,7 @@ module spidpi
     void spidpi_close(input chandle ctx);
 
   import "DPI-C" function
-    byte spidpi_tick(input chandle ctx_void, input [1:0] d2p_data);
+    byte spidpi_tick(input chandle ctx_void, input logic [1:0] d2p_data);
 
   chandle ctx;
 

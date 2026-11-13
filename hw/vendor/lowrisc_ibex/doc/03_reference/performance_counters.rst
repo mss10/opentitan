@@ -3,10 +3,13 @@
 Performance Counters
 ====================
 
-Ibex implements performance counters according to the RISC-V Privileged Specification, version 1.11 (see Hardware Performance Monitor, Section 3.1.11).
+Ibex implements performance counters according to the RISC-V Privileged Specification, version 1.11 (see Hardware Performance Monitor, Section 3.1.11) and supports the **Zihpm** (Hardware Performance Counters) extension.
 The performance counters are placed inside the Control and Status Registers (CSRs) and can be accessed with the ``CSRRW(I)`` and ``CSRRS/C(I)`` instructions.
 
-Ibex implements the clock cycle counter ``mcycle(h)``, the retired instruction counter ``minstret(h)``, as well as the 29 event counters ``mhpmcounter3(h)`` - ``mhpmcounter31(h)`` and the corresponding event selector CSRs ``mhpmevent3`` - ``mhpmevent31``, and the ``mcountinhibit`` CSR to individually enable/disable the counters.
+Ibex implements the machine-mode clock cycle counter ``mcycle(h)``, the retired instruction counter ``minstret(h)``, as well as the 29 event counters ``mhpmcounter3(h)`` - ``mhpmcounter31(h)`` and the corresponding event selector CSRs ``mhpmevent3`` - ``mhpmevent31``, and the ``mcountinhibit`` CSR to individually enable/disable the counters.
+
+Additionally, Ibex implements the Zicntr and Zihpm extensions which provide User-mode (U-mode) aliases for these performance counters: ``cycle(h)``, ``instret(h)``, and ``hpmcounter3(h)`` - ``hpmcounter31(h)``. These aliases provide read-only access to the exact same underlying hardware counters configured in M-mode.
+
 ``mcycle(h)`` and ``minstret(h)`` are always available and 64 bit wide.
 The ``mhpmcounter`` performance counters are optional (unavailable by default) and parametrizable in width.
 
@@ -60,18 +63,32 @@ In particular, to enable/disable ``mcycle(h)``, bit 0 must be written. For ``min
 The lower 32 bits of all counters can be accessed through the base register, whereas the upper 32 bits are accessed through the ``h``-register.
 Reads to all these registers are non-destructive.
 
+User-Mode Counter Access (mcounteren)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Access to the U-mode counter aliases (``cycle(h)``, ``instret(h)``, and ``hpmcounterX(h)``) is controlled via the Machine Counter-Enable CSR (``mcounteren``). This register can gate access to the counters from less privileged modes to prevent benchmarking the core if desired.
+
+* **Bit 0** controls access to ``cycle(h)``.
+* **Bit 2** controls access to ``instret(h)``.
+* **Bit X** controls access to ``hpmcounterX(h)``.
+
+When a bit in ``mcounteren`` is clear (0), any attempt to read the corresponding counter alias from U-mode will trigger an illegal instruction exception.
+
+To secure this mechanism, the ``mcounteren`` register can be locked against software modifications using a MUBI input signal called ``mcounteren_writable_i``.
+See :ref:`cs-registers` for full details of this signal's behaviour.
+
 Parametrization at synthesis time
 ---------------------------------
 
 The ``mcycle(h)`` and ``minstret(h)`` counters are always available and 64 bit wide.
 
 The event counters ``mhpmcounter3(h)`` - ``mhpmcounter31(h)`` are parametrizable.
-Their width can be parametrized between 1 and 64 bit through the ``WidthMHPMCounters`` parameter, which defaults to 40 bit wide counters.
+Their width can be parametrized between 1 and 64 bit through the ``MHPMCounterWidth`` parameter, which defaults to 40 bit wide counters.
 
-The number of available event counters ``mhpmcounterX(h)`` can be controlled via the ``NumMHPMCounters`` parameter.
-By default (``NumMHPMCounters`` set to 0), no counters are available to software.
-Set ``NumMHPMCounters`` to a value between 1 and 8 to make the counters ``mhpmcounter3(h)`` - ``mhpmcounter10(h)`` available as listed below.
-Setting ``NumMHPMCounters`` to values larger than 8 does not result in any more performance counters.
+The number of available event counters ``mhpmcounterX(h)`` can be controlled via the ``MHPMCounterNum`` parameter.
+By default (``MHPMCounterNum`` set to 0), no counters are available to software.
+Set ``MHPMCounterNum`` to a value between 1 and 10 to make the counters ``mhpmcounter3(h)`` - ``mhpmcounter12(h)`` available as listed below.
+Setting ``MHPMCounterNum`` to values larger than 10 does not result in any more performance counters.
 
 Unavailable counters always read 0.
 
@@ -138,7 +155,7 @@ The remaining event selector CSRs are tied to 0, i.e., no events are counted by 
 FPGA Targets
 ------------
 
-For FPGA targets the performance counters constitute a particularily large structure.
+For FPGA targets the performance counters constitute a particularly large structure.
 Implementing the maximum 29 event counters 32, 48 and 64 bit wide results in relative logic utilizations of the core of 100%, 111% and 129% respectively.
 The relative numbers of flip-flops are 100%, 125% and 150%.
 It is recommended to implement event counters of 32 bit width where possible.

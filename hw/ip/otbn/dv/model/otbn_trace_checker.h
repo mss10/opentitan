@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 #ifndef OPENTITAN_HW_IP_OTBN_DV_MODEL_OTBN_TRACE_CHECKER_H_
@@ -75,6 +75,18 @@ class OtbnTraceChecker : public OtbnTraceListener {
   // through MatchPair if there is any.
   const OtbnIssTraceEntry::IssData *PopIssData();
 
+  // Tell the model not to execute checks to see if secure wiping has written
+  // random data to all registers before wiping them with zeroes on the next
+  // secure wipe entry.
+  void set_no_sec_wipe_chk();
+
+  // Tell the trace checker to tolerate one mismatch between RTL and ISS trace
+  // entries during the next num_checks checks. A value of 0 means indefinitely
+  // many checks will tolerate a mismatch. In both cases the checker no longer
+  // tolerates mismatches after the first detected mismatch. Required for tests
+  // covering FI countermeasures with delayed escalation.
+  void TolerateResultMismatch(unsigned int num_checks);
+
  private:
   // If rtl_pending_ and iss_pending_ are not both true, return true
   // immediately with no other change. Otherwise, compare the two pending trace
@@ -82,22 +94,24 @@ class OtbnTraceChecker : public OtbnTraceListener {
   // message to stderr and return false.
   bool MatchPair();
 
+  bool rtl_started_;
   bool rtl_pending_;
-  bool rtl_stall_;
   OtbnTraceEntry rtl_entry_;
-  OtbnTraceEntry rtl_stalled_entry_;
 
   bool iss_started_;
   bool iss_pending_;
   OtbnIssTraceEntry iss_entry_;
 
   bool done_;
+  bool tolerate_result_mismatch_;
+  unsigned int num_tolerating_checks_;
   bool seen_err_;
 
   // The ISS entry for the last pair of trace entries that went through
   // MatchPair.
   bool last_data_vld_;
   OtbnIssTraceEntry::IssData last_data_;
+  bool no_sec_wipe_data_chk_;
 };
 
 #endif  // OPENTITAN_HW_IP_OTBN_DV_MODEL_OTBN_TRACE_CHECKER_H_

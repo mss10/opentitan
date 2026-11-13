@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -15,8 +15,6 @@
 
 extern "C" {
 
-// TODO(udi) might need to implement endian conversion
-
 //////////////////////
 // HELPER FUNCTIONS //
 //////////////////////
@@ -26,14 +24,8 @@ extern "C" {
  */
 static void load_arr_from_simulator(const svOpenArrayHandle arr,
                                     uint8_t *array_out, uint64_t array_len) {
-  svBitVecVal val;
-
-  if (array_len == 0) {
-    return;
-  }
-
-  uint8_t *arr_ptr = (uint8_t *)svGetArrayPtr(arr);
-  for (int i = 0; i < array_len; i++) {
+  for (uint64_t i = 0; i < array_len; i++) {
+    svBitVecVal val;
     svGetBitArrElem1VecVal(&val, arr, i);
     array_out[i] = (uint8_t)val;
   }
@@ -56,7 +48,7 @@ static void write_array_to_simulator(const svOpenArrayHandle arr,
  * Helper function to calculate generic length SHA3 algorithm.
  *
  * Note that `sha_len` can only be in {224, 256, 384, 512} for KMAC HWIP, these
- * lengths are explicitly passsed in from SV code, so no need to use an
+ * lengths are explicitly passed in from SV code, so no need to use an
  * assertion here.
  */
 static void get_sha3_digest(uint64_t sha_len, const svOpenArrayHandle msg,
@@ -225,7 +217,7 @@ extern void c_dpi_cshake256(const svOpenArrayHandle msg,
 extern void c_dpi_kmac128(const svOpenArrayHandle msg, uint64_t msg_len,
                           const svOpenArrayHandle key, uint64_t key_len,
                           const char *customization_str, uint64_t output_len,
-                          svBitVecVal *digest) {
+                          svOpenArrayHandle digest) {
   uint64_t output_len_bits = output_len * 8;
 
   // Load message from SV memory
@@ -263,7 +255,7 @@ extern void c_dpi_kmac128(const svOpenArrayHandle msg, uint64_t msg_len,
 extern void c_dpi_kmac128_xof(const svOpenArrayHandle msg, uint64_t msg_len,
                               const svOpenArrayHandle key, uint64_t key_len,
                               const char *customization_str,
-                              uint64_t output_len, svBitVecVal *digest) {
+                              uint64_t output_len, svOpenArrayHandle digest) {
   // Load message from SV memory
   uint8_t *msg_arr = (uint8_t *)malloc(msg_len * sizeof(uint8_t));
   load_arr_from_simulator(msg, msg_arr, msg_len);
@@ -299,7 +291,7 @@ extern void c_dpi_kmac128_xof(const svOpenArrayHandle msg, uint64_t msg_len,
 extern void c_dpi_kmac256(const svOpenArrayHandle msg, uint64_t msg_len,
                           const svOpenArrayHandle key, uint64_t key_len,
                           const char *customization_str, uint64_t output_len,
-                          svBitVecVal *digest) {
+                          svOpenArrayHandle digest) {
   uint64_t output_len_bits = output_len * 8;
 
   // Load message from SV memory
@@ -337,7 +329,7 @@ extern void c_dpi_kmac256(const svOpenArrayHandle msg, uint64_t msg_len,
 extern void c_dpi_kmac256_xof(const svOpenArrayHandle msg, uint64_t msg_len,
                               const svOpenArrayHandle key, uint64_t key_len,
                               const char *customization_str,
-                              uint64_t output_len, svBitVecVal *digest) {
+                              uint64_t output_len, svOpenArrayHandle digest) {
   // Load message from SV memory
   uint8_t *msg_arr = (uint8_t *)malloc(msg_len * sizeof(uint8_t));
   load_arr_from_simulator(msg, msg_arr, msg_len);

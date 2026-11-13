@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -46,6 +46,9 @@ interface push_pull_if #(parameter int HostDataWidth = 32,
   // This bit controls whether the agent is in bidirectional mode,
   // transferring data on both sides of the handshake.
   bit in_bidirectional_mode;
+
+  // Indicates whether pull interface follows 2-phase (0) or 4-phase (1) handshake.
+  bit is_pull_handshake_4_phase;
 
   // clocking blocks
   clocking host_push_cb @(posedge clk);
@@ -108,7 +111,7 @@ interface push_pull_if #(parameter int HostDataWidth = 32,
   // Whenever valid is asserted, h_data must have a known value.
   `ASSERT_KNOWN_IF(H_DataKnownWhenValid_A, h_data, valid && is_push_agent, clk, !rst_n)
 
-  // Whenver ready is asserted and the agent is in bidirectional mode,
+  // Whenever ready is asserted and the agent is in bidirectional mode,
   // d_data must have a known value.
   `ASSERT_KNOWN_IF(D_DataKnownWhenReady_A, d_data,
                    ready && is_push_agent && in_bidirectional_mode, clk, !rst_n)
@@ -140,7 +143,7 @@ interface push_pull_if #(parameter int HostDataWidth = 32,
   // When req is asserted but ack is low, and the agent is in bidirectional mode,
   // h_data must remain stable.
   `ASSERT_IF(H_DataStableWhenBidirectionalAndReq_A, (req && !ack) |=> $stable(h_data),
-             in_bidirectional_mode, clk, !rst_n)
+             !is_push_agent && in_bidirectional_mode, clk, !rst_n)
 
   // TODO: The following two assertions make a rather important assumption about the req/ack
   //       protocol that will be used for the key/csrng interfaces, which is that no requests
@@ -150,11 +153,23 @@ interface push_pull_if #(parameter int HostDataWidth = 32,
   //       Based on the final decision on this issue, these assertions may have to be removed
   //       if it is allowed for requests to be dropped.
 
-  // ack cannot be 1 if req is not 1.
-  `ASSERT_IF(AckAssertedOnlyWhenReqAsserted_A, ack |-> req, !is_push_agent, clk, !rst_n)
+  // I 2-phase req-ack handshake, ack cannot be 1 if req is not 1.
+  `ASSERT_IF(AckAssertedOnlyWhenReqAsserted_A, ack |-> req,
+             !is_push_agent && !is_pull_handshake_4_phase, clk, !rst_n)
+
+  // Req is asserted only after previous ack is de-asserted.
+  `ASSERT_IF(NoAckOnNewReq_A, $rose(req) |-> !($past(ack, 1)) && !ack,
+             !is_push_agent, clk, !rst_n)
 
   // When req is asserted, it must stay high until a corresponding ack is seen.
-  `ASSERT_IF(ReqHighUntilAck_A, $rose(req) |-> (req throughout ack [->1]),
+  `ASSERT_IF(ReqHighUntilAck_A, $rose(req) |-> (req throughout ack[->1]),
              !is_push_agent, clk, !rst_n)
+
+  // When ack is asserted, it must stay high until a corresponding req is de-asserted,
+  // in case of four-phase handshake.
+  `ASSERT_IF(AckHighUntilReq_A, $rose(ack) |-> (ack throughout (!req[->1])),
+             !is_push_agent && is_pull_handshake_4_phase, clk, !rst_n)
+
+  // TODO: Add support for async clock domains.
 
 endinterface

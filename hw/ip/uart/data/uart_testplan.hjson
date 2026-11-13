@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 {
@@ -6,7 +6,9 @@
   import_testplans: ["hw/dv/tools/dvsim/testplans/csr_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/alert_test_testplan.hjson",
                      "hw/dv/tools/dvsim/testplans/intr_test_testplan.hjson",
-                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson"]
+                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
+                     "uart_sec_cm_testplan.hjson"]
   testpoints: [
     {
       name: smoke
@@ -16,8 +18,8 @@
             - TX and RX have 2 independent threads respectively.
               -  program one Tx item in register and wait for it to complete at uart interface,
                  before send another one
-              - sequencally send one Rx byte, then immediately read from register and check it'''
-      milestone: V1
+              - sequentially send one Rx byte, then immediately read from register and check it'''
+      stage: V1
       tests: ["uart_smoke"]
     }
     {
@@ -28,13 +30,13 @@
               - TX: keep programming csr wdata with random delay when fifo isn't full
               - RX: 2 processes. One is to send item through uart interface when fifo isn't full
                 and the other is to read csr rdata when fifo isn't empty'''
-      milestone: V2
+      stage: V2
       tests: ["uart_tx_rx"]
     }
     {
       name: parity
       desc: '''Send / receive bytes with parity and odd parity enabled randomly.'''
-      milestone: V2
+      stage: V2
       tests: ["uart_smoke", "uart_tx_rx"]
     }
     {
@@ -43,7 +45,7 @@
             - Enable parity and randomly set even/odd parity
             - Inject parity error randomly on data sent from rx and ensure the interrupt is
               raised'''
-      milestone: V2
+      stage: V2
       tests: ["uart_rx_parity_err", "uart_intr"]
     }
     {
@@ -56,13 +58,13 @@
               is asserted
             - Ensure interrupt stays asserted until cleared as well as fifo level dropped.
               The tx/rx watermark interrupt is sticky'''
-      milestone: V2
+      stage: V2
       tests: ["uart_tx_rx", "uart_intr"]
     }
     {
       name: fifo_full
       desc: '''Send over 32 bytes of data but stop when fifo is full'''
-      milestone: V2
+      stage: V2
       tests: ["uart_fifo_full"]
     }
     {
@@ -72,7 +74,7 @@
             - Ensure excess data bytes are dropped and check overflow interrupt
             - This uart_fifo_overflow_vseq is extent from uart_fifo_full_vseq and override the
               constraint to be able to send data over fifo size'''
-      milestone: V2
+      stage: V2
       tests: ["uart_fifo_overflow"]
     }
     {
@@ -82,7 +84,7 @@
               the fifo and ensure that the remaining data bytes do not show up
             - this sequence is extent from uart_fifo_overflow_vseq, so it can also reset when fifo
               is at any level, including full or overflow'''
-      milestone: V2
+      stage: V2
       tests: ["uart_fifo_reset"]
     }
     {
@@ -90,7 +92,7 @@
       desc: '''
             - Inject frame error in parity and non-parity cases by not setting stop bit = 1
             - Ensure the interrupt gets asserted'''
-      milestone: V2
+      stage: V2
       tests: ["uart_intr"]
     }
     {
@@ -100,7 +102,7 @@
             - create a frame error scenario and send random number of 0 bytes
             - If that random number exceeds the programmed break characters
             - Ensure that the break_err interrupt is asserted'''
-      milestone: V2
+      stage: V2
       tests: ["uart_intr"]
     }
     {
@@ -113,22 +115,22 @@
             - Wait until it's about to timeout, then use either read csr rdata or send RX item
               through uart interface to reset timeout timer in order to ensure timeout never
               fires'''
-      milestone: V2
+      stage: V2
       tests: ["uart_intr"]
     }
     {
       name: perf
       desc: '''Run fifo_full_vseq with very small delays'''
-      milestone: V2
+      stage: V2
       tests: ["uart_perf"]
     }
     {
       name: sys_loopback
       desc: '''
-            - Enable system looback, then drive uart TX and data will be loopbacked through RX
+            - Enable system loopback, then drive uart TX and data will be loopbacked through RX
             - After loopback is done, uart.RDATA will be equal to the data programmed to
               uart.WDATA'''
-      milestone: V2
+      stage: V2
       tests: ["uart_loopback"]
     }
     {
@@ -137,7 +139,7 @@
              - Enable line loopback and drive uart_rx with random data and random delay
              - Check uart_tx has same value as uart_rx. There is not synchronizer register between
                uart_rx and uart_tx during line loopback'''
-      milestone: V2
+      stage: V2
       tests: ["uart_loopback"]
     }
     {
@@ -147,9 +149,9 @@
               otherwise, data change won't be taken
             - Enable noise filter and drive many glitches. Each glitch doesn't lasts less than
               3 clocks
-            - Ensure the noise will be filterred out and it doesn't affect next normal
+            - Ensure the noise will be filtered out and it doesn't affect next normal
               transaction'''
-      milestone: V2
+      stage: V2
       tests: ["uart_noise_filter"]
     }
     {
@@ -158,14 +160,14 @@
             - Start bit should last for at least half baud clock, otherwise, it will be dropped
             - It's always enabled. Drive start bit for less than half cycle.
             - Ensure the start bit will be dropped'''
-      milestone: V2
+      stage: V2
       tests: ["uart_rx_start_bit_filter"]
     }
     {
       name: tx_overide
       desc: '''Enable override control and use register programming to drive uart output
             directly.'''
-      milestone: V2
+      stage: V2
       tests: ["uart_tx_ovrd"]
     }
     {
@@ -174,7 +176,7 @@
             - Use 16x baud clock to sample uart rx
             - Drive uart rx with 16 bits value, using 16x baud clock
             - Read RX oversampled value and ensure it's same as driven value'''
-      milestone: V2
+      stage: V2
       tests: ["uart_rx_oversample"]
     }
     {
@@ -183,7 +185,7 @@
             - Reduce delay to fill TX fifo and read RX fifo to ensure back2back transfers
             - Use long back2back transfer to ensure clock difference won't be accumulated across transactions
             - Uart monitor checks the clock offset between sender and receiver is never over 1/4 of the period'''
-      milestone: V2
+      stage: V2
       tests: ["uart_long_xfer_wo_dly"]
     }
     {
@@ -192,14 +194,8 @@
             - Combine above sequences in one test to run sequentially, except csr sequence and
               uart_rx_oversample_vseq (requires zero_delays)
             - Randomly add reset between each sequence'''
-      milestone: V2
+      stage: V2
       tests: ["uart_stress_all"]
-    }
-    {
-      name: stress_all_with_reset
-      desc: '''Have random reset in parallel with stress_all and tl_errors sequences'''
-      milestone: V2
-      tests: ["uart_stress_all_with_rand_reset"]
     }
   ]
 

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -33,10 +33,19 @@ package tlul_pkg;
   parameter int DataMaxWidth    = 32;
   parameter int DataIntgWidth   = 7;
   parameter int DataFullWidth   = DataMaxWidth + DataIntgWidth;
+  parameter int RsvdWidth       = top_pkg::TL_AUW - prim_mubi_pkg::MuBi4Width -
+                                  H2DCmdIntgWidth - DataIntgWidth;
+
+  // Data that is returned upon an a TL-UL error belonging to an instruction fetch.
+  // Note that this data will be returned with the correct bus integrity value.
+  parameter logic [top_pkg::TL_DW-1:0] DataWhenInstrError = '0;
+  // Data that is returned upon an a TL-UL error not belonging to an instruction fetch.
+  // Note that this data will be returned with the correct bus integrity value.
+  parameter logic [top_pkg::TL_DW-1:0] DataWhenError      = {top_pkg::TL_DW{1'b1}};
 
   typedef struct packed {
-    logic [4:0]                 rsvd;
-    prim_mubi_pkg::mubi4_e      instr_type;
+    logic [RsvdWidth-1:0]       rsvd;
+    prim_mubi_pkg::mubi4_t      instr_type;
     logic [H2DCmdIntgWidth-1:0] cmd_intg;
     logic [DataIntgWidth-1:0]   data_intg;
   } tl_a_user_t;
@@ -44,12 +53,12 @@ package tlul_pkg;
   parameter tl_a_user_t TL_A_USER_DEFAULT = '{
     rsvd: '0,
     instr_type: prim_mubi_pkg::MuBi4False,
-    cmd_intg:  '0,
-    data_intg: '0
+    cmd_intg:  {H2DCmdIntgWidth{1'b1}},
+    data_intg: {DataIntgWidth{1'b1}}
   };
 
   typedef struct packed {
-    prim_mubi_pkg::mubi4_e        instr_type;
+    prim_mubi_pkg::mubi4_t        instr_type;
     logic   [top_pkg::TL_AW-1:0]  addr;
     tl_a_op_e                     opcode;
     logic  [top_pkg::TL_DBW-1:0]  mask;
@@ -69,10 +78,19 @@ package tlul_pkg;
     logic                         d_ready;
   } tl_h2d_t;
 
+  // The choice of all 1's as the blanked value is deliberate.
+  // It is assumed that most security features of the design are opt-in instead
+  // of opt-out.
+  // Given the opt-in nature, if a 0 were to propagate, the feature would be turned
+  // off.  Whereas if a 1 were to propagate, it would either stay on or be turned on.
+  // There is however no perfect value for this purpose.
+  localparam logic [top_pkg::TL_DW-1:0] BlankedAData = {top_pkg::TL_DW{1'b1}};
+
   localparam tl_h2d_t TL_H2D_DEFAULT = '{
     d_ready:  1'b1,
     a_opcode: tl_a_op_e'('0),
-    a_user:   tl_a_user_t'('0),
+    a_user:   TL_A_USER_DEFAULT,
+    a_data:   BlankedAData,
     default:  '0
   };
 
@@ -82,8 +100,8 @@ package tlul_pkg;
   } tl_d_user_t;
 
   parameter tl_d_user_t TL_D_USER_DEFAULT = '{
-    rsp_intg: '0,
-    data_intg: '0
+    rsp_intg: {D2HRspIntgWidth{1'b1}},
+    data_intg: {DataIntgWidth{1'b1}}
   };
 
   typedef struct packed {
@@ -115,7 +133,7 @@ package tlul_pkg;
   localparam tl_d2h_t TL_D2H_DEFAULT = '{
     a_ready:  1'b1,
     d_opcode: tl_d_op_e'('0),
-    d_user:   tl_d_user_t'(0),
+    d_user:   TL_D_USER_DEFAULT,
     default:  '0
   };
 
@@ -158,16 +176,45 @@ package tlul_pkg;
     logic [H2DCmdMaxWidth-1:0] unused_cmd_payload;
     tl_h2d_cmd_intg_t cmd;
     cmd = extract_h2d_cmd_intg(tl);
-    {cmd_intg, unused_cmd_payload} = prim_secded_pkg::prim_secded_64_57_enc(H2DCmdMaxWidth'(cmd));
+    {cmd_intg, unused_cmd_payload} =
+        prim_secded_pkg::prim_secded_inv_64_57_enc(H2DCmdMaxWidth'(cmd));
    return cmd_intg;
   endfunction  // get_cmd_intg
+
+  // calculate ecc for response checking
+  function automatic logic [D2HRspIntgWidth-1:0] get_rsp_intg(tl_d2h_t tl);
+    logic [D2HRspIntgWidth-1:0] rsp_intg;
+    logic [D2HRspMaxWidth-1:0] unused_rsp_payload;
+    tl_d2h_rsp_intg_t rsp;
+    rsp = extract_d2h_rsp_intg(tl);
+    {rsp_intg, unused_rsp_payload} =
+        prim_secded_pkg::prim_secded_inv_64_57_enc(D2HRspMaxWidth'(rsp));
+    return rsp_intg;
+  endfunction  // get_rsp_intg
 
   // calculate ecc for data checking
   function automatic logic [DataIntgWidth-1:0] get_data_intg(logic [top_pkg::TL_DW-1:0] data);
     logic [DataIntgWidth-1:0] data_intg;
     logic [top_pkg::TL_DW-1:0] unused_data;
-    {data_intg, unused_data} = prim_secded_pkg::prim_secded_39_32_enc(data);
+    logic [DataIntgWidth + top_pkg::TL_DW - 1 : 0] enc_data;
+    enc_data = prim_secded_pkg::prim_secded_inv_39_32_enc(data);
+    data_intg = enc_data[DataIntgWidth + top_pkg::TL_DW - 1 : top_pkg::TL_DW];
+    unused_data = enc_data[top_pkg::TL_DW - 1 : 0];
     return data_intg;
   endfunction  // get_data_intg
+
+  // return inverted integrity for command payload
+  function automatic logic [H2DCmdIntgWidth-1:0] get_bad_cmd_intg(tl_h2d_t tl);
+    logic [H2DCmdIntgWidth-1:0] cmd_intg;
+    cmd_intg = get_cmd_intg(tl);
+    return ~cmd_intg;
+  endfunction // get_bad_cmd_intg
+
+  // return inverted integrity for data payload
+  function automatic logic [H2DCmdIntgWidth-1:0] get_bad_data_intg(logic [top_pkg::TL_DW-1:0] data);
+    logic [H2DCmdIntgWidth-1:0] data_intg;
+    data_intg = get_data_intg(data);
+    return ~data_intg;
+  endfunction // get_bad_data_intg
 
 endpackage

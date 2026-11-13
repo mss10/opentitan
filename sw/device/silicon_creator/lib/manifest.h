@@ -1,19 +1,23 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 #ifndef OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_MANIFEST_H_
 #define OPENTITAN_SW_DEVICE_SILICON_CREATOR_LIB_MANIFEST_H_
 
+#include <limits.h>
 #include <stddef.h>
 
 #include "sw/device/lib/base/macros.h"
+#include "sw/device/silicon_creator/lib/base/chip.h"
 #include "sw/device/silicon_creator/lib/drivers/lifecycle.h"
-#include "sw/device/silicon_creator/lib/epmp.h"
+#include "sw/device/silicon_creator/lib/epmp_state.h"
 #include "sw/device/silicon_creator/lib/error.h"
-#include "sw/device/silicon_creator/lib/keymgr_binding_value.h"
-#include "sw/device/silicon_creator/lib/manifest_size.h"
-#include "sw/device/silicon_creator/lib/sigverify_rsa_key.h"
+#include "sw/device/silicon_creator/lib/keymgr_dpe_binding_value.h"
+#include "sw/device/silicon_creator/lib/sigverify/ecdsa_p256_key.h"
+#include "sw/device/silicon_creator/lib/sigverify/mldsa87_key.h"
+#include "sw/device/silicon_creator/lib/sigverify/rsa_key.h"
+#include "sw/device/silicon_creator/lib/sigverify/spx_key.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,7 +47,7 @@ typedef struct manifest_usage_constraints {
   uint32_t selector_bits;
   /**
    * Device identifier value which is compared against the `DEVICE_ID` value
-   * stored in the `HW_CFG` partition in OTP.
+   * stored in the `HW_CFG0` partition in OTP.
    *
    * Mapped to bits 0-7 of `selector_bits`.
    */
@@ -103,11 +107,82 @@ enum {
 };
 
 /**
+ * Manifest timestamp.
+ */
+typedef struct manifest_timestamp {
+  /**
+   * Least significant word of the timestamp.
+   */
+  uint32_t timestamp_low;
+  /**
+   * Most significant word of the timestamp.
+   */
+  uint32_t timestamp_high;
+} manifest_timestamp_t;
+
+/**
+ * Manifest extensions table entry.
+ *
+ * An extension with index `i` exists if the `identifier` of the `i`th entry in
+ * the extension table matches the `identifier` of the extension and its
+ * `offset` is greater than zero.
+ */
+typedef struct manifest_ext_table_entry {
+  /**
+   * Extension identifier.
+   *
+   * Must match the `identifier` value in the extension's header.
+   */
+  uint32_t identifier;
+  /**
+   * Offset of this extension relative to the start of the manifest.
+   */
+  uint32_t offset;
+} manifest_ext_table_entry_t;
+
+/**
+ * Manifest extensions table.
+ */
+typedef struct manifest_ext_table {
+  manifest_ext_table_entry_t entries[CHIP_MANIFEST_EXT_TABLE_ENTRY_COUNT];
+} manifest_ext_table_t;
+
+/**
+ * Manifest version.
+ */
+typedef struct manifest_version {
+  /**
+   * Minor manifest format version.
+   *
+   * ROM doesn't check this field. Thus, this field can be used to update the
+   * manifest format without breaking the forward compatibility of ROM.
+   */
+  uint16_t minor;
+  /**
+   * Major manifest format version.
+   *
+   * This field can be used to maintain or break forward compatibility in ROM
+   * while preserving backward compatibility in ROM_EXT. ROM requires the major
+   * version to be `kManifestFormatVersionMajor2`.
+   */
+  uint16_t major;
+} manifest_version_t;
+
+/**
+ * Manifest versions.
+ */
+enum {
+  kManifestVersionMajor1 = CHIP_MANIFEST_VERSION_MAJOR_1,
+  kManifestVersionMajor2 = CHIP_MANIFEST_VERSION_MAJOR_2,
+  kManifestVersionMinor1 = CHIP_MANIFEST_VERSION_MINOR_1,
+};
+
+/**
  * Manifest for boot stage images stored in flash.
  *
  * OpenTitan secure boot, at a minimum, consists of three boot stages: ROM,
  * ROM_EXT, and the first owner boot stage, e.g. BL0. ROM is stored in the
- * read-only Mask ROM while remaining stages are stored in flash. This structure
+ * read-only ROM while remaining stages are stored in flash. This structure
  * must be placed at the start of ROM_EXT and first owner boot stage images so
  * that ROM and ROM_EXT can verify the integrity and authenticity of the next
  * stage and configure peripherals as needed before handing over execution.
@@ -121,11 +196,7 @@ enum {
  */
 typedef struct manifest {
   /**
-   * Image signature.
-   *
-   * RSASSA-PKCS1-v1_5 signature of the image generated using a 3072-bit RSA
-   * private key and the SHA-256 hash function. The signed region of an image
-   * starts immediately after this field and ends at the end of the image.
+   * The kManifestVersionMajor2 manifest only ecdsa-p256-sha256 signature.
    *
    * On-target verification should also integrate usage constraints comparison
    * to signature verification to harden it against potential attacks. During
@@ -139,23 +210,64 @@ typedef struct manifest {
    * usage constraints read from the hardware can be obtained using
    * `manifest_digest_region_get()`.
    */
-  sigverify_rsa_buffer_t signature;
+  /**
+   * ECDSA P256 signature of the image.
+   *
+   * ECDSA P256 signature of the image generated using a NIST P256 ECC key
+   * and the SHA-256 hash function.
+   */
+  ecdsa_p256_signature_t ecdsa_signature;
+  /**
+   * Reserved bytes for signature.
+   */
+  uint32_t reserved_signature[40];
+  /**
+   * Reserved bytes. These bytes are not signed by the signature above.
+   *
+   * The signed region of an image starts immediately after this field and ends
+   * at the end of the image.
+   */
+  uint32_t reserved_unsigned[40];
   /**
    * Usage constraints.
    */
   manifest_usage_constraints_t usage_constraints;
   /**
-   * Modulus of the signer's 3072-bit RSA public key.
+   * Signer's ECDSA NIST P256 ECC public key.
    */
-  sigverify_rsa_buffer_t modulus;
+  ecdsa_p256_public_key_t ecdsa_public_key;
   /**
-   * Exponent of the signer's RSA public key.
+   * Reserved bytes for public key.
    */
-  uint32_t exponent;
+  uint32_t reserved_public_key[40];
+  /**
+   * Reserved bytes.
+   *
+   * When allocating reserved bytes, please allocate from the end of this field
+   * to allow for the potential size expansion of the public key field above.
+   */
+  uint32_t reserved[40];
+  /**
+   * Address translation (hardened boolean).
+   */
+  uint32_t address_translation;
   /**
    * Manifest identifier.
    */
   uint32_t identifier;
+  /**
+   * Manifest format major and minor version.
+   *
+   * These version values can be used to maintain or break forward compatibility
+   * in ROM while preserving backward compatibility in ROM_EXT. ROM requires the
+   * major version to be `kManifestVersionMajor2`.
+   */
+  manifest_version_t manifest_version;
+  /**
+   * Offset of the end of the signed region relative to the start of the
+   * manifest.
+   */
+  uint32_t signed_region_end;
   /**
    * Length of the image including the manifest in bytes.
    *
@@ -181,7 +293,7 @@ typedef struct manifest {
    * Unix timestamp that gives the creation time of the image, seconds since
    * 00:00:00 on January 1, 1970 UTC (the Unix Epoch).
    */
-  uint64_t timestamp;
+  manifest_timestamp_t timestamp;
   /**
    * Binding value used by key manager to derive secret values.
    *
@@ -189,7 +301,7 @@ typedef struct manifest {
    * consequently, the versioned keys and identity seeds generated at subsequent
    * boot stages.
    */
-  keymgr_binding_value_t binding_value;
+  keymgr_dpe_binding_value_t binding_value;
   /**
    * Maximum allowed version for keys generated at the next boot stage.
    */
@@ -209,24 +321,35 @@ typedef struct manifest {
    * the manifest in bytes.
    */
   uint32_t entry_point;
+  /**
+   * Extensions.
+   */
+  manifest_ext_table_t extensions;
 } manifest_t;
 
-OT_ASSERT_MEMBER_OFFSET(manifest_t, signature, 0);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, ecdsa_signature, 0);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, reserved_signature, 64);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, reserved_unsigned, 224);
 OT_ASSERT_MEMBER_OFFSET(manifest_t, usage_constraints, 384);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, modulus, 432);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, exponent, 816);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, ecdsa_public_key, 432);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, reserved_public_key, 496);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, reserved, 656);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, address_translation, 816);
 OT_ASSERT_MEMBER_OFFSET(manifest_t, identifier, 820);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, length, 824);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, version_major, 828);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, version_minor, 832);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, security_version, 836);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, timestamp, 840);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, binding_value, 848);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, max_key_version, 880);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, code_start, 884);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, code_end, 888);
-OT_ASSERT_MEMBER_OFFSET(manifest_t, entry_point, 892);
-OT_ASSERT_SIZE(manifest_t, MANIFEST_SIZE);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, manifest_version, 824);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, signed_region_end, 828);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, length, 832);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, version_major, 836);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, version_minor, 840);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, security_version, 844);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, timestamp, 848);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, binding_value, 856);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, max_key_version, 888);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, code_start, 892);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, code_end, 896);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, entry_point, 900);
+OT_ASSERT_MEMBER_OFFSET(manifest_t, extensions, 904);
+OT_ASSERT_SIZE(manifest_t, CHIP_MANIFEST_SIZE);
 
 /**
  * Region of an image that should be included in the digest computation.
@@ -243,29 +366,274 @@ typedef struct manifest_digest_region {
 } manifest_digest_region_t;
 
 /**
- * ROM_EXT manifest identifier (ASCII "OTRE").
+ * Required manifest extension header.
  */
-#define MANIFEST_IDENTIFIER_ROM_EXT 0x4552544f
+typedef struct manifest_ext_header {
+  /**
+   * Identifier.
+   *
+   * A high HW constant with a realively high HD from other extensions'
+   * identifiers.
+   */
+  uint32_t identifier;
+  /**
+   * Name.
+   *
+   * 4 ASCII characters for ease of debugging.
+   */
+  uint32_t name;
+} manifest_ext_header_t;
 
 /**
- * First owner boot stage manifest identifier (ASCII "OTSO").
+ * Extension identifiers and names.
  */
-#define MANIFEST_IDENTIFIER_OWNER_STAGE 0x4f53544f
+enum {
+  /**
+   * Identifiers.
+   *
+   * These are high HW constants with a relatively high HD from each other.
+   */
+  kManifestExtIdSpxKey = 0x94ac01ec,
+  kManifestExtIdSpxSignature = 0xad77f84a,
+  kManifestExtIdSecVerWrite = 0x3f086a41,
+  kManifestExtIdMldsa87Key = 0xa3e247b8,
+  kManifestExtIdMldsa87Signature = 0x4714ac7d,
+
+  /**
+   * ASCII "ISFB".
+   *
+   * Integration Specific Firmware Binding (ISFB) extension.
+   */
+  kManifestExtIdIsfb = 0x42465349,
+  /**
+   * ASCII "ISFE".
+   *
+   * Integration Specific Firmware Binding (ISFB) erase policy extension.
+   */
+  kManifestExtIdIsfbErase = 0x45465349,
+  /**
+   * ASCII "OWTB".
+   */
+  kManifestExtIdOwnerTransferBlob = 0x4254574f,
+  /**
+   * ASCII "EXT0".
+   */
+  kManifestExtNameSpxKey = 0x30545845,
+  /**
+   * ASCII "EXT1".
+   */
+  kManifestExtNameSpxSignature = 0x31545845,
+  /**
+   * ASCII "ML8K".
+   */
+  kManifestExtNameMldsa87Key = 0x4b384c4d,
+  /**
+   * ASCII "ML8S".
+   */
+  kManifestExtNameMldsa87Signature = 0x53384c4d,
+};
 
 /**
- * Allowed bounds for the `length` field of a ROM_EXT manifest.
+ * Manifest extension: SPHINCS+ public key.
  */
-// FIXME: Update min value after we have a fairly representative ROM_EXT.
-#define MANIFEST_LENGTH_FIELD_ROM_EXT_MIN MANIFEST_SIZE
-#define MANIFEST_LENGTH_FIELD_ROM_EXT_MAX 0x10000
+typedef struct manifest_ext_spx_key {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * SPHINCS+ public key used to sign the image.
+   */
+  sigverify_spx_key_t key;
+} manifest_ext_spx_key_t;
 
 /**
- * Allowed bounds for the `length` field of a first owner boot stage manifest.
+ * Manifest extension: SPHINCS+ signature.
  */
-#define MANIFEST_LENGTH_FIELD_OWNER_STAGE_MIN MANIFEST_SIZE
-#define MANIFEST_LENGTH_FIELD_OWNER_STAGE_MAX 0x70000
+typedef struct manifest_ext_spx_signature {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * SPHINCS+ signature of the image.
+   */
+  sigverify_spx_signature_t signature;
+} manifest_ext_spx_signature_t;
 
-#ifndef OT_OFF_TARGET_TEST
+/**
+ * Manifest extension: ML-DSA-87 public key.
+ */
+typedef struct manifest_ext_mldsa87_key {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * ML-DSA-87 public key used to sign the image.
+   */
+  sigverify_mldsa87_key_t key;
+} manifest_ext_mldsa87_key_t;
+OT_ASSERT_SIZE(manifest_ext_mldsa87_key_t, 2600);
+
+/**
+ * Manifest extension: ML-DSA-87 signature.
+ */
+typedef struct manifest_ext_mldsa87_signature {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * ML-DSA-87 signature of the image.
+   */
+  sigverify_mldsa87_signature_t signature;
+} manifest_ext_mldsa87_signature_t;
+OT_ASSERT_SIZE(manifest_ext_mldsa87_signature_t, 4636);
+
+/**
+ * Manifest extension: Write the securty version.
+ */
+typedef struct manifest_ext_secver_write {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * Hardened bool indicating whether or not to write the security version to
+   * boot data.
+   */
+  uint32_t write;
+} manifest_ext_secver_write_t;
+
+/**
+ * Product expression used in the `manifest_ext_isfb_t` extension.
+ *
+ * The product expression is a 32-bit value that is compared against the product
+ * word in the ISFB info flash page. The comparison is done by applying the mask
+ * to the product word and comparing the result to the value.
+ */
+typedef struct manifest_ext_product_expr {
+  uint32_t mask;
+  uint32_t value;
+} manifest_ext_product_expr_t;
+OT_ASSERT_SIZE(manifest_ext_product_expr_t, 8);
+
+/**
+ * Manifest extension: Integration Specific Firmware Binding (ISFB).
+ *
+ * The Integration Specific Firmware Binding (ISFB) extension is used to bind
+ * firmware to certain integrator-device phases (e.g. restrict firmware to
+ * unreleased integrator devices only). The `ROM_EXT` needs to perform these
+ * constraint checks instead of the firmware because the rescure protocol
+ * bypasses any owner firmware level enforcement.
+ *
+ * This extension also provides a mechanism to enable firmware owners to perform
+ * their own rollback and upgrade automated testing. The rollback policy is
+ * implemented on top of the `strike_bits` provided in the ISFB info flash
+ * region.
+ */
+typedef struct manifest_ext_isfb {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * Strikeout mask.
+   *
+   * The size of this array is equal to 128 strike bits packed into uint32_t
+   * words. Each strike bit corresponds to a uint32_t word in the ISFB info
+   * flash page.
+   *
+   * For each 1-bit in the strike mask, the corresponding flash word in the ISFB
+   * info flash page must have a non-zero value.
+   */
+  uint32_t strike_mask[128 / (CHAR_BIT * sizeof(uint32_t))];
+  /**
+   * Number of product expressions that follow. Must be less than or equal to
+   * the number of `product_words` in the `owner_isfb_config_t` configuration.
+   */
+  uint32_t product_expr_count;
+  /**
+   * Product expressions. The size of this array is equal to
+   * `product_expr_count`.
+   */
+  manifest_ext_product_expr_t product_expr[];
+} manifest_ext_isfb_t;
+OT_ASSERT_MEMBER_OFFSET(manifest_ext_isfb_t, header, 0);
+OT_ASSERT_MEMBER_OFFSET(manifest_ext_isfb_t, strike_mask, 8);
+OT_ASSERT_MEMBER_OFFSET(manifest_ext_isfb_t, product_expr_count, 24);
+OT_ASSERT_MEMBER_OFFSET(manifest_ext_isfb_t, product_expr, 28);
+OT_ASSERT_SIZE(manifest_ext_isfb_t, 28);
+
+/**
+ * Manifest extension: ISFB erase policy.
+ *
+ * The ISFB erase policy extension is used to allow or disallow erasing the ISFB
+ * info flash region.
+ *
+ * This extension should be attached to the firmware's signed manifest to
+ * indicate that a firmware image may erase the ISFB info page.  This extension
+ * is required when the configuration indicates that the isfb_erase extension
+ * must be present to authorize erase operations.
+ */
+typedef struct manifest_ext_isfb_erase {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * Hardened bool indicating whether or not to allow erasing the ISFB region.
+   */
+  uint32_t erase_allowed;
+} manifest_ext_isfb_erase_t;
+
+/**
+ * Manifest extension: Owner Transfer Blob.
+ */
+typedef struct manifest_ext_owner_transfer_blob {
+  /**
+   * Required manifest header.
+   */
+  manifest_ext_header_t header;
+  /**
+   * Owner block configuration.
+   *
+   * Note: The detached signature is a variable-sized struct and has an
+   * independent scanning function, so it is included as a flexible array
+   * member below to document its possible existence. Omitting a fixed-size
+   * signature from this struct does not affect manifest extension access,
+   * since the offset for subsequent extensions is calculated by the host tool
+   * and explicitly listed in the manifest extension table.
+   */
+  uint8_t owner_block[2048];
+  /**
+   * Detached signature.
+   */
+  uint8_t detached_signature[];
+} manifest_ext_owner_transfer_blob_t;
+
+/**
+ * Table of manifest extensions.
+ *
+ * Columns: Table index, type name, extenstion name, identifier, signed or not.
+ *
+ * Indices 0 to 5 are fixed by Earl Grey 1.0.0 and must not be reused. Index 5
+ * is the `owner_transfer_blob` extension on the `earlgrey_1.0.0` branch.
+ */
+// clang-format off
+#define MANIFEST_EXTENSIONS(X) \
+  X(0, manifest_ext_spx_key_t,             spx_key,             kManifestExtIdSpxKey,            true ) \
+  X(1, manifest_ext_spx_signature_t,       spx_signature,       kManifestExtIdSpxSignature,      false) \
+  X(2, manifest_ext_secver_write_t,        secver_write,        kManifestExtIdSecVerWrite,       true)  \
+  X(3, manifest_ext_isfb_t,                isfb,                kManifestExtIdIsfb,              true)  \
+  X(4, manifest_ext_isfb_erase_t,          isfb_erase,          kManifestExtIdIsfbErase,         true)  \
+  X(5, manifest_ext_owner_transfer_blob_t, owner_transfer_blob, kManifestExtIdOwnerTransferBlob, false) \
+  X(6, manifest_ext_mldsa87_key_t,         mldsa87_key,         kManifestExtIdMldsa87Key,        true)  \
+  X(7, manifest_ext_mldsa87_signature_t,   mldsa87_signature,   kManifestExtIdMldsa87Signature,  false)
+// clang-format on
+
+#if defined(OT_PLATFORM_RV32) || defined(MANIFEST_UNIT_TEST_)
 /**
  * Checks the fields of a manifest.
  *
@@ -277,12 +645,23 @@ typedef struct manifest_digest_region {
  * @param manfiest A manifest.
  * @return Result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 inline rom_error_t manifest_check(const manifest_t *manifest) {
-  // Executable region must be empty, inside the image, located after the
-  // manifest, and word aligned.
+  // Major version must be `kManifestVersionMajor2`.
+  if (manifest->manifest_version.major != kManifestVersionMajor2) {
+    return kErrorManifestBadVersionMajor;
+  }
+
+  // Signed region must be inside the image.
+  if (manifest->signed_region_end > manifest->length) {
+    return kErrorManifestBadSignedRegion;
+  }
+
+  // Executable region must be non-empty, inside the signed region, located
+  // after the manifest, and word aligned.
   if (manifest->code_start >= manifest->code_end ||
       manifest->code_start < sizeof(manifest_t) ||
-      manifest->code_end > manifest->length ||
+      manifest->code_end > manifest->signed_region_end ||
       (manifest->code_start & 0x3) != 0 || (manifest->code_end & 0x3) != 0) {
     return kErrorManifestBadCodeRegion;
   }
@@ -292,6 +671,18 @@ inline rom_error_t manifest_check(const manifest_t *manifest) {
       manifest->entry_point >= manifest->code_end ||
       (manifest->entry_point & 0x3) != 0) {
     return kErrorManifestBadEntryPoint;
+  }
+
+  // Manifest extension offset must be word aligned and within the image.
+  for (size_t i = 0; i < CHIP_MANIFEST_EXT_TABLE_ENTRY_COUNT; ++i) {
+    uint32_t offset = manifest->extensions.entries[i].offset;
+    if (offset != 0) {
+      if ((offset & 0x3) != 0 || offset < sizeof(manifest_t) ||
+          manifest->length < sizeof(manifest_ext_header_t) ||
+          offset > manifest->length - sizeof(manifest_ext_header_t)) {
+        return kErrorManifestBadExtension;
+      }
+    }
   }
 
   return kErrorOk;
@@ -308,15 +699,16 @@ inline rom_error_t manifest_check(const manifest_t *manifest) {
  * return digest_region Region of the image that should be included in the
  * digest computation.
  */
+OT_WARN_UNUSED_RESULT
 inline manifest_digest_region_t manifest_digest_region_get(
     const manifest_t *manifest) {
   enum {
-    kDigestRegionOffset =
-        sizeof(manifest->signature) + sizeof(manifest->usage_constraints),
+    kDigestRegionOffset = offsetof(manifest_t, usage_constraints) +
+                          sizeof(manifest->usage_constraints),
   };
   return (manifest_digest_region_t){
       .start = (const char *)manifest + kDigestRegionOffset,
-      .length = manifest->length - kDigestRegionOffset,
+      .length = manifest->signed_region_end - kDigestRegionOffset,
   };
 }
 
@@ -326,10 +718,11 @@ inline manifest_digest_region_t manifest_digest_region_get(
  * @param manifest A manifest.
  * return Executable region of the image.
  */
+OT_WARN_UNUSED_RESULT
 inline epmp_region_t manifest_code_region_get(const manifest_t *manifest) {
   return (epmp_region_t){
-      .start = (uintptr_t)manifest + manifest->code_start,
-      .end = (uintptr_t)manifest + manifest->code_end,
+      .start = (ot_word_t)manifest + manifest->code_start,
+      .end = (ot_word_t)manifest + manifest->code_end,
   };
 }
 
@@ -344,10 +737,51 @@ inline epmp_region_t manifest_code_region_get(const manifest_t *manifest) {
  * @param manfiest A manifest.
  * return Entry point address.
  */
+OT_WARN_UNUSED_RESULT
 inline uintptr_t manifest_entry_point_get(const manifest_t *manifest) {
   return (uintptr_t)manifest + manifest->entry_point;
 }
-#else
+
+#define DEFINE_GETTER(index_, type_, name_, id_, _)                            \
+  OT_WARN_UNUSED_RESULT                                                        \
+                                                                               \
+  inline rom_error_t manifest_ext_get_##name_(const manifest_t *manifest,      \
+                                              const type_ **name_) {           \
+    enum {                                                                     \
+      kMinSize = CHIP_MANIFEST_SIZE,                                           \
+      kMaxSize = CHIP_ROM_EXT_RESIZABLE_SIZE_MAX - sizeof(type_),              \
+    };                                                                         \
+    const manifest_ext_table_entry_t *entry =                                  \
+        &manifest->extensions.entries[index_];                                 \
+    uint32_t table_id = entry->identifier;                                     \
+    uint32_t offset = entry->offset;                                           \
+    if (launder32(table_id) == id_) {                                          \
+      HARDENED_CHECK_EQ(table_id, id_);                                        \
+      if (launder32(offset) >= kMinSize && launder32(offset) < kMaxSize &&     \
+          launder32(manifest->length) >= sizeof(type_) &&                      \
+          launder32(offset) <= launder32(manifest->length) - sizeof(type_)) {  \
+        HARDENED_CHECK_GE(offset, kMinSize);                                   \
+        HARDENED_CHECK_LT(offset, kMaxSize);                                   \
+        HARDENED_CHECK_LE(offset, manifest->length - sizeof(type_));           \
+        uintptr_t ext_address = (uintptr_t)((char *)manifest + entry->offset); \
+        uint32_t header_id =                                                   \
+            ((manifest_ext_header_t *)ext_address)->identifier;                \
+        if (launder32(header_id) == id_) {                                     \
+          HARDENED_CHECK_EQ(header_id, id_);                                   \
+          *name_ = (const type_ *)ext_address;                                 \
+          return kErrorOk;                                                     \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+    return kErrorManifestBadExtension;                                         \
+  }
+
+/**
+ * Getters for manifest extensions.
+ */
+MANIFEST_EXTENSIONS(DEFINE_GETTER)
+
+#else  // defined(OT_PLATFORM_RV32) || defined(MANIFEST_UNIT_TEST_)
 /**
  * Declarations for the functions above that should be defined in tests.
  */
@@ -355,7 +789,24 @@ rom_error_t manifest_check(const manifest_t *manifest);
 manifest_digest_region_t manifest_digest_region_get(const manifest_t *manifest);
 epmp_region_t manifest_code_region_get(const manifest_t *manifest);
 uintptr_t manifest_entry_point_get(const manifest_t *manifest);
-#endif
+
+// Manifest extension getters.
+rom_error_t manifest_ext_get_spx_key(const manifest_t *manifest,
+                                     const manifest_ext_spx_key_t **spx_key);
+rom_error_t manifest_ext_get_spx_signature(
+    const manifest_t *manifest,
+    const manifest_ext_spx_signature_t **spx_signature);
+rom_error_t manifest_ext_get_isfb(const manifest_t *manifest,
+                                  const manifest_ext_isfb_t **isfb);
+rom_error_t manifest_ext_get_isfb_erase(
+    const manifest_t *manifest, const manifest_ext_isfb_erase_t **isfb_erase);
+rom_error_t manifest_ext_get_mldsa87_key(
+    const manifest_t *manifest, const manifest_ext_mldsa87_key_t **mldsa87_key);
+rom_error_t manifest_ext_get_mldsa87_signature(
+    const manifest_t *manifest,
+    const manifest_ext_mldsa87_signature_t **mldsa87_signature);
+
+#endif  // defined(OT_PLATFORM_RV32) || defined(MANIFEST_UNIT_TEST_)
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,4 +12,8 @@
 `include "alert_handler_sig_int_fail_vseq.sv"
 `include "alert_handler_entropy_vseq.sv"
 `include "alert_handler_ping_timeout_vseq.sv"
+`include "alert_handler_lpg_vseq.sv"
+`include "alert_handler_lpg_stub_clk_vseq.sv"
+`include "alert_handler_entropy_stress_vseq.sv"
 `include "alert_handler_stress_all_vseq.sv"
+`include "alert_handler_alert_accum_saturation_vseq.sv"

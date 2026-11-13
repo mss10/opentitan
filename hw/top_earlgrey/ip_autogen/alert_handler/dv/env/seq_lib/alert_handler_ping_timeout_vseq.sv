@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -14,7 +14,7 @@ class alert_handler_ping_timeout_vseq extends alert_handler_entropy_vseq;
   `uvm_object_new
 
   constraint num_trans_c {
-    num_trans inside {[1:10]};
+    num_trans inside {[5:30]};
   }
 
   constraint alert_trigger_c {
@@ -32,12 +32,22 @@ class alert_handler_ping_timeout_vseq extends alert_handler_entropy_vseq;
   }
 
   constraint loc_alert_en_c {
-    local_alert_en[LocalEscPingFail:LocalAlertPingFail] > 0;
+    local_alert_en[LocalEscPingFail] == 1;
+    local_alert_en[LocalAlertPingFail] == 1;
   }
 
   constraint ping_fail_c {
     alert_ping_timeout == '1;
     esc_ping_timeout   == '1;
+  }
+
+  // At least enable and lock `NUM_ALERTS-4` alerts to avoid this sequence running too long.
+  // This constraint also ensures at least one alert is locked and enabled so that we can ensure at
+  // least one alert ping will fire.
+  constraint enable_one_alert_c {
+    $countones(alert_en)      dist {NUM_ALERTS :/ 8, [NUM_ALERTS-4 : NUM_ALERTS-1] :/ 2};
+    $countones(~alert_regwen) dist {NUM_ALERTS :/ 5, [NUM_ALERTS-4 : NUM_ALERTS-1] :/ 5};
+    (~alert_regwen) & alert_en > 0;
   }
 
   constraint ping_timeout_cyc_c {
@@ -54,7 +64,7 @@ class alert_handler_ping_timeout_vseq extends alert_handler_entropy_vseq;
   endfunction
 
   // In this sequence, because we disable all external alerts, so to ensure local alerts are
-  // triggerd, we wait for interrupt pins to fire then wait for alert and escalation handshake
+  // triggered, we wait for interrupt pins to fire then wait for alert and escalation handshake
   // to finish.
   virtual task wait_alert_esc_done();
     wait (cfg.intr_vif.pins[NUM_ALERT_CLASSES-1:0]);

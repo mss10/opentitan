@@ -40,9 +40,20 @@ license = """\
 // Auto-generated code
 """
 
+# The CHERIoT ROM also carries the copyright of its CHERIoT conversion.
+cheriot_license = """\
+/*
+ * Copyright lowRISC contributors (OpenTitan project).
+ *
+ * Conversion to CHERIoT Ibex ISA from RISC-V
+ *   Copyright SCI Semiconductor 2025
+ *
+""" + license.replace("/* Copyright 2018", " * Copyright 2018", 1)
+
 module = """\
 module $filename (
   input  logic         clk_i,
+  input  logic         rst_ni,
   input  logic         req_i,
   input  logic [63:0]  addr_i,
   output logic [63:0]  rdata_o
@@ -55,11 +66,15 @@ module $filename (
 $content
   };
 
-  logic [$$clog2(RomSize)-1:0] addr_q;
+  logic [$$clog2(RomSize)-1:0] addr_d, addr_q;
 
-  always_ff @(posedge clk_i) begin
-    if (req_i) begin
-      addr_q <= addr_i[$$clog2(RomSize)-1+3:3];
+  assign addr_d = req_i ? addr_i[$$clog2(RomSize)-1+3:3] : addr_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      addr_q <= '0;
+    end else begin
+      addr_q <= addr_d;
     end
   end
 
@@ -68,7 +83,7 @@ $content
   always_comb begin : p_outmux
     rdata_o = '0;
     if (addr_q < $$clog2(RomSize)'(RomSize)) begin
-        rdata_o = mem[addr_q];
+      rdata_o = mem[addr_q];
     end
   end
 
@@ -88,9 +103,8 @@ $content
 def read_bin():
 
     with open(filename + ".img", 'rb') as f:
-        rom = binascii.hexlify(f.read())
-        rom = map(''.join, zip(rom[::2], rom[1::2]))
-
+        rom = bytes.hex(f.read())
+        rom = list(map(''.join, zip(rom[::2], rom[1::2])))
 
     # align to 64 bit
     align = (int((len(rom) + 7) / 8 )) * 8;
@@ -129,6 +143,6 @@ with open(filename + ".sv", "w") as f:
     # remove the trailing comma
     rom_str = rom_str[:-2]
 
-    f.write(license)
+    f.write(cheriot_license if filename.endswith("_cheriot") else license)
     s = Template(module)
     f.write(s.substitute(filename=filename, size=int(len(rom)/8), content=rom_str))

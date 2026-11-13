@@ -1,4 +1,4 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,13 +7,14 @@
 
 /**
  * @file
- * @brief <a href="/hw/ip/uart/doc/">UART</a> Device Interface Functions
+ * @brief <a href="/book/hw/ip/uart/">UART</a> Device Interface Functions
  */
 
 #include <stdint.h>
 
 #include "sw/device/lib/base/mmio.h"
 
+#include "hw/top/uart_regs.h"
 #include "sw/device/lib/dif/autogen/dif_uart_autogen.h"
 
 #ifdef __cplusplus
@@ -33,6 +34,17 @@ typedef enum dif_uart_parity {
    */
   kDifUartParityEven,
 } dif_uart_parity_t;
+
+/**
+ * Number of characters that the UART RX line should be held low for to trigger
+ * a line break error.
+ */
+typedef enum dif_uart_rx_break_level {
+  kDifUartRxBreakLevel2 = UART_CTRL_RXBLVL_VALUE_BREAK2,
+  kDifUartRxBreakLevel4 = UART_CTRL_RXBLVL_VALUE_BREAK4,
+  kDifUartRxBreakLevel8 = UART_CTRL_RXBLVL_VALUE_BREAK8,
+  kDifUartRxBreakLevel16 = UART_CTRL_RXBLVL_VALUE_BREAK16,
+} dif_uart_rx_break_level_t;
 
 /**
  * Runtime configuration for UART.
@@ -57,6 +69,18 @@ typedef struct dif_uart_config {
    * The parity to set.
    */
   dif_uart_parity_t parity;
+  /**
+   * Whether to enable TX datapath.
+   */
+  dif_toggle_t tx_enable;
+  /**
+   * Whether to enable RX datapath.
+   */
+  dif_toggle_t rx_enable;
+  /**
+   * Number of characters at which the RX line break error is triggered.
+   */
+  dif_uart_rx_break_level_t rx_break_level;
 } dif_uart_config_t;
 
 /**
@@ -67,6 +91,10 @@ typedef enum dif_uart_watermark {
    * Indicates a one-byte watermark.
    */
   kDifUartWatermarkByte1 = 0,
+  /**
+   * Indicates a two-byte watermark.
+   */
+  kDifUartWatermarkByte2,
   /**
    * Indicates a four-byte watermark.
    */
@@ -80,35 +108,39 @@ typedef enum dif_uart_watermark {
    */
   kDifUartWatermarkByte16,
   /**
-   * Indicates a thirty-byte watermark.
+   * Indicates a thirty-two-byte watermark.
    */
-  kDifUartWatermarkByte30,
+  kDifUartWatermarkByte32,
+  /**
+   * Indicates a sixty-four-byte watermark.
+   */
+  kDifUartWatermarkByte62,
 } dif_uart_watermark_t;
 
 /**
- * A UART FIFO reset selection.
+ * A UART datapath to select various enables / FIFO resets.
  */
-typedef enum dif_uart_fifo_reset {
+typedef enum dif_uart_datapath {
   /**
-   * Indicates that the RX FIFO should be reset.
+   * Selects the RX datapath for enablement / reset.
    */
-  kDifUartFifoResetRx = 0,
+  kDifUartDatapathRx = 0,
   /**
-   * Indicates that the TX FIFO should be reset.
+   * Selects the TX datapath for enablement / reset.
    */
-  kDifUartFifoResetTx,
+  kDifUartDatapathTx,
   /**
-   * Indicates that both FIFOs should be reset.
+   * Selects both the RX and TX datapaths for enablement / reset.
    */
-  kDifUartFifoResetAll,
-} dif_uart_fifo_reset_t;
+  kDifUartDatapathAll,
+} dif_uart_datapath_t;
 
 /**
  * A UART system/line loopback configuration.
  */
 typedef enum dif_uart_loopback {
   /**
-   * Indicates that outgoing TX bits should be recieved through RX.
+   * Indicates that outgoing TX bits should be received through RX.
    */
   kDifUartLoopbackSystem = 0,
   /**
@@ -134,6 +166,20 @@ extern const uint32_t kDifUartFifoSizeBytes;
 OT_WARN_UNUSED_RESULT
 dif_result_t dif_uart_configure(const dif_uart_t *uart,
                                 dif_uart_config_t config);
+
+/**
+ * Set the RX break level.
+ *
+ * This is the number of characters that the RX line must be held low for to
+ * trigger the RX break error.
+ *
+ * @param uart A UART handle.
+ * @param rx_break_level The level to configure.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_uart_rx_break_level_set(
+    const dif_uart_t *uart, dif_uart_rx_break_level_t rx_break_level);
 
 /**
  * Sets the RX FIFO watermark.
@@ -165,6 +211,18 @@ OT_WARN_UNUSED_RESULT
 dif_result_t dif_uart_watermark_tx_set(const dif_uart_t *uart,
                                        dif_uart_watermark_t watermark);
 
+/**
+ * Sets the enablement state of one or both (TX/RX) datapaths.
+ *
+ * @param uart A UART handle.
+ * @param datapath The datapath to set the enablement state of (RX, TX or both).
+ * @param enabled The enablement state to set.
+ * @return The result of the operation.
+ */
+OT_WARN_UNUSED_RESULT
+dif_result_t dif_uart_set_enable(const dif_uart_t *uart,
+                                 dif_uart_datapath_t datapath,
+                                 dif_toggle_t enabled);
 /**
  * Sends bytes over UART.
  *
@@ -262,17 +320,16 @@ dif_result_t dif_uart_tx_bytes_available(const dif_uart_t *uart,
                                          size_t *num_bytes);
 
 /**
- * UART TX reset RX/TX FIFO.
- *
- * Resets one or both FIFOs. If the byte is in transit, this function will
- * not abort the operation.
+ * Resets one or both datapath FIFOs. If the byte is in transit, this function
+ * will not abort the operation.
  *
  * @param uart A UART handle.
- * @param reset FIFO to reset (RX, TX or both).
+ * @param fifo The FIFO to reset (RX, TX or both).
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_uart_fifo_reset(const dif_uart_t *uart,
-                                 dif_uart_fifo_reset_t reset);
+                                 dif_uart_datapath_t fifo);
 
 /**
  * Enables or disables a transmit/receive loopback.
@@ -294,6 +351,7 @@ dif_result_t dif_uart_fifo_reset(const dif_uart_t *uart,
  * @param enable Enable/disable control flag.
  * @return The result of the operation.
  */
+OT_WARN_UNUSED_RESULT
 dif_result_t dif_uart_loopback_set(const dif_uart_t *uart,
                                    dif_uart_loopback_t loopback,
                                    dif_toggle_t enable);

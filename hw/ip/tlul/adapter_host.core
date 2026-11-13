@@ -1,5 +1,5 @@
 CAPI=2:
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 name: "lowrisc:tlul:adapter_host:0.1"
@@ -8,10 +8,10 @@ description: "Req/Grant/RValid to TL-UL adapter (host)"
 filesets:
   files_rtl:
     depend:
-      - lowrisc:prim:all
+      - lowrisc:prim:assert
       - lowrisc:tlul:common
       - lowrisc:tlul:trans_intg
-      - lowrisc:constants:top_pkg
+      - lowrisc:virtual_constants:top_pkg
     files:
       - rtl/tlul_adapter_host.sv
     file_type: systemVerilogSource
@@ -37,6 +37,11 @@ filesets:
       # common waivers
       - lowrisc:lint:common
 
+  files_slang_waiver:
+    depend:
+      # common waivers
+      - lowrisc:lint:common
+
 parameters:
   SYNTHESIS:
     datatype: bool
@@ -49,6 +54,7 @@ targets:
       - tool_verilator   ? (files_verilator_waiver)
       - tool_ascentlint  ? (files_ascentlint_waiver)
       - tool_veriblelint ? (files_veriblelint_waiver)
+      - tool_slang       ? (files_slang_waiver)
       - files_rtl
     toplevel: tlul_adapter_host
 

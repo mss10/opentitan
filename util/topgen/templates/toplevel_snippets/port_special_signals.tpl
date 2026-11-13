@@ -1,0 +1,190 @@
+## Copyright lowRISC contributors (OpenTitan project).
+## Licensed under the Apache License, Version 2.0, see LICENSE for details.
+## SPDX-License-Identifier: Apache-2.0
+<%import topgen.lib as lib%>\
+<%from topgen.merge import alert_handler_signals%>\
+<%page args="top, feature_info, cio_info, domain"/>\
+% if feature_info["has_pinmux"]:
+% if lib.find_module(top["module"], "pinmux").get("domain") == domain:
+% if cio_info["num_mio_pads"] != 0:
+  // Multiplexed I/O
+  input  logic ${lib.bitarray(cio_info["num_mio_pads"], cio_info["max_sigwidth"])} mio_in_i,
+  output logic ${lib.bitarray(cio_info["num_mio_pads"], cio_info["max_sigwidth"])} mio_out_o,
+  output logic ${lib.bitarray(cio_info["num_mio_pads"], cio_info["max_sigwidth"])} mio_oe_o,
+
+% endif\
+
+% if cio_info["num_dio_total"] != 0:
+  // Dedicated I/O
+  input  logic ${lib.bitarray(cio_info["num_dio_total"], cio_info["max_sigwidth"])} dio_in_i,
+  output logic ${lib.bitarray(cio_info["num_dio_total"], cio_info["max_sigwidth"])} dio_out_o,
+  output logic ${lib.bitarray(cio_info["num_dio_total"], cio_info["max_sigwidth"])} dio_oe_o,
+
+% endif\
+
+  // Pad attributes to padring
+  output prim_pad_wrapper_pkg::pad_attr_t [pinmux_reg_pkg::NMioPads-1:0] mio_attr_o,
+  output prim_pad_wrapper_pkg::pad_attr_t [pinmux_reg_pkg::NDioPads-1:0] dio_attr_o,
+
+% endif
+% endif\
+
+% for irq_group, irqs in top['incoming_interrupt'].items():
+  // Incoming interrupt of group ${irq_group}
+  input logic [${len(irqs)-1}:0] incoming_interrupt_${irq_group}_i,
+% endfor\
+
+% for irq_group, irqs in top["outgoing_interrupt"].items():
+  // Outgoing interrupt of group ${irq_group}
+  output logic [top_${top["name"]}_pkg::NOutgoingInterrupts${irq_group.capitalize()}-1:0] outgoing_interrupt_${irq_group}_o,
+% endfor\
+
+% for name, plic in top["plic_info"].items():
+<% prefix = "_" + name if len(top["plic_info"]) > 1 else "" %>\
+% if plic["domain"] == domain:
+  % for pd in top["power"]["domains"]:
+<% if pd == domain: continue %>\
+<% pd_len = plic["count_pd"][pd] - 1 %>\
+    % if pd_len >= 0:
+  // Interrupts from power domain ${pd}
+  input  logic [${pd_len}:0] intr_vector${prefix}_pd_${pd.lower()}_i,
+    % endif
+  % endfor
+% else:
+<% pd_len = plic["count_pd"][domain] - 1 %>\
+  % if pd_len >= 0:
+  // Interrupts to PLIC ${name} in power domain ${plic["domain"]}
+  output logic [${pd_len}:0] intr_vector${prefix}_o,
+  % endif
+% endif
+% endfor
+
+% if feature_info["has_alert_handler"]:
+% for name, ah in top["alert_handler_info"].items():
+<% signals = alert_handler_signals(name) %>\
+% if ah["domain"] == domain:
+  % for pd in top["power"]["domains"]:
+<% if pd == domain: continue %>\
+<% pd_len = ah["count_pd"][pd] - 1 %>\
+    % if pd_len >= 0:
+  // Alerts from power domain ${pd}
+  output prim_alert_pkg::alert_rx_t [${pd_len}:0] ${signals[1]}_pd_${pd.lower()}_o,
+  input  prim_alert_pkg::alert_tx_t [${pd_len}:0] ${signals[0]}_pd_${pd.lower()}_i,
+    % endif
+  % endfor
+% else:
+<% pd_len = ah["count_pd"][domain] - 1 %>\
+  % if pd_len >= 0:
+  // Alerts to power domain ${ah["domain"]}
+  input  prim_alert_pkg::alert_rx_t [${pd_len}:0] ${signals[1]}_i,
+  output prim_alert_pkg::alert_tx_t [${pd_len}:0] ${signals[0]}_o,
+  % endif
+% endif
+% endfor
+
+% endif\
+
+% for alert_group in top['outgoing_alert'].keys():
+  // Outgoing alerts for group ${alert_group}
+  output prim_alert_pkg::alert_tx_t [top_${top["name"]}_pkg::NOutgoingAlerts${alert_group.capitalize()}Pd${domain.capitalize()}-1:0] outgoing_alert_${alert_group}_tx_o,
+  input  prim_alert_pkg::alert_rx_t [top_${top["name"]}_pkg::NOutgoingAlerts${alert_group.capitalize()}Pd${domain.capitalize()}-1:0] outgoing_alert_${alert_group}_rx_i,
+% if lib.find_module(top["module"], "clkmgr", domain=domain):
+  output prim_mubi_pkg::mubi4_t     [top_${top["name"]}_pkg::NOutgoingLpgs${alert_group.capitalize()}-1:0]   outgoing_lpg_cg_en_${alert_group}_o,
+% endif
+% if lib.find_module(top["module"], "rstmgr", domain=domain):
+  output prim_mubi_pkg::mubi4_t     [top_${top["name"]}_pkg::NOutgoingLpgs${alert_group.capitalize()}-1:0]   outgoing_lpg_rst_en_${alert_group}_o,
+% endif
+
+% endfor\
+
+% if lib.find_module(top["module"], "alert_handler", domain=domain):
+% for alert_group in top['incoming_alert'].keys():
+  // Incoming alerts for group ${alert_group}
+  input  prim_alert_pkg::alert_tx_t [top_${top["name"]}_pkg::NIncomingAlerts${alert_group.capitalize()}-1:0] incoming_alert_${alert_group}_tx_i,
+  output prim_alert_pkg::alert_rx_t [top_${top["name"]}_pkg::NIncomingAlerts${alert_group.capitalize()}-1:0] incoming_alert_${alert_group}_rx_o,
+  input  prim_mubi_pkg::mubi4_t     [top_${top["name"]}_pkg::NIncomingLpgs${alert_group.capitalize()}-1:0]   incoming_lpg_cg_en_${alert_group}_i,
+  input  prim_mubi_pkg::mubi4_t     [top_${top["name"]}_pkg::NIncomingLpgs${alert_group.capitalize()}-1:0]   incoming_lpg_rst_en_${alert_group}_i,
+% endfor
+% endif\
+
+<%
+  clkmgr = lib.find_module(top['module'], 'clkmgr')
+  rstmgr = lib.find_module(top['module'], 'rstmgr')
+  domain_clkmgr = clkmgr.get('domain')
+  ## The reset tree is driven by the rstmgr's primary partition.
+  domain_rstmgr = rstmgr.get('domain')
+
+  has_clkmgr = domain_clkmgr == domain
+  has_rstmgr_section = domain_rstmgr != domain
+  has_ext_clks = len(top['unmanaged_clocks']._asdict().values()) > 0
+  has_ext_rsts = len(top['unmanaged_resets']._asdict().values()) > 0
+  has_dft_section = not feature_info["dft_source_in_domain"][domain]
+
+  ## Clocks sourced from an IP inside the top are wired as inter-module connections. Do not expose
+  ## them as external clocks.
+  ext_clk_ports = [clk for clk, sig in top['clocks'].typed_clocks().ast_clks.items()
+                   if sig.src.module is None]
+
+  ## Find out which section is the last one to properly terminate the port list with no comma.
+  ## The rstmgr has always a section, so the clkmgr does not care.
+  rstmgr_last = not (has_ext_clks or has_ext_rsts or has_dft_section)
+  ext_clks_last = has_ext_clks and not (has_ext_rsts or has_dft_section)
+  ext_rsts_last = has_ext_rsts and not has_dft_section
+%>\
+% if has_clkmgr:
+  % if ext_clk_ports:
+  // Externally supplied clocks
+  % for clk in ext_clk_ports:
+  input ${clk},
+  % endfor
+  % endif\
+
+  % if feature_info["ast_is_internal"]:
+  // Clocks from clkmgr to other domains
+  output clkmgr_pkg::clkmgr_out_t    ${clkmgr['name']}_clocks_o,
+  output clkmgr_pkg::clkmgr_cg_en_t  ${clkmgr['name']}_cg_en_o,
+  % endif
+% else:
+  // Clocks from clkmgr in power domain ${domain_clkmgr}
+  input clkmgr_pkg::clkmgr_out_t    ${clkmgr['name']}_clocks_i,
+  input clkmgr_pkg::clkmgr_cg_en_t  ${clkmgr['name']}_cg_en_i,
+% endif
+
+% if has_rstmgr_section:
+  // Resets from rstmgr in power domain ${domain_rstmgr}
+  input rstmgr_pkg::rstmgr_out_t    ${rstmgr['name']}_resets_i,
+  input rstmgr_pkg::rstmgr_rst_en_t ${rstmgr['name']}_rst_en_i${"" if rstmgr_last else ","}
+% elif feature_info["ast_is_internal"]:
+  // Resets from rstmgr to other domains
+  output rstmgr_pkg::rstmgr_out_t    ${rstmgr['name']}_resets_o,
+  output rstmgr_pkg::rstmgr_rst_en_t ${rstmgr['name']}_rst_en_o${"" if rstmgr_last else ","}
+% endif
+
+% if has_ext_clks:
+  // Unmanaged external clocks
+% for clk in top['unmanaged_clocks']._asdict().values():
+  input                        ${clk.signal_name},
+  input prim_mubi_pkg::mubi4_t ${clk.cg_en_signal}${"" if loop.last and ext_clks_last else ","}
+% endfor
+
+% endif\
+
+% if has_ext_rsts:
+  // Unmanaged external resets
+  % for rst in top['unmanaged_resets']._asdict().values():
+  input                        ${rst.signal_name},
+  ## TODO: handle trailing comma properly
+  input prim_mubi_pkg::mubi4_t ${rst.rst_en_signal_name}${"" if loop.last and ext_rsts_last else ","}
+  % endfor
+% endif\
+
+## TODO: should we always expose scandmode_o and manually wire it up in the corresponding domain?
+% if has_dft_section:
+  // Manual DFT signals
+  ## If the scansource is internal, we expose it via an external connection in the top.hjson file.
+  input                        scan_rst_ni, // reset used for test mode
+  % if feature_info["has_scan_en"][domain]:
+  input                        scan_en_i,
+  % endif
+  input prim_mubi_pkg::mubi4_t scanmode_i   // lc_ctrl_pkg::On for Scan
+% endif\

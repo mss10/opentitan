@@ -1,4 +1,4 @@
-# Copyright lowRISC contributors.
+# Copyright lowRISC contributors (OpenTitan project).
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -77,7 +77,8 @@ class GPRs(RegFile):
     def get_reg(self, idx: int) -> Reg:
         if idx == 0:
             # If idx == 0, this is a zeros register that should ignore writes.
-            # Return a fresh Reg with no parent, so writes to it have no effect.
+            # Return a fresh Reg with no parent, so writes to it have no
+            # effect.
             return Reg(None, 0, 32, 0)
         elif idx == 1:
             # If idx == 1, we return self._x1: element 1 of the underlying
@@ -106,6 +107,12 @@ class GPRs(RegFile):
         self._x1.abort()
         self.call_stack_err = False
 
-    def start(self) -> None:
-        '''Executed on start of operation. Clears call stack.'''
+    def empty_call_stack(self) -> None:
+        '''Clear call stack.'''
         self._x1.start()
+
+    def wipe(self) -> None:
+        '''Wipe all registers to zero and clear the call stack'''
+        self._x1.start()
+        for idx in range(2, 32):
+            self.get_reg(idx).write_invalid()

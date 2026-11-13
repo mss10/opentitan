@@ -1,44 +1,47 @@
-// Copyright lowRISC contributors.
+// Copyright lowRISC contributors (OpenTitan project).
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
 // smoke test vseq
 class csrng_smoke_vseq extends csrng_base_vseq;
   `uvm_object_utils(csrng_smoke_vseq)
-
   `uvm_object_new
 
+  csrng_item   cs_item;
+
   task body();
-    ral.ctrl.read_int_state.set(4'hA);
-    // Wait for CSRNG cmd_rdy
-    csr_spinwait(.ptr(ral.sw_cmd_sts.cmd_rdy), .exp_data(1'b1));
+    super.body();
 
-    // Write CSRNG Cmd_Req - Instantiate Command
-    wr_cmd_req(.acmd(csrng_pkg::INS), .clen(0), .flags(1), .glen(0));
+    cs_item = csrng_item::type_id::create("cs_item");
 
-    // Expect/Clear interrupt bit
-    csr_spinwait(.ptr(ral.intr_state.cs_cmd_req_done), .exp_data(1'b1));
-    check_interrupts(.interrupts((1 << CmdReqDone)), .check_set(1'b1));
+    // Create/Write CSRNG Cmd_Req - Instantiate Command
+    `DV_CHECK_RANDOMIZE_WITH_FATAL(cs_item,
+                                   cs_item.acmd  == csrng_pkg::INS;
+                                   cs_item.flags == MuBi4True;
+                                   cs_item.clen  == 4'hc;)
+    `uvm_info(`gfn, $sformatf("%s", cs_item.convert2string()), UVM_DEBUG)
+    send_cmd_req(cfg.m_sw_app_idx, cs_item);
 
-    // Write CSRNG Cmd_Req Register - Generate Command
-    wr_cmd_req(.acmd(csrng_pkg::GEN), .clen(0), .flags(0), .glen(1));
+    // Create/Write CSRNG Cmd_Req - Generate Command
+    cs_item.acmd  = csrng_pkg::GEN;
+    cs_item.clen  = 'h0;
+    cs_item.flags = MuBi4True;
+    cs_item.glen  = 'h1;
+    `uvm_info(`gfn, $sformatf("%s", cs_item.convert2string()), UVM_DEBUG)
+    send_cmd_req(cfg.m_sw_app_idx, cs_item);
 
-    // Wait for CSRNG genbits_vld
-    csr_spinwait(.ptr(ral.genbits_vld.genbits_vld), .exp_data(1'b1));
+    // Check internal state
+    if (cfg.check_int_state) begin
+      for (int i = 0; i < cfg.m_num_apps; i++)
+        cfg.check_internal_state(.app(i), .compare(1));
+    end
 
-    // TODO: remove code below and use scoreboard values
-    //Read CSRNG genbits
-//    for (int i = 0; i < 4; i++) begin
-//      csr_rd_check(.ptr(ral.genbits.genbits), .compare_value(ZERO_SEED_GENBITS[i]));
-//    end
-      csr_rd_check(.ptr(ral.genbits.genbits), .compare_value(32'h735b27a0));
-      csr_rd_check(.ptr(ral.genbits.genbits), .compare_value(32'h497b246f));
-      csr_rd_check(.ptr(ral.genbits.genbits), .compare_value(32'h9a8f9420));
-      csr_rd_check(.ptr(ral.genbits.genbits), .compare_value(32'h91618fe9));
-
-    // Expect/Clear interrupt bit
-    csr_spinwait(.ptr(ral.intr_state.cs_cmd_req_done), .exp_data(1'b1));
-    check_interrupts(.interrupts((1 << CmdReqDone)), .check_set(1'b1));
+    // Create/Write CSRNG Cmd_Req - Generate Command
+    cs_item.acmd  = csrng_pkg::UNI;
+    cs_item.clen  = 'h0;
+    cs_item.flags = MuBi4True;
+    cs_item.glen  = 'h0;
+    `uvm_info(`gfn, $sformatf("%s", cs_item.convert2string()), UVM_DEBUG)
+    send_cmd_req(cfg.m_sw_app_idx, cs_item);
   endtask : body
-
 endclass : csrng_smoke_vseq
